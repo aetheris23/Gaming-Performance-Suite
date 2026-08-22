@@ -100,20 +100,23 @@ Scaling). What this suite does:
 ## File layout
 
 ```
-Start-GamingSuite.bat        ← interactive menu
-Start-Watcher-Hidden.bat     ← background watcher, no window (recommended)
-Stop-GamingSuite.bat         ← stops the watcher instantly, restores everything
+.gitignore                    keeps generated ZIPs and runtime logs out of git
+build.bat                     one-click rebuild of GamingPerformanceSuite.zip
+Start-GamingSuite.bat         ← interactive menu
+Start-Watcher-Hidden.bat      ← background watcher, no window (recommended)
+Stop-GamingSuite.bat          ← stops the watcher instantly, restores everything
 src/
-  Main.ps1                   menu + hidden background mode (-BackgroundWatch)
-  Config.ps1                 game list, thresholds, scale %, frame-gen bridge
-  Common.psm1                logging, privileges, stop-event / single-instance helpers
-  GameBoost.psm1             FPS stability engine + watcher loop
-  DisplayScale.psm1          dynamic display-mode switching + native restore
-  GpuDetect.psm1             GPU inventory: finds iGPUs AND dGPUs, classifies
-                             each, flags legacy hardware for the safe profile
+  Main.ps1                    menu + hidden background mode (-BackgroundWatch)
+  Config.ps1                  game list, thresholds, scale %, frame-gen bridge
+  Common.psm1                 logging, privileges, stop-event / single-instance helpers
+  GameBoost.psm1              FPS stability engine + watcher loop
+  DisplayScale.psm1           dynamic display-mode switching + native restore
+  GpuDetect.psm1              GPU inventory: finds iGPUs AND dGPUs, classifies
+                              each, flags legacy hardware for the safe profile
+  Build-Suite.ps1             zip builder used by build.bat
 logs/
-  runtime/watcher.pid        background watcher PID (removed on clean stop)
-  suite_YYYYMMDD.log         everything the suite does, timestamped
+  runtime/watcher.pid         background watcher PID (removed on clean stop)
+  suite_YYYYMMDD.log          everything the suite does, timestamped
 ```
 
 ## Stopping the program
@@ -135,6 +138,19 @@ logs/
 - A single-instance mutex prevents accidental double launches.
 - The lower display mode is applied session-only (`CDS_DYNAMIC`): even if the PC loses
   power mid-game, the mode reverts on reboot.
+
+## Building the ZIP from source
+
+The ready-to-run **`GamingPerformanceSuite.zip`** is deliberately **not** stored
+in the repository (`*.zip` and runtime `logs/` are excluded by `.gitignore`).
+After cloning or downloading, generate it with one command:
+
+- Double-click **`build.bat`**, or
+- run: `powershell -NoProfile -ExecutionPolicy Bypass -File src\Build-Suite.ps1`
+
+The builder verifies that every required source file exists and repacks the
+portable archive (clean forward-slash entry names, no admin rights needed).
+Then continue with *Quick start* above.
 
 ## Portable install (any drive, zero setup)
 

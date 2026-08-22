@@ -1,0 +1,10 @@
+# Generated artifact - rebuild any time with build.bat (or src\Build-Suite.ps1)
+*.zip
+
+# Runtime output created while the suite runs
+logs/
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+~$*
