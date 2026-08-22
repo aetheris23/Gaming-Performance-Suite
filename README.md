@@ -17,14 +17,15 @@ Prefer a menu? Double-click **`Start-GamingSuite.bat`** for interactive options.
 
 ## What happens when you start a game
 
-The watcher polls cheaply every 10 s. On detection of a known game process it:
+The watcher polls cheaply — every 10 s while a game runs, every 25 s while idle
+(both tunable in `src/Config.ps1`). On detection of a known game process it:
 
 | Step | Action |
 |---|---|
 | Detect | Classifies the title (Emulator / Steam / Competitive / Default) |
 | Boost | Priority → High, steered off core 0, background hogs silenced |
 | **Scale down** | Display switches to a lower same-aspect resolution → render target shrinks → GPU load drops hard |
-| Frame pacing | Global timer locked to 1 ms for smoother motion |
+| Frame pacing | Global timer locked to 1 ms — engaged only for the game session and released on exit, so idle interrupt load stays near zero |
 | Optional | If configured, launches your frame-generation app alongside the game |
 
 On detected **legacy GPUs** the *Scale down* step is skipped automatically
@@ -135,6 +136,18 @@ logs/
   processes, and its polling loop never touches WMI/CIM or re-queries the GPU
   (the GPU inventory *and* the legacy-hardware decision are one-shot snapshots
   resolved from cache at startup, milliseconds before any game launches).
+- **Stutter-safe housekeeping**: the 1 ms pacing timer and the standby-memory
+  purge are engaged only around actual game sessions — the purge lands in the
+  loading screen at launch; mid-game it requires free RAM below
+  `CriticalRamFloorMB` (default 768 MB) *and* a `StandbyPurgeCooldownSeconds`
+  (default 15 min) gap between purges. This removes the periodic hitch that
+  timer-based purges cause.
+- **Adaptive cadence**: scans every `WatcherPollSeconds` (10 s) while gaming,
+  every `IdlePollSeconds` (25 s) while idle — half the background work of a
+  fixed-interval poller on low-spec laptops.
+- **Lazy native interop**: display/timer/memory P/Invoke types compile on first
+  real use instead of at module import, so watcher startup skips the C# compiler
+  spin-up entirely (it lands inside a game's loading screen if ever needed).
 - A single-instance mutex prevents accidental double launches.
 - The lower display mode is applied session-only (`CDS_DYNAMIC`): even if the PC loses
   power mid-game, the mode reverts on reboot.

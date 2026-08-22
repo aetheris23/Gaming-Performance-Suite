@@ -17,8 +17,12 @@
 
 Set-StrictMode -Version Latest
 
-# GPU inventory (iGPU/dGPU identification) - one-shot at startup
-Import-Module (Join-Path $PSScriptRoot 'GpuDetect.psm1') -Force
+# GPU inventory (iGPU/dGPU identification) - one-shot at startup.
+# Skip the reload when Main.ps1 already imported it (-Force would re-parse
+# the whole module and adds avoidable startup lag on low-spec machines).
+if (-not (Get-Module -Name 'GpuDetect')) {
+    Import-Module (Join-Path $PSScriptRoot 'GpuDetect.psm1') -Force
+}
 
 function Write-GpuInventory {
     <# Logs every detected adapter once (integrated AND discrete),
@@ -46,7 +50,14 @@ function Write-GpuInventory {
 # ------------------------------------------------------------
 # Native interop: timer resolution + standby memory purge
 # ------------------------------------------------------------
-if (-not ('Suite.NativeBoost' -as [type])) {
+function Add-NativeBoostType {
+    <#
+        Compiles the timer/memory interop lazily, on first real use.
+        None of these native calls are needed while the watcher idles,
+        so deferring the one-time C# compile keeps startup instant on
+        low-spec machines (it lands at first game detection instead).
+    #>
+    if ('Suite.NativeBoost' -as [type]) { return }
     Add-Type -Namespace Suite -Name NativeBoost -MemberDefinition @'
 [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint uPeriod);
 [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint uPeriod);
@@ -79,6 +90,7 @@ $script:TimerActive = $false
 # Free RAM via a single native call (no WMI/CIM session overhead)
 # ------------------------------------------------------------
 function Get-FreeRamMB {
+    Add-NativeBoostType
     $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
     $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
     [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
@@ -195,6 +207,7 @@ function Set-MultimediaTweaks {
 # ------------------------------------------------------------
 function Set-TimerResolution {
     param([switch]$Restore)
+    Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
             [void][Suite.NativeBoost]::timeEndPeriod(1)
@@ -219,6 +232,7 @@ function Set-TimerResolution {
 function Clear-StandbyMemory {
     Assert-AdminOrThrow
 
+    Add-NativeBoostType
     [void](Enable-Privilege 'SeProfileSingleProcessPrivilege')
 
     # SystemMemoryListInformation(80): command 4 = PurgeStandbyList
@@ -500,13 +514,22 @@ function Undo-FsoCompatFlags {
 #    instantly-responsive stop signal.
 #    LegacySettings: conservative profile for older GPUs -
 #    SkipResolutionSwitch / DisableFullscreenOptimizations flags.
+#    Stutter-safe resource policy: the 1 ms global timer and the
+#    standby-memory purge are engaged only around actual game
+#    sessions (purge lands in the loading screen; mid-game purges
+#    require a critical RAM floor AND a long cooldown), and the
+#    scan cadence slows down while no game is running.
 # ------------------------------------------------------------
 function Start-GameWatcher {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$GameNames,
-        [int]$PollSeconds = 10,
-        [int]$FreeRamThresholdMB = 2048,
+        [int]$PollSeconds = 10,              # scan cadence while a game is running
+        [int]$IdlePollSeconds = 25,          # slower cadence while NO game runs (idle load)
+        [int]$FreeRamThresholdMB = 2048,     # deprecated: mid-game purges use CriticalRamFloorMB
+        [int]$CriticalRamFloorMB = 768,      # standby purge during play ONLY below this floor
+        [int]$PurgeCooldownSeconds = 900,    # minimum seconds between two standby purges
+        [switch]$PurgeOnGameLaunch,          # one purge when a game session starts
         [hashtable]$ProfileOverrides = @{},
         [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
@@ -519,7 +542,9 @@ function Start-GameWatcher {
     # Never compete with the game: our own watcher yields under any load
     try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 
-    Set-TimerResolution
+    # NOTE: the 1 ms timer is NOT taken here. Holding it for the whole
+    # session raised idle interrupt load on low-spec laptops; it is now
+    # engaged only while a game is actually running (see loop below).
 
     Write-GpuInventory
 
@@ -528,7 +553,8 @@ function Start-GameWatcher {
     if ($skipScale)  { Write-Log 'Legacy GPU mode: dynamic resolution switching is DISABLED for this session.' 'INFO' }
     if ($fsoDisable) { Write-Log 'Legacy GPU mode: fullscreen optimizations will be disabled for detected games.' 'INFO' }
 
-    Write-Log ("Game watcher started (poll {0}s). Watching: {1}" -f $PollSeconds, ($GameNames -join ',')) 'ACTION'
+    Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching: {2}" -f `
+        $PollSeconds, [Math]::Max($PollSeconds, $IdlePollSeconds), ($GameNames -join ',')) 'ACTION'
     Write-Log 'Games are auto-classified (Emulator / Steam / Competitive / Default) on launch.' 'INFO'
     if ($StopEvent) { Write-Log 'Background mode: stop via Stop-GamingSuite.bat.' 'INFO' }
     else            { Write-Log 'Press Ctrl+C to stop the watcher.' 'INFO' }
@@ -539,6 +565,10 @@ function Start-GameWatcher {
     $fgByUs    = $false
     $fgPid     = 0
     $pollMs    = $PollSeconds * 1000
+    $idleMs    = [Math]::Max($pollMs, $IdlePollSeconds * 1000)
+    $timerOn       = $false                  # 1 ms pacing timer currently engaged
+    $lastPurgeUtc  = [datetime]::MinValue    # cooldown gate for mid-game purges
+    $sessionPurged = $false                  # launch-time purge done for this game session
 
     try {
         while ($true) {
@@ -557,6 +587,21 @@ function Start-GameWatcher {
 
                         Write-Log ("Detected '{0}' (PID {1}) -> {2} profile [{3}]" -f `
                             $game.ProcessName, $game.Id, $profName, $prof.Description) 'ACTION'
+
+                        # ---- frame pacing + memory hygiene at the quietest moment ----
+                        # Both actions briefly cost system-wide time: the 1 ms timer
+                        # raises interrupt frequency and a standby purge stalls the
+                        # memory manager. Doing them here means the game's loading
+                        # screen absorbs it instead of live gameplay.
+                        if (-not $timerOn) {
+                            Set-TimerResolution
+                            $timerOn = $true
+                        }
+                        if ($PurgeOnGameLaunch -and -not $sessionPurged) {
+                            try   { Clear-StandbyMemory } catch { }
+                            $sessionPurged = $true
+                            $lastPurgeUtc  = [datetime]::UtcNow
+                        }
 
                         Invoke-ProcessBoost -Process $game -Profile $prof
 
@@ -619,26 +664,44 @@ function Start-GameWatcher {
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
                     }
                 }
+                # Release the pacing timer while idle (guarded, so this runs
+                # once per game session, not on every idle poll).
+                if ($timerOn) {
+                    Set-TimerResolution -Restore
+                    $timerOn = $false
+                }
+                $sessionPurged = $false
             }
 
-            # Memory pressure check -> proactive purge BEFORE the stutter hits
+            # Memory pressure check - deliberately rare now. A standby purge
+            # stalls the whole memory manager (a visible hitch if it lands
+            # mid-frame), so during play it happens ONLY below the critical
+            # floor AND at most once per cooldown window. Anything less urgent
+            # waits for the next game launch, where the loading screen absorbs
+            # the cost.
             if ($running.Count -gt 0) {
-                $freeMB = Get-FreeRamMB
-                if ($freeMB -lt $FreeRamThresholdMB) {
-                    Write-Log "Free RAM low (${freeMB} MB) - purging standby lists preemptively..." 'WARN'
-                    Clear-StandbyMemory
+                $nowUtc = [datetime]::UtcNow
+                if (($nowUtc - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
+                    $freeMB = Get-FreeRamMB
+                    if ($freeMB -lt $CriticalRamFloorMB) {
+                        Write-Log ("Free RAM critical ({0} MB) - cooldown-gated standby purge..." -f $freeMB) 'WARN'
+                        Clear-StandbyMemory
+                        $lastPurgeUtc = [datetime]::UtcNow
+                    }
                 }
             }
 
-            # Park on a kernel wait instead of sleeping: zero busy cost,
-            # and the stop signal wakes us IMMEDIATELY.
+            # Adaptive parking: full scan cadence while a game runs, slower
+            # cadence while idle. Either way we park on the kernel event, so
+            # the stop signal still wakes us instantly.
+            $waitMs = if ($running.Count -gt 0) { $pollMs } else { $idleMs }
             if ($StopEvent) {
-                if ($StopEvent.WaitOne($pollMs)) {
+                if ($StopEvent.WaitOne($waitMs)) {
                     Write-Log 'Stop signal received.' 'ACTION'
                     break
                 }
             } else {
-                Start-Sleep -Seconds $PollSeconds
+                Start-Sleep -Milliseconds $waitMs
             }
         }
     } finally {

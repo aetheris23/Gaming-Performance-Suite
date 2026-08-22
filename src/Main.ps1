@@ -25,6 +25,12 @@ $pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] 
 $ramFloorMB = if ($cfg['FreeRamThresholdMB']) { [int]$cfg['FreeRamThresholdMB'] } else { 2048 }
 $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
 
+# Stutter-safe standby-purge policy (see Config.ps1 for details)
+$idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds'] }             else { 25 }
+$critFloorMB  = if ($cfg['CriticalRamFloorMB'])          { [int]$cfg['CriticalRamFloorMB'] }          else { 768 }
+$purgeCoolSec = if ($cfg['StandbyPurgeCooldownSeconds']) { [int]$cfg['StandbyPurgeCooldownSeconds'] } else { 900 }
+$purgeLaunch  = if ($null -ne $cfg['PurgeOnGameLaunch']) { [bool]$cfg['PurgeOnGameLaunch'] }          else { $true }
+
 $resSettings = @{
     ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
@@ -89,7 +95,9 @@ function Invoke-Watcher {
         }
 
         Start-GameWatcher -GameNames $gameNames -PollSeconds $pollSecs `
-            -FreeRamThresholdMB $ramFloorMB -ProfileOverrides $profOv `
+            -IdlePollSeconds $idleSecs -FreeRamThresholdMB $ramFloorMB `
+            -CriticalRamFloorMB $critFloorMB -PurgeCooldownSeconds $purgeCoolSec `
+            -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -StopEvent $StopEvent
     } finally {

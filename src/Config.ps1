@@ -22,8 +22,18 @@
         'Minecraft.Windows', 'javaw'# Minecraft (store + java)
     )
 
-    WatcherPollSeconds     = 10      # how often to scan for game processes
-    FreeRamThresholdMB     = 2048    # purge standby RAM below this while gaming
+    WatcherPollSeconds     = 10      # scan cadence while a game is running
+    IdlePollSeconds        = 25      # slower cadence while NO game runs (lighter idle load)
+
+    # ---- Standby memory (stutter-safe policy) -----------------
+    # A standby-list purge stalls the whole memory manager, so it is
+    # never repeated mid-gameplay on a timer. It runs once when a game
+    # is detected (the loading screen absorbs the cost) and during play
+    # only below the critical floor, at most once per cooldown.
+    PurgeOnGameLaunch           = $true   # one purge right when a game is detected
+    CriticalRamFloorMB          = 768     # mid-game purge ONLY below this free-RAM floor
+    StandbyPurgeCooldownSeconds = 900     # minimum seconds between two purges
+    FreeRamThresholdMB          = 2048    # deprecated (kept for compatibility)
 
     # ---- Per-game classification -----------------------------
     # The watcher auto-detects: Emulator / Steam / Competitive / Default

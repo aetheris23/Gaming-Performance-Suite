@@ -1,10 +1,29 @@
-# Generated artifact - rebuild any time with build.bat (or src\Build-Suite.ps1)
+# ============================================================
+#  .gitignore - Gaming Performance Suite
+#  Everything listed here is a generated/runtime artifact that
+#  can be rebuilt or recreated at any time; sources stay in git.
+# ============================================================
+
+# Build artifacts - rebuild any time with build.bat (or src\Build-Suite.ps1)
 *.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
 
-# Runtime output created while the suite runs
+# Runtime output created while the suite runs (watcher.pid, suite_*.log)
 logs/
+*.log
+*.pid
 
-# OS / editor cruft
+# OS / editor / temp cruft
 Thumbs.db
 desktop.ini
 ~$*
+*.tmp
+*.tmp~
+*.bak
+*.swp
+*~
+.DS_Store

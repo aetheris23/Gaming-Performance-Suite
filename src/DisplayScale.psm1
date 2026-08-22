@@ -22,7 +22,15 @@
 
 Set-StrictMode -Version Latest
 
-if (-not ('Suite.NativeDisplay' -as [type])) {
+function Add-NativeDisplayType {
+    <#
+        Compiles the display interop lazily, on first real use.
+        Add-Type spins up the C# compiler, which costs noticeable time
+        on low-spec machines; deferring it keeps watcher startup fast
+        (the one-time compile then lands inside the game's loading
+        screen instead of before the watcher is even up).
+    #>
+    if ('Suite.NativeDisplay' -as [type]) { return }
     Add-Type -Namespace Suite -Name NativeDisplay -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
 public static extern bool EnumDisplaySettingsExW(string lpszDeviceName,
@@ -89,6 +97,7 @@ $script:ScaledActive   = $false
 
 function Get-CurrentDisplayMode {
     <# Returns the ACTIVE mode of the primary display as a hashtable. #>
+    Add-NativeDisplayType
     $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
     if (-not [Suite.NativeDisplay]::EnumDisplaySettingsExW($null, $script:ENUM_CURRENT, [ref]$dm, 0)) {
         throw 'EnumDisplaySettingsExW failed for the primary display.'
@@ -103,6 +112,7 @@ function Get-CurrentDisplayMode {
 
 function Get-AvailableDisplayModes {
     <# All distinct WxH@Hz modes the display advertises. #>
+    Add-NativeDisplayType
     $modes = @()
     for ($i = 0; $i -lt 400; $i++) {
         $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
@@ -184,6 +194,7 @@ function Enable-LowResolutionMode {
 
     if ($script:ScaledActive) { return $true }
 
+    Add-NativeDisplayType
     $native = Get-CurrentDisplayMode
     $target = Select-ScaledMode -Native $native -ScalePercent $ScalePercent -PreferInteger:$PreferInteger
     if (-not $target) {
@@ -222,6 +233,7 @@ function Restore-NativeResolution {
     #>
     if (-not $script:ScaledActive -or -not $script:NativeMode) { return }
 
+    Add-NativeDisplayType
     $n = $script:NativeMode
     try {
         $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
