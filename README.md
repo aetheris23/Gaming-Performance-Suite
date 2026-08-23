@@ -3,8 +3,9 @@
 Zero-install Windows toolkit (PowerShell 5.1 — preinstalled on every Windows 10/11 PC,
 nothing to download or install) that stabilizes FPS in games like **Valorant, Steam
 titles, and PS2 emulators (PCSX2)**, **cuts GPU load dynamically** while you play,
-**identifies every integrated and discrete GPU** in your system, and **adapts itself
-to older graphics hardware** automatically.
+**identifies every integrated and discrete GPU** in your system, **tunes your network
+for lower latency and fewer packet-loss stalls**, **keeps your microphone clear for
+other players**, and **adapts itself to older graphics hardware** automatically.
 
 ## Quick start
 
@@ -20,19 +21,67 @@ Prefer a menu? Double-click **`Start-GamingSuite.bat`** for interactive options.
 The watcher polls cheaply — every 10 s while a game runs, every 25 s while idle
 (both tunable in `src/Config.ps1`). On detection of a known game process it:
 
-| Step | Action |
+| When | Action |
 |---|---|
-| Detect | Classifies the title (Emulator / Steam / Competitive / Default) |
-| Boost | Priority → High, steered off core 0, background hogs silenced |
-| **Scale down** | Display switches to a lower same-aspect resolution → render target shrinks → GPU load drops hard |
-| Frame pacing | Global timer locked to 1 ms — engaged only for the game session and released on exit, so idle interrupt load stays near zero |
-| Optional | If configured, launches your frame-generation app alongside the game |
+| Instantly | Classifies the title (Emulator / Steam / Competitive / Default); priority → High; steered off core 0; frame pacing timer engaged |
+| ~1 s later | Legacy FSO flag + optional frame-generation companion app |
+| ~2 s later | Standby-memory purge (the loading screen absorbs the brief stall) |
+| ~5 s later | Display switches to a lower same-aspect resolution → render target shrinks → GPU load drops hard |
+
+The heavy, system-wide steps are **staged seconds apart** instead of fired
+back-to-back, so the game's loading screen absorbs each transition — this removes
+the stutter/frame-drop burst that used to hit shortly after launching a game.
 
 On detected **legacy GPUs** the *Scale down* step is skipped automatically
 (see *Legacy GPU support* below); every other step still applies.
 
+While you play, background hogs (Steam web helper, browsers, Spotify) are silenced —
+but **voice-chat apps (Discord & friends) never are**, and optionally get an
+*AboveNormal* bump so microphone capture/encoding stays smooth.
+
 When you close the game — or stop the watcher — everything reverts automatically:
-**native resolution restored**, priorities reset, timer released.
+**native resolution restored**, priorities reset, timer released, network values
+returned to your originals.
+
+## Background reliability & crash recovery
+
+Every change the watcher makes (display mode, priorities, FSO flags, network
+values, frame-gen tool PID) is mirrored **at the moment it is made** into a
+recovery journal (`logs/runtime/watcher_state.json`). This means:
+
+- **Stopping is safe however it happens.** `Stop-GamingSuite.bat` signals the
+  kernel event and then *waits* for the watcher to finish restoring everything
+  (up to 12 s). Only if that fails is the process killed — and the journal then
+  replays all missing undo steps automatically.
+- **Crashes / closed consoles / power loss repair themselves.** The next watcher
+  start (or next `Stop-GamingSuite.bat`) detects the orphaned journal, restores
+  native resolution, un-silences apps, clears FSO flags, closes an orphaned
+  frame-gen tool and reverts network tuning — then starts fresh.
+- The old failure mode — a hard kill 600 ms into cleanup leaving the screen
+  scaled down and games stuck at High priority — cannot happen anymore.
+
+## Network optimization during gameplay
+
+Applied once when the watcher starts (before the game opens its sockets) and
+reverted from the journal when it stops (`src/NetTune.psm1`, config-gated):
+
+| Tweak | Effect |
+|---|---|
+| `NetworkThrottlingIndex = 0xFFFFFFFF` | Windows' periodic multimedia network throttle is off → no periodic packet-delay spikes mid-match |
+| `TcpAckFrequency=1` + `TCPNoDelay=1` per interface | immediate ACKs, no Nagle batching → lower RTT and fewer burst-loss stalls (helps on Wi-Fi/VPN) |
+| NIC `PnPCapabilities` power-saving off | adapter never powers down between bursts → kills micro-dropouts that look like packet loss |
+
+All original registry values are recorded before writing and restored exactly.
+Menu options `6`/`7` apply/revert manually.
+
+## Microphone clarity for other players
+
+- Voice apps (Discord, TeamSpeak, Voicemeter, Zoom, Skype, Webex — extendable in
+  `Config.ps1`) are **excluded from background silencing**, always.
+- Optionally they get **AboveNormal priority during play** so voice encode/capture
+  threads never starve behind the boosted game (weak-CPU laptops benefit most).
+- MMCSS **Audio / Pro Audio / Capture** classes are raised so Windows keeps the
+  audio capture pipeline prioritized system-wide.
 
 ## Resolution scaling & upscale quality
 
@@ -108,25 +157,33 @@ Start-Watcher-Hidden.bat      ← background watcher, no window (recommended)
 Stop-GamingSuite.bat          ← stops the watcher instantly, restores everything
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
-  Config.ps1                  game list, thresholds, scale %, frame-gen bridge
-  Common.psm1                 logging, privileges, stop-event / single-instance helpers
+  Config.ps1                  game list, thresholds, scale %, frame-gen bridge,
+                              network tuning, voice clarity
+  Common.psm1                 logging, privileges, stop-event / single-instance
+                              helpers + recovery journal (save/repair)
   GameBoost.psm1              FPS stability engine + watcher loop
   DisplayScale.psm1           dynamic display-mode switching + native restore
   GpuDetect.psm1              GPU inventory: finds iGPUs AND dGPUs, classifies
                               each, flags legacy hardware for the safe profile
+  NetTune.psm1                network latency profile + mic/MMCSS clarity
   Build-Suite.ps1             zip builder used by build.bat
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)
+  runtime/watcher_state.json  crash-recovery journal (removed on clean stop)
   suite_YYYYMMDD.log          everything the suite does, timestamped
 ```
 
 ## Stopping the program
 
-- **`Stop-GamingSuite.bat`** — wakes the watcher instantly through a kernel event;
-  it restores native resolution, priorities and timer, then exits.
+- **`Stop-GamingSuite.bat`** — wakes the watcher instantly through a kernel event,
+  then *waits* while it restores native resolution, priorities, timer and network
+  values. If the process is beyond saving it is killed — and the recovery journal
+  automatically replays every missing undo step.
 - In the interactive menu: option `5`.
 - Closing a game alone already restores the resolution; stopping the watcher is only
   needed when you're done playing entirely.
+- If anything ever ends uncleanly (power loss, forced kill, crash), the next start
+  or stop repairs the leftovers on its own — no manual cleanup needed.
 
 ## Resource footprint (designed not to hurt your FPS)
 
@@ -136,6 +193,10 @@ logs/
   processes, and its polling loop never touches WMI/CIM or re-queries the GPU
   (the GPU inventory *and* the legacy-hardware decision are one-shot snapshots
   resolved from cache at startup, milliseconds before any game launches).
+- **Stutter-free ramp-up**: heavy steps (standby purge, display-mode switch) run
+  staged seconds apart after detection — the loading screen absorbs each one; the
+  loop only wakes slightly earlier while stages are pending (a few extra 200 ms
+  kernel waits per game launch, nothing periodic).
 - **Stutter-safe housekeeping**: the 1 ms pacing timer and the standby-memory
   purge are engaged only around actual game sessions — the purge lands in the
   loading screen at launch; mid-game it requires free RAM below
@@ -174,6 +235,8 @@ folder; nothing is registered system-wide. Delete the folder and it is completel
 ## Notes & safety
 
 - All actions use standard Windows APIs/registry values; no installs, no downloads.
+- Network/voice registry tweaks are journaled and reverted exactly; menu option `7`
+  restores Windows defaults for the values the suite manages.
 - Anti-cheat processes (Vanguard `vgc`/`vgtray`, EAC, BattlEye) are never touched —
   we only use documented OS-level scheduling APIs, never inject into games.
 - Exclusive-fullscreen titles follow the display switch directly; if a game runs

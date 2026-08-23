@@ -230,11 +230,20 @@ function Restore-NativeResolution {
         time; silently no-ops when nothing was scaled. Used on game
         exit AND in the watcher's finally block, so the screen is
         ALWAYS returned to normal.
+        -Mode lets the crash-recovery path pass an explicitly
+        remembered mode (from the recovery journal) even when this
+        process never scaled the screen itself.
     #>
-    if (-not $script:ScaledActive -or -not $script:NativeMode) { return }
+    param([hashtable]$Mode)
+
+    if ($Mode) {
+        $n = $Mode
+    } else {
+        if (-not $script:ScaledActive -or -not $script:NativeMode) { return }
+        $n = $script:NativeMode
+    }
 
     Add-NativeDisplayType
-    $n = $script:NativeMode
     try {
         $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
         $dm.dmPelsWidth        = [uint32]$n.Width

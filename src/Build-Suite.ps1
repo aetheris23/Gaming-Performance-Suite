@@ -28,6 +28,7 @@ $files = @(
     'src\DisplayScale.psm1',
     'src\GameBoost.psm1',
     'src\GpuDetect.psm1',
+    'src\NetTune.psm1',
     'src\Build-Suite.ps1'
 )
 

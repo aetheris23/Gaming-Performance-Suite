@@ -78,4 +78,37 @@
         Enabled = $false
         ToolPath = ''                  # e.g. 'C:\Program Files\Lossless Scaling\LosslessScaling.exe'
     }
+
+    # ---- Network optimization (applied while the watcher runs) --
+    # Reduces in-game latency and packet-loss stalls. Applied once when
+    # the watcher starts (BEFORE the game opens its sockets) and reverted
+    # to your original values when it stops.
+    #   DisableNetworkThrottling : off switches the multimedia network
+    #                              throttle that periodically delays packets
+    #   TcpLowLatency            : per-interface fast ACK + no Nagle delay
+    #   DisableNicPowerSaving    : stops Windows powering down the Wi-Fi/
+    #                              Ethernet adapter between bursts (micro-
+    #                              dropouts that look like packet loss)
+    NetworkOptimization = @{
+        Enabled                  = $true
+        DisableNetworkThrottling = $true
+        TcpLowLatency            = $true
+        DisableNicPowerSaving    = $true
+    }
+
+    # ---- Microphone / voice clarity -----------------------------
+    # Keeps comms smooth and clear for other players while gaming:
+    #   ProtectVoiceApps         : Discord & friends are NEVER deprioritized
+    #                              by the background-silencing logic
+    #   BoostVoiceAppsDuringGame : voice apps get AboveNormal priority so
+    #                              mic capture/encode never starve on weak CPUs
+    #   MmcssAudioPriority       : raises MMCSS Audio/Pro Audio/Capture classes
+    #   ExtraProtectedProcessNames: additional voice app process names
+    #                              (without .exe), e.g. @('MyChatApp')
+    VoiceClarity = @{
+        ProtectVoiceApps           = $true
+        BoostVoiceAppsDuringGame   = $true
+        MmcssAudioPriority         = $true
+        ExtraProtectedProcessNames = @()
+    }
 }
