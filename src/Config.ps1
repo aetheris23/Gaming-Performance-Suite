@@ -47,7 +47,7 @@
     # ---- Dynamic resolution scaling --------------------------
     # While a game runs the display drops to a lower same-aspect
     # mode (GPU load falls hard); native is restored on exit/stop.
-    ResolutionScalePercent = 66      # target width as % of native (25-99)
+    ResolutionScalePercent = 75      # target width as % of native (25-99)
     PreferIntegerScale     = $true   # use exactly 1/2 native when available:
                                      # pixel-perfect upscale, no blur/pixelation
 

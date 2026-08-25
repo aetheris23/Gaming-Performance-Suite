@@ -195,7 +195,7 @@ function Set-MultimediaTweaks {
     $sysProfile = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
     if (-not (Test-Path $sysProfile)) { New-Item -Path $sysProfile -Force | Out-Null }
     New-ItemProperty -Path $sysProfile -Name 'SystemResponsiveness' `
-        -Value 0 -PropertyType DWord -Force | Out-Null
+        -Value 10 -PropertyType DWord -Force | Out-Null
 
     # Elevate the "Games" task class inside MMCSS
     $games = "$sysProfile\Tasks\Games"
@@ -226,16 +226,16 @@ function Set-TimerResolution {
     Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
-            [void][Suite.NativeBoost]::timeEndPeriod(1)
+            [void][Suite.NativeBoost]::timeEndPeriod(2)
             $script:TimerActive = $false
             Write-Log 'Timer resolution restored to system default' 'INFO'
         }
         return
     }
-    $result = [Suite.NativeBoost]::timeBeginPeriod(1)
+    $result = [Suite.NativeBoost]::timeBeginPeriod(2)
     if ($result -eq 0) {
         $script:TimerActive = $true
-        Write-Log 'Global timer resolution locked at 1 ms' 'OK'
+        Write-Log 'Global timer resolution locked at 2 ms' 'OK'
     } else {
         Write-Log "timeBeginPeriod returned $result" 'WARN'
     }
@@ -279,12 +279,12 @@ $script:GameProfiles = @{
         Description      = 'GPU-heavy title: High priority + Steam client silenced'
     }
     'Competitive' = @{
-        Priority         = 'High'
+        Priority         = 'AboveNormal'
         AvoidCores       = @(0)
         # NOTE: Discord/voice apps are deliberately NOT silenced - they carry
         # your microphone. See $script:VoiceAppPatterns + Update-VoiceChatSupport.
         Deprioritize     = @('steamwebhelper','chrome','msedge','firefox','spotify')
-        Description      = 'Latency-critical online play: High priority + browsers/Steam silenced'
+        Description      = 'Latency-critical online play: AboveNormal priority + browsers/Steam silenced'
     }
     'Default' = @{
         Priority         = 'AboveNormal'
@@ -770,10 +770,10 @@ function Start-GameWatcher {
                         # ---- HEAVY steps go onto the staged ramp so the loading
                         #      screen absorbs them one at a time (no launch hitch) ----
                         if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not (Test-RampPending 'purge')) {
-                            Add-Ramp 'purge' 2 0
+                            Add-Ramp 'purge' 5 0
                         }
                         if (-not $skipScale -and -not $scaledApplied -and -not (Test-RampPending 'resscale')) {
-                            Add-Ramp 'resscale' 5 0
+                            Add-Ramp 'resscale' 10 0
                         }
                         if (-not $extrasQueued.ContainsKey($game.Id)) {
                             $extrasQueued[$game.Id] = $true

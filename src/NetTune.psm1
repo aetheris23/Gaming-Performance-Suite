@@ -130,8 +130,11 @@ function Enable-GameNetworkProfile {
                 $node = @{}
                 foreach ($name in @('TcpAckFrequency', 'TCPNoDelay')) {
                     $orig = Get-RegRaw -Path $k.PSPath -Name $name
-                    if ($orig -ne 1) {
-                        Set-RegDword -Path $k.PSPath -Name $name -Value 1
+                    # TcpAckFrequency=2 reduces latency without flooding NIC with tiny ACKs
+                    # (value=1 causes packet loss on Wi-Fi and congested links)
+                    $val = if ($name -eq 'TcpAckFrequency') { 2 } else { 1 }
+                    if ($orig -ne $val) {
+                        Set-RegDword -Path $k.PSPath -Name $name -Value $val
                     }
                     $node[$name] = $orig
                 }
@@ -274,9 +277,9 @@ function Set-MicClarityTweaks {
     foreach ($task in @('Audio', 'Pro Audio', 'Capture')) {
         $key = Join-Path "$script:SysProfile\Tasks" $task
         if (-not (Test-Path $key)) { continue }
-        New-ItemProperty -Path $key -Name 'Scheduling Category' -Value 'High' -PropertyType String  -Force | Out-Null
-        New-ItemProperty -Path $key -Name 'SFIO Priority'       -Value 'High' -PropertyType String  -Force | Out-Null
-        New-ItemProperty -Path $key -Name 'Priority'            -Value 6      -PropertyType DWord  -Force | Out-Null
+        New-ItemProperty -Path $key -Name 'Scheduling Category' -Value 'Medium' -PropertyType String  -Force | Out-Null
+        New-ItemProperty -Path $key -Name 'SFIO Priority'       -Value 'Normal' -PropertyType String  -Force | Out-Null
+        New-ItemProperty -Path $key -Name 'Priority'            -Value 4      -PropertyType DWord  -Force | Out-Null
         $changed += $task
     }
 
