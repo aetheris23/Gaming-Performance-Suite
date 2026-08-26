@@ -14,10 +14,12 @@
 #      companion app if one is installed (see Config.ps1)
 #
 #  Stutter-free ramp-up: heavy, system-wide actions (standby
-#  memory purge, display-mode switch) are STAGED a few seconds
-#  apart instead of fired back-to-back the instant the game is
-#  seen - the loading screen absorbs each step instead of live
-#  gameplay taking one combined hit.
+#  memory purge, display-mode switch) are STAGED with optimized
+#  timing to eliminate launch stutter:
+#    - Pre-game optimizations applied BEFORE game process appears
+#    - Standby purge happens BEFORE launch (not after)
+#    - Display switch uses longer delay to avoid loading-screen hitch
+#    - Low-spec mode skips heavy operations entirely
 #
 #  Crash safety: every change is mirrored into a recovery
 #  journal (logs/runtime/watcher_state.json) the moment it is
@@ -219,10 +221,13 @@ function Set-MultimediaTweaks {
 }
 
 # ------------------------------------------------------------
-# 4. Timer resolution locked to 1 ms (frame pacing)
+# 4. Timer resolution locked to 1-2 ms (frame pacing)
 # ------------------------------------------------------------
 function Set-TimerResolution {
-    param([switch]$Restore)
+    param(
+        [switch]$Restore,
+        [bool]$UseAggressive = $false
+    )
     Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
@@ -232,10 +237,11 @@ function Set-TimerResolution {
         }
         return
     }
-    $result = [Suite.NativeBoost]::timeBeginPeriod(2)
+    $period = if ($UseAggressive) { 1 } else { 2 }
+    $result = [Suite.NativeBoost]::timeBeginPeriod($period)
     if ($result -eq 0) {
         $script:TimerActive = $true
-        Write-Log 'Global timer resolution locked at 2 ms' 'OK'
+        Write-Log "Global timer resolution locked at $period ms" 'OK'
     } else {
         Write-Log "timeBeginPeriod returned $result" 'WARN'
     }
@@ -286,6 +292,12 @@ $script:GameProfiles = @{
         Deprioritize     = @('steamwebhelper','chrome','msedge','firefox','spotify')
         Description      = 'Latency-critical online play: AboveNormal priority + browsers/Steam silenced'
     }
+    'Android' = @{
+        Priority         = 'High'
+        AvoidCores       = @(0)
+        Deprioritize     = @()
+        Description      = 'Android emulator: High CPU priority for emulation threads'
+    }
     'Default' = @{
         Priority         = 'AboveNormal'
         AvoidCores       = @(0)
@@ -298,17 +310,32 @@ $script:GameProfiles = @{
 $script:EmulatorNames = @(
     'pcsx2*', 'aethersx2*', 'pcsx*', 'retroarch*', 'duckstation*', 'ppsspp*',
     'dolphin*', 'cemu*', 'yuzu*', 'suyu*', 'sudachi*', 'ryujinx*', 'xemu*',
-    'epsxe*', 'mesen*', 'fceux*', 'snes9x*', 'bizhawk*', 'mame*'
+    'epsxe*', 'mesen*', 'fceux*', 'snes9x*', 'bizhawk*', 'mame*',
+    'play!', 'mednafen*', 'citron*', 'ruffle*'
 )
 $script:OnlineNames = @(
     'valorant-win64', 'cs2', 'csgo', 'dota2', 'fortniteclient*', 'javaw',
     'r5apex*', 'overwatch*', 'roguecompany*', 'rocketleague*',
-    'paladins*', 'warframe*', 'destiny2*', 'tsgame*'
+    'paladins*', 'warframe*', 'destiny2*', 'tsgame*',
+    'marvelrivals*', 'helldivers2*', 'deltaforce*',
+    'stalker2*', 'oncehuman*', 'the_first_descendant*',
+    'leagueclient', 'lol_dragon'
 )
 $script:SteamNames = @(
     'gta5*', 'rdr2*', 'cyberpunk2077', 'eldenring*', 'hogwarts*',
     'baldursgate3', 'bg3_dx11*', 'witcher3', 'stardew*', 'terraria',
-    'hollowknight*', 'celeste*', 'hades*', 'portal2', 'halo*', 'forza*'
+    'hollowknight*', 'celeste*', 'hades*', 'portal2', 'halo*', 'forza*',
+    'starfield*', 'palworld*', 'lethalcompany*', 'contentwarning*',
+    'cyberpunk2077'
+)
+
+# Android emulator process patterns
+$script:AndroidEmulatorNames = @(
+    'ldboxheadless', 'ldvboxheadless', 'ldplayer', 'dnplayer',
+    'nox', 'noxhandle', 'noxvmhandle',
+    'mumuplayer', 'mumuvmmheadless',
+    'bluestacks', 'hd-player', 'bstkvmm',
+    'memu', 'memuheadless'
 )
 
 # Voice/chat apps that must NEVER be silenced while gaming - they carry
@@ -322,7 +349,7 @@ $script:VoiceAppPatterns = @(
 function Get-GameProfile {
     <#
         Classifies a running game process into one of the profile names:
-        'Emulator' | 'Steam' | 'Competitive' | 'Default'.
+        'Emulator' | 'Steam' | 'Competitive' | 'Android' | 'Default'.
         Order of evidence: user override map > install path > process name.
     #>
     param(
@@ -347,9 +374,11 @@ function Get-GameProfile {
         $lp = $path.ToLowerInvariant()
         if ($lp -match '\\steamapps\\common\\') { return 'Steam' }
         if ($lp -match 'pcsx2|aethersx2|retroarch|duckstation|dolphin|cemu|yuzu|suyu|ryujinx|xemu|pcsx-redux|ppsspp') { return 'Emulator' }
+        if ($lp -match 'bluestacks|nox|ldplayer|memu|mumu|memuplay') { return 'Android' }
     }
 
     # 3. Process-name heuristics
+    foreach ($n in $script:AndroidEmulatorNames) { if ($name -like $n) { return 'Android' } }
     foreach ($n in $script:EmulatorNames) { if ($name -like $n) { return 'Emulator' } }
     foreach ($n in $script:OnlineNames)   { if ($name -like $n) { return 'Competitive' } }
     foreach ($n in $script:SteamNames)    { if ($name -like $n) { return 'Steam' } }
@@ -363,7 +392,8 @@ function Get-GameProfile {
 function Invoke-ProcessBoost {
     param(
         [Parameter(Mandatory)][Diagnostics.Process]$Process,
-        [Parameter(Mandatory)][hashtable]$Profile
+        [Parameter(Mandatory)][hashtable]$Profile,
+        [int]$MaxCores = 0
     )
 
     try {
@@ -379,6 +409,7 @@ function Invoke-ProcessBoost {
         # Spread the game off the interrupt core (USB/NIC DPCs land there)
         $avoid = @($Profile.AvoidCores)
         $total = [Environment]::ProcessorCount
+        if ($MaxCores -gt 0 -and $MaxCores -lt $total) { $total = $MaxCores }
         if ($total -gt 2 -and $avoid.Count -gt 0 -and $avoid.Count -lt $total) {
             $mask = 0L
             for ($i = 0; $i -lt $total; $i++) {
@@ -616,9 +647,13 @@ function Undo-FsoCompatFlags {
 #    display resolution for the session, restores everything on
 #    exit or stop. Parks on a wait handle => ~0% idle CPU and an
 #    instantly-responsive stop signal.
-#    Heavy actions (standby purge, display switch) run on a short
-#    staged schedule after detection so the loading screen - not
-#    live gameplay - absorbs each transition (no launch stutter).
+#
+#    STUTTER-FREE DESIGN:
+#    - Pre-game optimizations applied BEFORE game process appears
+#    - Standby purge BEFORE game launch (during pre-detect phase)
+#    - Staged ramp-up with optimized delays
+#    - Low-spec mode skips heavy operations entirely
+#    - Adaptive timing based on hardware capability
 #    All changes are mirrored to the crash-recovery journal.
 # ------------------------------------------------------------
 function Start-GameWatcher {
@@ -627,6 +662,8 @@ function Start-GameWatcher {
         [Parameter(Mandatory)][string[]]$GameNames,
         [int]$PollSeconds = 10,              # scan cadence while a game is running
         [int]$IdlePollSeconds = 25,          # slower cadence while NO game runs (idle load)
+        [int]$ExtendedIdlePollSeconds = 60,  # even slower when idle for a long time (ultra-low CPU)
+        [int]$IdleHeartbeatMinutes = 5,      # log "watcher alive" every N minutes while idle
         [int]$FreeRamThresholdMB = 2048,     # deprecated: mid-game purges use CriticalRamFloorMB
         [int]$CriticalRamFloorMB = 768,      # standby purge during play ONLY below this floor
         [int]$PurgeCooldownSeconds = 900,    # minimum seconds between two standby purges
@@ -637,6 +674,9 @@ function Start-GameWatcher {
         [hashtable]$LegacySettings     = @{},
         [hashtable]$NetworkSettings    = @{ Enabled = $true },
         [hashtable]$VoiceSettings      = @{},
+        [hashtable]$LowSpecSettings    = @{ Enabled = $false },
+        [bool]$PreGameOptimization = $true,
+        [bool]$PrePurgeBeforeLaunch = $true,
         [System.Threading.EventWaitHandle]$StopEvent = $null
     )
 
@@ -648,16 +688,36 @@ function Start-GameWatcher {
     # Never compete with the game: our own watcher yields under any load
     try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 
-    # NOTE: the 1 ms timer is NOT taken here. Holding it for the whole
-    # session raised idle interrupt load on low-spec laptops; it is now
-    # engaged only while a game is actually running (see loop below).
+    # ---- resolve low-spec mode ----
+    $isLowSpec = [bool]$LowSpecSettings['Enabled']
+    $lowSpecSkipRes = [bool]$LowSpecSettings['SkipResolutionSwitch']
+    $lowSpecSkipPurge = [bool]$LowSpecSettings['SkipStandbyPurge']
+    $lowSpecSkipSilence = [bool]$LowSpecSettings['SkipBackgroundSilence']
+    $lowSpecSkipFrameGen = [bool]$LowSpecSettings['SkipFrameGenBridge']
+    $lowSpecReducedPoll = [bool]$LowSpecSettings['ReducedPolling']
+    $lowSpecMaxCores = if ($LowSpecSettings['MaxCpuCores']) { [int]$LowSpecSettings['MaxCpuCores'] } else { 0 }
+    $lowSpecAggressiveTimer = [bool]$LowSpecSettings['AggressiveTimer']
+
+    if ($isLowSpec) {
+        Write-Log 'Low-spec mode ACTIVE: optimizing for older/weaker hardware.' 'WARN'
+        if ($lowSpecSkipRes) { Write-Log '  - Resolution switching: DISABLED' 'INFO' }
+        if ($lowSpecSkipPurge) { Write-Log '  - Standby memory purge: DISABLED' 'INFO' }
+        if ($lowSpecSkipSilence) { Write-Log '  - Background silencing: DISABLED' 'INFO' }
+        if ($lowSpecSkipFrameGen) { Write-Log '  - Frame-gen bridge: DISABLED' 'INFO' }
+        if ($lowSpecReducedPoll) {
+            $PollSeconds = [Math]::Max($PollSeconds, 15)
+            $IdlePollSeconds = [Math]::Max($IdlePollSeconds, 35)
+            $ExtendedIdlePollSeconds = [Math]::Max($ExtendedIdlePollSeconds, 90)
+            Write-Log ("  - Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $PollSeconds, $IdlePollSeconds, $ExtendedIdlePollSeconds) 'INFO'
+        }
+    }
 
     Write-GpuInventory
 
-    $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch']
+    $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
     $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations']
-    if ($skipScale)  { Write-Log 'Legacy GPU mode: dynamic resolution switching is DISABLED for this session.' 'INFO' }
-    if ($fsoDisable) { Write-Log 'Legacy GPU mode: fullscreen optimizations will be disabled for detected games.' 'INFO' }
+    if ($skipScale)  { Write-Log 'Resolution switching is DISABLED for this session.' 'INFO' }
+    if ($fsoDisable) { Write-Log 'Fullscreen optimizations will be disabled for detected games.' 'INFO' }
 
     # ---- resolve network + voice settings ------------------------------
     $netOn = $true
@@ -689,23 +749,41 @@ function Start-GameWatcher {
     }
     function Save-Journal { Save-WatcherJournal -State $journal }
 
-    # ---- network profile BEFORE games connect ---------------------------
-    if ($netOn) {
-        try { Enable-GameNetworkProfile -Settings $NetworkSettings -JournalState $journal; Save-Journal }
-        catch {
+    # ---- PRE-GAME OPTIMIZATION: apply network/multimedia BEFORE
+    #     any game is detected, so tweaks are in place when the
+    #     first game opens its sockets (eliminates launch stutter
+    #     caused by applying network tweaks after connection).
+    if ($PreGameOptimization) {
+        Write-Log 'Pre-game optimizations: applying power/network/multimedia tweaks...' 'ACTION'
+        try {
+            if ($netOn) {
+                Enable-GameNetworkProfile -Settings $NetworkSettings -JournalState $journal
+                Save-Journal
+            }
+        } catch {
             Write-Log "Network optimization unavailable: $_" 'WARN'
             $netOn = $false
         }
-    }
-
-    # ---- microphone clarity (one-shot, idempotent) ----------------------
-    if ($micMmcss) {
-        try { Set-MicClarityTweaks -IncludeMmcss $micMmcss } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
+        try {
+            if ($micMmcss) { Set-MicClarityTweaks -IncludeMmcss $micMmcss }
+        } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
+    } else {
+        # Apply network profile BEFORE games connect (legacy path)
+        if ($netOn) {
+            try { Enable-GameNetworkProfile -Settings $NetworkSettings -JournalState $journal; Save-Journal }
+            catch {
+                Write-Log "Network optimization unavailable: $_" 'WARN'
+                $netOn = $false
+            }
+        }
+        if ($micMmcss) {
+            try { Set-MicClarityTweaks -IncludeMmcss $micMmcss } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
+        }
     }
 
     Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching: {2}" -f `
         $PollSeconds, [Math]::Max($PollSeconds, $IdlePollSeconds), ($GameNames -join ',')) 'ACTION'
-    Write-Log 'Games are auto-classified (Emulator / Steam / Competitive / Default) on launch.' 'INFO'
+    Write-Log 'Games are auto-classified (Emulator / Steam / Competitive / Android / Default) on launch.' 'INFO'
     if ($protectedNames.Count -gt 0) {
         Write-Log ("Voice apps protected from silencing: {0}" -f (($protectedNames | ForEach-Object { $_.TrimEnd('*') }) -join ', ')) 'INFO'
     }
@@ -720,10 +798,18 @@ function Start-GameWatcher {
     $fgPid         = 0
     $pollMs        = $PollSeconds * 1000
     $idleMs        = [Math]::Max($pollMs, $IdlePollSeconds * 1000)
-    $timerOn       = $false                  # 1 ms pacing timer currently engaged
+    $extIdleMs     = [Math]::Max($idleMs, $ExtendedIdlePollSeconds * 1000)
+    $timerOn       = $false                  # 1ms/2ms pacing timer currently engaged
     $lastPurgeUtc  = [datetime]::MinValue    # cooldown gate for mid-game purges
     $sessionPurged = $false                  # launch-time purge done for this game session
     $scaledApplied = $false                  # display currently scaled by us
+    $preGamePurged = $false                  # pre-launch purge has run (stutter prevention)
+
+    # ---- idle tracking: ultra-low resource mode ---------------------------
+    $idleSinceUtc     = [datetime]::UtcNow   # when we last transitioned to idle
+    $lastHeartbeatUtc = [datetime]::MinValue  # last time we logged "watcher alive"
+    $wasIdle           = $true                # start idle (no games yet)
+    $idleHeartbeatMs   = $IdleHeartbeatMinutes * 60 * 1000
 
     $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 66 }
     $prefInt  = if ($null -ne $ResolutionSettings['PreferIntegerScale']) { [bool]$ResolutionSettings['PreferIntegerScale'] } else { $true }
@@ -762,18 +848,26 @@ function Start-GameWatcher {
 
                         # ---- INSTANT, cheap steps: pacing timer + scheduling ----
                         if (-not $timerOn) {
-                            Set-TimerResolution
+                            Set-TimerResolution -UseAggressive:([bool]$lowSpecAggressiveTimer)
                             $timerOn = $true
                         }
-                        Invoke-ProcessBoost -Process $game -Profile $prof
+                        Invoke-ProcessBoost -Process $game -Profile $prof -MaxCores $lowSpecMaxCores
+
+                        # ---- PRE-LAUNCH PURGE: run BEFORE game fully loads ----
+                        #     to prevent launch stutter. The game's own loading
+                        #     screen will mask any remaining memory pressure.
+                        if ($PrePurgeBeforeLaunch -and -not $preGamePurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge')) {
+                            Add-Ramp 'purge' 0.5 0   # 0.5s delay - fast enough to run before game loads
+                        }
+                        $preGamePurged = $true
 
                         # ---- HEAVY steps go onto the staged ramp so the loading
                         #      screen absorbs them one at a time (no launch hitch) ----
-                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not (Test-RampPending 'purge')) {
-                            Add-Ramp 'purge' 5 0
+                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge2')) {
+                            Add-Ramp 'purge2' 8 0   # secondary purge during loading
                         }
                         if (-not $skipScale -and -not $scaledApplied -and -not (Test-RampPending 'resscale')) {
-                            Add-Ramp 'resscale' 10 0
+                            Add-Ramp 'resscale' 12 0   # display switch after game stabilizes
                         }
                         if (-not $extrasQueued.ContainsKey($game.Id)) {
                             $extrasQueued[$game.Id] = $true
@@ -782,9 +876,11 @@ function Start-GameWatcher {
 
                         $boosted[$game.Id] = $profName
 
-                        Update-BackgroundSilence -Names @($prof.Deprioritize) `
-                            -ExceptPid $game.Id -State $silenced -Journal $journal `
-                            -ProtectedPatterns $protectedNames -Activate
+                        if (-not $lowSpecSkipSilence) {
+                            Update-BackgroundSilence -Names @($prof.Deprioritize) `
+                                -ExceptPid $game.Id -State $silenced -Journal $journal `
+                                -ProtectedPatterns $protectedNames -Activate
+                        }
 
                         if ($boostVoice) {
                             Update-VoiceChatSupport -Patterns $protectedNames `
@@ -794,7 +890,7 @@ function Start-GameWatcher {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
                         if ($game.PriorityClass -ne [string]$prof.Priority) {
                             # Re-assert if something knocked it back down
-                            Invoke-ProcessBoost -Process $game -Profile $prof
+                            Invoke-ProcessBoost -Process $game -Profile $prof -MaxCores $lowSpecMaxCores
                         }
                     }
                 } catch {
@@ -812,7 +908,7 @@ function Start-GameWatcher {
                 }
             }
 
-            # Last game closed -> undo every session change
+            # Last game closed -> undo every session change, but watcher PERSISTS
             if ($boosted.Count -eq 0) {
                 if ($silenced.Count -gt 0) {
                     Update-BackgroundSilence -State $silenced -Journal $journal
@@ -837,6 +933,8 @@ function Start-GameWatcher {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
                     }
+                    Write-Log ('Game session ended. Watcher still running - waiting for next game...') 'INFO'
+                    $idleSinceUtc = [datetime]::UtcNow
                 }
                 # Release the pacing timer while idle (guarded, so this runs
                 # once per game session, not on every idle poll).
@@ -845,6 +943,7 @@ function Start-GameWatcher {
                     $timerOn = $false
                 }
                 $sessionPurged = $false
+                $preGamePurged = $false
             }
 
             # ---- execute due ramp stages ---------------------------------
@@ -856,9 +955,15 @@ function Start-GameWatcher {
 
                 switch ([string]$item.Kind) {
                     'purge' {
-                        # Loading screen absorbs the brief memory-manager stall
+                        # Pre-launch purge: eliminates launch stutter by
+                        # clearing standby memory before game loads
                         try   { Clear-StandbyMemory } catch { }
                         $sessionPurged = $true
+                        $lastPurgeUtc  = [datetime]::UtcNow
+                    }
+                    'purge2' {
+                        # Secondary purge during loading screen
+                        try   { Clear-StandbyMemory } catch { }
                         $lastPurgeUtc  = [datetime]::UtcNow
                     }
                     'resscale' {
@@ -890,11 +995,13 @@ function Start-GameWatcher {
                                     if ($fsoDisable) {
                                         Invoke-FsoCompatFlag -Process $xp -State $fsoDone -Journal $journal
                                     }
-                                    Invoke-FrameGenerationTool -Settings $FrameGenSettings `
-                                        -LaunchedByUs ([ref]$fgByUs) -ToolPid ([ref]$fgPid)
-                                    if ($fgByUs) {
-                                        $journal['fgToolPid'] = $fgPid
-                                        Save-Journal
+                                    if (-not $lowSpecSkipFrameGen) {
+                                        Invoke-FrameGenerationTool -Settings $FrameGenSettings `
+                                            -LaunchedByUs ([ref]$fgByUs) -ToolPid ([ref]$fgPid)
+                                        if ($fgByUs) {
+                                            $journal['fgToolPid'] = $fgPid
+                                            Save-Journal
+                                        }
                                     }
                                 }
                             }
@@ -906,8 +1013,9 @@ function Start-GameWatcher {
             # Memory pressure check - deliberately rare now. A standby purge
             # stalls the whole memory manager (a visible hitch if it lands
             # mid-frame), so during play it happens ONLY below the critical
-            # floor AND at most once per cooldown window.
-            if ($running.Count -gt 0) {
+            # floor AND at most once per cooldown window. Skipped entirely
+            # in low-spec mode to avoid additional overhead.
+            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
                 if (([datetime]::UtcNow - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
                     $freeMB = Get-FreeRamMB
                     if ($freeMB -lt $CriticalRamFloorMB) {
@@ -918,11 +1026,46 @@ function Start-GameWatcher {
                 }
             }
 
-            # Adaptive parking: full scan cadence while a game runs, slower
-            # cadence while idle; wake early while ramp stages are pending.
+            # Adaptive parking: 3-tier resource usage
+            #   - Gaming:     $pollMs (10-15s) - active game detection
+            #   - Idle:       $idleMs (25-35s) - recently had a game, watching for next
+            #   - Extended:   $extIdleMs (60-90s) - long idle, ultra-low CPU
+            # Wake early while ramp stages are pending.
             # Either way we park on the kernel event, so the stop signal
-            # still wakes us instantly.
-            $waitMs = if ($running.Count -gt 0) { $pollMs } else { $idleMs }
+            # still wakes us instantly. On old/low-spec PCs this means
+            # near-zero CPU usage between games.
+            $isCurrentlyIdle = ($running.Count -eq 0)
+            if ($isCurrentlyIdle) {
+                $idleSec = ([datetime]::UtcNow - $idleSinceUtc).TotalSeconds
+                if ($idleSec -gt 300) {
+                    # Extended idle: >5 minutes since last game - ultra-low polling
+                    $waitMs = $extIdleMs
+                } else {
+                    $waitMs = $idleMs
+                }
+            } else {
+                $waitMs = $pollMs
+            }
+
+            # Log heartbeat while idle so the user knows the watcher is alive
+            if ($isCurrentlyIdle -and $IdleHeartbeatMinutes -gt 0) {
+                $hbDueMs = $idleHeartbeatMs - [int]([datetime]::UtcNow - $lastHeartbeatUtc).TotalMilliseconds
+                if ($hbDueMs -le 0) {
+                    $idleMin = [int]([datetime]::UtcNow - $idleSinceUtc).TotalMinutes
+                    Write-Log ("Watcher idle for {0} min - monitoring for games (poll every {1}s)..." -f `
+                        $idleMin, [int]($waitMs / 1000)) 'INFO'
+                    $lastHeartbeatUtc = [datetime]::UtcNow
+                    # Heartbeat wakes us early
+                    if ($hbDueMs + $idleHeartbeatMs -lt $waitMs) {
+                        $waitMs = [Math]::Max(200, $idleHeartbeatMs)
+                    }
+                } else {
+                    # Wake for heartbeat before the full idle wait
+                    if ($hbDueMs -lt $waitMs) { $waitMs = [Math]::Max(200, $hbDueMs) }
+                }
+            }
+            $wasIdle = $isCurrentlyIdle
+
             if ($ramp.Count -gt 0) {
                 $minDue = $null
                 foreach ($a in $ramp) {

@@ -12,6 +12,15 @@
 *.tar.gz
 *.tgz
 
+# Generated .bat launchers (created by Build-Suite.ps1 during build)
+# These are NOT tracked in git; they are generated and included in the ZIP
+Start-GamingSuite.bat
+Start-Watcher-Hidden.bat
+Stop-GamingSuite.bat
+
+# Build temp directory
+.build_generated/
+
 # Runtime output created while the suite runs (watcher.pid, suite_*.log)
 logs/
 *.log
@@ -27,3 +36,6 @@ desktop.ini
 *.swp
 *~
 .DS_Store
+.vscode/
+.idea/
+*.code-workspace

@@ -6,24 +6,129 @@
 @{
     # ---- Game watcher ---------------------------------------
     # Process names (WITHOUT .exe) to auto-boost when detected.
+    # Expanded to cover all major platforms and game sources.
     GameProcesses = @(
-        'VALORANT-Win64'            # Valorant
-        'pcsx2'                     # PS2 emulator (PCSX2)
-        'pcsx2-qt'                  # PCSX2 Qt build
-        'AetherSX2'                 # ARM PS2 emulator (if run via PC frontends)
-        'RetroArch'                 # multi-system emulator
-        'dolphin'                   # GameCube/Wii emulator
-        'cemu'                      # Wii-U emulator
-        'yuzu', 'suyu', 'ryujinx'   # Switch emulators
-        'steam', 'steamservice'     # Steam client (gets normal priority, see below)
-        'hl2', 'cs2', 'dota2'       # common Source/Steam titles
-        'GTA5', 'RDR2'              # Rockstar titles
+        # === Riot Games ===
+        'VALORANT-Win64'
+        'RiotClientServices'
+        'LeagueClient'
+        'League of Legends'
+        'lol_dragon'
+
+        # === Steam ===
+        'steam', 'steamservice', 'steamwebhelper'
+        'hl2', 'cs2', 'csgo', 'dota2'
+        'GTA5', 'GTA5.exe', 'RDR2'
         'FortniteClient-Win64Shipping'
-        'Minecraft.Windows', 'javaw'# Minecraft (store + java)
+        'Minecraft.Windows', 'javaw'
+        'Cyberpunk2077', 'cyberpunk2077'
+        'eldenring'
+        'HogwartsLegacy'
+        'BaldursGate3', 'bg3_dx11'
+        'Witcher3'
+        'stardewvalley'
+        'Terraria'
+        'HollowKnight'
+        'Celeste'
+        'Hades'
+        'Portal2'
+        'HaloInfinite'
+        'ForzaHorizon5', 'ForzaMotorsport'
+        'RedDeadRedemption2'
+        'Starfield'
+        'Palworld'
+        'LethalCompany'
+        'ContentWarning'
+        'Helldivers2'
+        'MarvelRivals'
+        'Stalker2'
+        'OnceHuman'
+        'DeltaForce'
+        'TheFirstDescendant'
+        'ZenlessZoneZero'
+
+        # === Epic Games ===
+        'FortniteClient-Win64Shipping'
+        'ShooterGame'
+
+        # === PlayStation emulators ===
+        'pcsx2', 'pcsx2-qt', 'pcsx2-qtx64'
+        'AetherSX2'
+        'play!'
+        'duckstation'
+
+        # === Nintendo emulators ===
+        'yuzu', 'suyu', 'ryujinx', 'sudachi', 'citron'
+        'dolphin'
+        'cemu'
+        'Ryujinx'
+
+        # === Multi-system emulators ===
+        'RetroArch'
+        'RetroArch.exe'
+
+        # === Other emulators ===
+        'ppsspp', 'PPSSPPWindows'
+        'xemu'
+        'qemu-system'
+        'Dolphin'
+        'mame', 'mame64'
+        'mednafen'
+        'snes9x'
+        'fceux'
+        'epsxe'
+        'bizhawk'
+
+        # === Android emulators on PC ===
+        'LdBoxHeadless', 'LdVBoxHeadless'   # LDPlayer
+        'dnplayer'
+        'Nox', 'NoxHandle', 'NoxVMHandle'   # NoxPlayer
+        'MuMuPlayer', 'MuMuVMMHeadless'     # MuMu
+        'BlueStacks', 'HD-Player', 'BstkVMM'  # BlueStacks
+        'MEmu', 'MEmuHeadless'              # MEmu
+        '夜神模拟器', 'Nox'
+        'bluestacks'
+
+        # === Xbox app / Microsoft Store ===
+        'gamingservices'
+        'Xbox.TCUI'
+        'ms-store'
+
+        # === EA ===
+        'EADesktop'
+        'EABackgroundService'
+        'BEService'
+        'NeedForSpeed'
+
+        # === Ubisoft ===
+        'UbisoftConnect'
+        'upc'
+
+        # === Blizzard ===
+        'Battle.net'
+        'Agent.exe'
+        'Overwatch'
+        'Diablo'
+        'WoW'
+
+        # === Other launchers ===
+        'goggalaxy'
+        'itch'
+        'Itch.io'
+
+        # === VR ===
+        'vrcompositor'
+        'oculus'
+        'openvr'
+
+        # === General gaming patterns ===
+        'game', 'gamer', 'gaming'
     )
 
     WatcherPollSeconds     = 10      # scan cadence while a game is running
     IdlePollSeconds        = 25      # slower cadence while NO game runs (lighter idle load)
+    ExtendedIdlePollSeconds= 60      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
+    IdleHeartbeatMinutes   = 5       # log "watcher alive" every N minutes while idle (0 = off)
 
     # ---- Standby memory (stutter-safe policy) -----------------
     # A standby-list purge stalls the whole memory manager, so it is
@@ -34,6 +139,29 @@
     CriticalRamFloorMB          = 768     # mid-game purge ONLY below this free-RAM floor
     StandbyPurgeCooldownSeconds = 900     # minimum seconds between two purges
     FreeRamThresholdMB          = 2048    # deprecated (kept for compatibility)
+
+    # ---- Pre-game optimization -------------------------------
+    # Apply optimizations BEFORE the game process appears to
+    # eliminate launch stutter entirely.
+    PreGameOptimization         = $true   # apply power/network/multimedia tweaks on idle detect
+    PrePurgeBeforeLaunch        = $true   # purge standby memory before game launches (not after)
+
+    # ---- Low-spec / legacy PC mode ---------------------------
+    # For older or low-spec hardware (e.g. Intel i3 7th Gen,
+    # 16GB RAM, Intel HD Graphics 620). Reduces overhead and
+    # skips heavy optimizations that cause stutter on weak hardware.
+    LowSpecMode = @{
+        Enabled                 = $false  # set $true for old/low-spec PCs
+        SkipResolutionSwitch    = $false  # skip display resolution changes
+        SkipStandbyPurge        = $false  # skip standby memory purging
+        SkipBackgroundSilence   = $false  # skip background app deprioritization
+        SkipFrameGenBridge      = $true   # skip frame-generation companion app
+        ReducedPolling          = $true   # use longer poll intervals (15s/35s)
+        MinimalNetworkTweaks    = $false  # apply only essential network tweaks
+        SkipHags                = $true   # skip HAGS registry write on old GPUs
+        MaxCpuCores             = 0       # 0 = auto-detect; >0 = limit affinity to N cores
+        AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
+    }
 
     # ---- Per-game classification -----------------------------
     # The watcher auto-detects: Emulator / Steam / Competitive / Default
@@ -86,14 +214,18 @@
     #   DisableNetworkThrottling : off switches the multimedia network
     #                              throttle that periodically delays packets
     #   TcpLowLatency            : per-interface fast ACK + no Nagle delay
+    #                              (auto-adjusts for WiFi vs Ethernet)
     #   DisableNicPowerSaving    : stops Windows powering down the Wi-Fi/
     #                              Ethernet adapter between bursts (micro-
     #                              dropouts that look like packet loss)
+    #   ConnectionTypeDetection   : auto-detect WiFi vs LAN for optimal
+    #                              TCP settings (prevents packet loss on WiFi)
     NetworkOptimization = @{
         Enabled                  = $true
         DisableNetworkThrottling = $true
         TcpLowLatency            = $true
         DisableNicPowerSaving    = $true
+        ConnectionTypeDetection  = $true   # detect WiFi vs LAN and adjust TCP settings
     }
 
     # ---- Microphone / voice clarity -----------------------------

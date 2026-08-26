@@ -32,9 +32,15 @@ $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   els
 
 # Stutter-safe standby-purge policy (see Config.ps1 for details)
 $idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds'] }             else { 25 }
+$extIdleSecs  = if ($cfg['ExtendedIdlePollSeconds'])      { [int]$cfg['ExtendedIdlePollSeconds'] }      else { 60 }
+$heartbeatMin = if ($cfg['IdleHeartbeatMinutes'])         { [int]$cfg['IdleHeartbeatMinutes'] }         else { 5 }
 $critFloorMB  = if ($cfg['CriticalRamFloorMB'])          { [int]$cfg['CriticalRamFloorMB'] }          else { 768 }
 $purgeCoolSec = if ($cfg['StandbyPurgeCooldownSeconds']) { [int]$cfg['StandbyPurgeCooldownSeconds'] } else { 900 }
 $purgeLaunch  = if ($null -ne $cfg['PurgeOnGameLaunch']) { [bool]$cfg['PurgeOnGameLaunch'] }          else { $true }
+
+# Pre-game optimization (applies tweaks before game process appears)
+$preGameOpt   = if ($null -ne $cfg['PreGameOptimization'])   { [bool]$cfg['PreGameOptimization'] }   else { $true }
+$prePurge     = if ($null -ne $cfg['PrePurgeBeforeLaunch'])  { [bool]$cfg['PrePurgeBeforeLaunch'] }  else { $true }
 
 $resSettings = @{
     ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
@@ -44,6 +50,15 @@ $fgSettings = if ($cfg['FrameGeneration']) { $cfg['FrameGeneration'] } else { @{
 $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { @{ Mode = 'Auto' } }
 $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
+$lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Enabled = $false } }
+
+# Apply LowSpec polling overrides early
+if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
+    if ($lowSpecCfg['ReducedPolling']) {
+        $pollSecs = [Math]::Max($pollSecs, 15)
+        $idleSecs = [Math]::Max($idleSecs, 35)
+    }
+}
 
 # ---------------- legacy GPU profile resolution ----------------
 function Resolve-LegacySettings {
@@ -62,11 +77,17 @@ function Resolve-LegacySettings {
         elseif ($mode -ne 'off') { $isLegacy = Test-LegacyGpuPresent }
     } catch { }
 
+    # Also treat LowSpecMode's SkipHags as legacy signal
+    $lowSpecHags = $false
+    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled'] -and $lowSpecCfg['SkipHags']) {
+        $lowSpecHags = $true
+    }
+
     $eff = @{
         IsLegacy                       = $isLegacy
         SkipResolutionSwitch           = $isLegacy          # old drivers can hang on mode changes
         DisableFullscreenOptimizations = $isLegacy          # FSO stutters on pre-WDDM2.x stacks
-        EnableHags                     = (-not $isLegacy)   # HwSchMode unsupported/unstable on old GPUs
+        EnableHags                     = (-not $isLegacy -and -not $lowSpecHags)
         ScalePercentOverride           = 0
     }
     foreach ($k in @('SkipResolutionSwitch','DisableFullscreenOptimizations','EnableHags')) {
@@ -110,11 +131,16 @@ function Invoke-Watcher {
         }
 
         Start-GameWatcher -GameNames $gameNames -PollSeconds $pollSecs `
-            -IdlePollSeconds $idleSecs -FreeRamThresholdMB $ramFloorMB `
+            -IdlePollSeconds $idleSecs -ExtendedIdlePollSeconds $extIdleSecs `
+            -IdleHeartbeatMinutes $heartbeatMin `
+            -FreeRamThresholdMB $ramFloorMB `
             -CriticalRamFloorMB $critFloorMB -PurgeCooldownSeconds $purgeCoolSec `
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
+            -LowSpecSettings $lowSpecCfg `
+            -PreGameOptimization:([bool]$preGameOpt) `
+            -PrePurgeBeforeLaunch:([bool]$prePurge) `
             -StopEvent $StopEvent
     } finally {
         if ($TrackPidFile) {
@@ -143,13 +169,39 @@ if ($BackgroundWatch) {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.1'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.2'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
+    Write-Host '  Cross-platform ready | Low-spec optimized'           -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
     Write-Host (" Session: {0} | Log: {1}" -f $tag, (Get-LogPath)) -ForegroundColor DarkGray
     try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { }
+
+    # Show connection type
+    try {
+        $connType = Get-ActiveNetworkType
+        Write-Host (" Network: {0}" -f $connType) -ForegroundColor DarkGray
+    } catch { }
+
+    # Show low-spec mode
+    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
+        Write-Host (' Low-spec mode: ACTIVE - minimal resource usage') -ForegroundColor Yellow
+    }
+
+    # ---- WATCHER STATUS: prominent warning when not running ----
+    $watcherAlive = $false
+    try { $watcherAlive = Test-WatcherAlive } catch { }
+    if ($watcherAlive) {
+        Write-Host (' Watcher: RUNNING in background') -ForegroundColor Green
+    } else {
+        Write-Host ''
+        Write-Host ' !!! WARNING: Game Watcher is NOT running !!!' -ForegroundColor Red -BackgroundColor Black
+        Write-Host ' Games will NOT be auto-optimized. Start the watcher' -ForegroundColor Red
+        Write-Host ' with option 3 below, or run Start-Watcher-Hidden.bat' -ForegroundColor Red
+        Write-Host ''
+    }
+
     Write-Host ''
 }
 
@@ -165,7 +217,7 @@ function Show-Menu {
     Write-Host '  6) Apply network + mic optimizations NOW'
     Write-Host '  7) Revert network optimizations (Windows defaults)'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
-    Write-Host '  8) Show watcher / display / network status'
+    Write-Host '  8) Show watcher / display / network / GPU status'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
     Write-Host '  Q) Quit'
     Write-Host ''
@@ -178,7 +230,9 @@ function Invoke-FullOptimization {
     Disable-GameDVR
     Set-MultimediaTweaks -EnableHags:([bool]$leg.EnableHags)
     Set-TimerResolution
-    Clear-StandbyMemory
+    if (-not ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled'] -and $lowSpecCfg['SkipStandbyPurge'])) {
+        Clear-StandbyMemory
+    }
     try { Set-MicClarityTweaks } catch { Write-Log $_.Exception.Message 'ERROR' }
     try { Enable-GameNetworkProfile -Settings $netCfg -JournalState $null } catch { Write-Log $_.Exception.Message 'ERROR' }
     if ($leg.EnableHags) {
@@ -203,6 +257,10 @@ function Show-Status {
     }
     if ($evt) { $evt.Dispose() }
     Write-Log "Watcher state: $state" 'INFO'
+    if (-not $alive) {
+        Write-Log '!!! Watcher is NOT running - games will NOT be auto-optimized !!!' 'ERROR'
+        Write-Log 'Start it with option 3 or run Start-Watcher-Hidden.bat' 'WARN'
+    }
     if (Get-WatcherJournal) {
         Write-Log 'Recovery journal present: last session ended uncleanly; it will be repaired on next watcher start.' 'WARN'
     }
@@ -228,7 +286,12 @@ function Show-Status {
 
     # ---- network + voice summary ---------------------------------------
     $netOn  = if ($null -ne $netCfg['Enabled'])   { [bool]$netCfg['Enabled'] }   else { $true }
-    Write-Log ("Network tuning: {0} (throttling off / TCP fast-ack / NIC power-save per Config.ps1)" -f $(if ($netOn) { 'enabled' } else { 'disabled' })) 'INFO'
+    try {
+        $connType = Get-ActiveNetworkType
+        Write-Log ("Network tuning: {0} (connection: {1}, TCP auto-optimized for connection type)" -f $(if ($netOn) { 'enabled' } else { 'disabled' }), $connType) 'INFO'
+    } catch {
+        Write-Log ("Network tuning: {0}" -f $(if ($netOn) { 'enabled' } else { 'disabled' })) 'INFO'
+    }
     $micMmcss = if ($null -ne $voiceCfg['MmcssAudioPriority']) { [bool]$voiceCfg['MmcssAudioPriority'] } else { $true }
     $extraProt = @()
     if ($voiceCfg['ExtraProtectedProcessNames']) { $extraProt = @($voiceCfg['ExtraProtectedProcessNames']) }
@@ -240,6 +303,20 @@ function Show-Status {
         $lgState = if ($leg.IsLegacy) { 'ACTIVE (legacy-safe tweaks)' } else { 'off (standard profile)' }
         Write-Log "Legacy GPU support: $lgState" 'INFO'
     } catch { }
+
+    # ---- low-spec mode summary ------------------------------------------
+    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
+        Write-Log 'Low-spec mode: ACTIVE' 'WARN'
+        Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
+        Write-Log ("  Pre-game optimization: {0}" -f $(if ($preGameOpt) { 'enabled' } else { 'disabled' })) 'INFO'
+        Write-Log ("  Pre-launch purge: {0}" -f $(if ($prePurge) { 'enabled' } else { 'disabled' })) 'INFO'
+    } else {
+        Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
+    }
+    Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
+
+    # ---- platform info ------------------------------------------
+    Write-Log ("Platform: {0} | PowerShell {1}" -f $PSVersionTable.Platform, $PSVersionTable.PSVersion) 'INFO'
 }
 
 function Wait-MenuKey {

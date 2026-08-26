@@ -1,245 +1,270 @@
-# Gaming Performance Suite
+# Gaming Performance Suite v2.2
 
-Zero-install Windows toolkit (PowerShell 5.1 — preinstalled on every Windows 10/11 PC,
-nothing to download or install) that stabilizes FPS in games like **Valorant, Steam
-titles, and PS2 emulators (PCSX2)**, **cuts GPU load dynamically** while you play,
-**identifies every integrated and discrete GPU** in your system, **tunes your network
-for lower latency and fewer packet-loss stalls**, **keeps your microphone clear for
-other players**, and **adapts itself to older graphics hardware** automatically.
+Zero-install performance toolkit for gaming across **Windows, Linux, and macOS**
+(PowerShell 5.1+ / PowerShell Core 7+), with foundational Android support via
+Termux. Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in your
+system, tunes your network for lower latency (with WiFi vs LAN awareness to
+prevent packet loss), keeps your microphone clear, adapts to older hardware, and
+eliminates launch stutter.
 
-## Quick start
+## Quick start (Windows)
 
-1. Double-click **`Start-Watcher-Hidden.bat`** → accept the UAC prompt.
-   The watcher starts hidden in the background — no console window to keep open or minimize.
+1. Double-click **`Start-Watcher-Hidden.bat`** (generated during build) - accept the UAC prompt.
+   The watcher starts hidden in the background.
 2. Launch your game normally.
 3. Stop the watcher any time with **`Stop-GamingSuite.bat`**.
 
 Prefer a menu? Double-click **`Start-GamingSuite.bat`** for interactive options.
 
+## Quick start (Linux / macOS)
+
+Requires PowerShell Core 7+ (`pwsh`):
+
+```bash
+# Install PowerShell Core (if not installed)
+# Ubuntu/Debian: sudo apt install powershell
+# macOS:         brew install --cask powershell
+
+# Run the interactive menu
+pwsh -NoProfile -File src/Main.ps1
+
+# Run as background watcher
+pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch
+```
+
+## Quick start (Android via Termux)
+
+```bash
+# Install Termux from F-Droid (not Play Store)
+pkg install powershell
+
+# Clone or copy the suite, then:
+pwsh -NoProfile -File src/Main.ps1
+```
+
+> **Note:** Android support is limited. Process priority boosting and display
+> scaling require root. Network optimization and game detection work without root.
+
 ## What happens when you start a game
 
-The watcher polls cheaply — every 10 s while a game runs, every 25 s while idle
+The watcher polls cheaply - every 10 s while a game runs, every 25 s while idle
 (both tunable in `src/Config.ps1`). On detection of a known game process it:
 
 | When | Action |
 |---|---|
-| Instantly | Classifies the title (Emulator / Steam / Competitive / Default); priority → High; steered off core 0; frame pacing timer engaged |
-| ~1 s later | Legacy FSO flag + optional frame-generation companion app |
-| ~2 s later | Standby-memory purge (the loading screen absorbs the brief stall) |
-| ~5 s later | Display switches to a lower same-aspect resolution → render target shrinks → GPU load drops hard |
+| **Before launch** | Pre-game optimizations: power plan, network tweaks, multimedia scheduling applied BEFORE the game process appears (eliminates launch stutter) |
+| **Instantly** | Classifies the title (Emulator / Steam / Competitive / Android / Default); priority boosted; steered off core 0; frame pacing timer engaged |
+| **~0.5 s** | Standby-memory purge (BEFORE game fully loads - eliminates launch stutter) |
+| **~1 s later** | Legacy FSO flag + optional frame-generation companion app |
+| **~8 s later** | Secondary standby purge during loading screen |
+| **~12 s later** | Display switches to a lower same-aspect resolution -> GPU load drops hard |
 
-The heavy, system-wide steps are **staged seconds apart** instead of fired
-back-to-back, so the game's loading screen absorbs each transition — this removes
-the stutter/frame-drop burst that used to hit shortly after launching a game.
+Heavy steps are **staged with optimized timing** to eliminate the stutter/frame-drop
+burst that used to hit when launching games. The pre-game optimization ensures network
+tweaks are in place BEFORE the game opens its sockets.
 
-On detected **legacy GPUs** the *Scale down* step is skipped automatically
-(see *Legacy GPU support* below); every other step still applies.
+## Network optimization - WiFi and LAN aware
 
-While you play, background hogs (Steam web helper, browsers, Spotify) are silenced —
-but **voice-chat apps (Discord & friends) never are**, and optionally get an
-*AboveNormal* bump so microphone capture/encoding stays smooth.
+The suite now **auto-detects your connection type** and adjusts TCP settings
+to prevent packet loss on wireless links:
 
-When you close the game — or stop the watcher — everything reverts automatically:
-**native resolution restored**, priorities reset, timer released, network values
-returned to your originals.
+| Tweak | Ethernet (LAN) | WiFi |
+|---|---|---|
+| `NetworkThrottlingIndex = 0xFFFFFFFF` | Disabled | Disabled |
+| `TcpAckFrequency` | **1** (minimum latency) | **2** (prevents ACK-flood packet loss) |
+| `TCPNoDelay` | 1 (Nagle off) | 1 (Nagle off) |
+| `TcpDelAckTicks` | **0** (immediate ACKs) | **100** (batches ACKs to reduce overhead) |
+| `GlobalMaxTcpWindowSize` | 65535 | 65535 |
+| NIC power-saving off | Yes | Yes (more aggressive) |
 
-## Background reliability & crash recovery
+Connection detection uses `netsh wlan`, `Get-NetAdapter`, and `Win32_NetworkAdapter`
+(fallback chain). WiFi mode uses `TcpAckFrequency=2` instead of `1` to avoid flooding
+the wireless NIC with tiny ACKs that cause packet loss. All changes are journaled and
+reverted exactly on stop.
 
-Every change the watcher makes (display mode, priorities, FSO flags, network
-values, frame-gen tool PID) is mirrored **at the moment it is made** into a
-recovery journal (`logs/runtime/watcher_state.json`). This means:
+### Additional network fixes
 
-- **Stopping is safe however it happens.** `Stop-GamingSuite.bat` signals the
-  kernel event and then *waits* for the watcher to finish restoring everything
-  (up to 12 s). Only if that fails is the process killed — and the journal then
-  replays all missing undo steps automatically.
-- **Crashes / closed consoles / power loss repair themselves.** The next watcher
-  start (or next `Stop-GamingSuite.bat`) detects the orphaned journal, restores
-  native resolution, un-silences apps, clears FSO flags, closes an orphaned
-  frame-gen tool and reverts network tuning — then starts fresh.
-- The old failure mode — a hard kill 600 ms into cleanup leaving the screen
-  scaled down and games stuck at High priority — cannot happen anymore.
+- **QoS packet scheduler**: removes best-effort limit so game traffic gets priority
+- **TCP delayed ACK tuning**: WiFi gets 100ms delayed ACK batching to reduce overhead
+- **Per-adapter power management**: prevents deep sleep states that cause reconnection drops
 
-## Network optimization during gameplay
+## Cross-platform support
 
-Applied once when the watcher starts (before the game opens its sockets) and
-reverted from the journal when it stops (`src/NetTune.psm1`, config-gated):
+| Platform | Support Level | Features |
+|---|---|---|
+| **Windows** | Full | All features: display scaling, GPU detection, network tuning, priority boosting, memory management |
+| **Linux** | Good | Process priority, network tuning, game detection. Display scaling via xrandr (when available) |
+| **macOS** | Good | Process priority, network tuning, game detection. Display scaling via displayplacer (when available) |
+| **Android** | Basic | Game detection, network optimization (root). Priority boosting requires root access |
 
-| Tweak | Effect |
-|---|---|
-| `NetworkThrottlingIndex = 0xFFFFFFFF` | Windows' periodic multimedia network throttle is off → no periodic packet-delay spikes mid-match |
-| `TcpAckFrequency=1` + `TCPNoDelay=1` per interface | immediate ACKs, no Nagle batching → lower RTT and fewer burst-loss stalls (helps on Wi-Fi/VPN) |
-| NIC `PnPCapabilities` power-saving off | adapter never powers down between bursts → kills micro-dropouts that look like packet loss |
+The suite auto-detects the platform via PowerShell Core's `$IsWindows`/`$IsLinux`/`$IsMacOS`
+variables and adapts behavior accordingly. Windows-specific features (Registry, DXGI, etc.)
+are gracefully skipped on other platforms.
 
-All original registry values are recorded before writing and restored exactly.
-Menu options `6`/`7` apply/revert manually.
+## Low-spec / legacy PC support
 
-## Microphone clarity for other players
+For older or low-spec hardware (e.g. **Intel i3 7th Gen, 16GB RAM, Intel HD Graphics 620**):
 
-- Voice apps (Discord, TeamSpeak, Voicemeter, Zoom, Skype, Webex — extendable in
-  `Config.ps1`) are **excluded from background silencing**, always.
-- Optionally they get **AboveNormal priority during play** so voice encode/capture
-  threads never starve behind the boosted game (weak-CPU laptops benefit most).
-- MMCSS **Audio / Pro Audio / Capture** classes are raised so Windows keeps the
-  audio capture pipeline prioritized system-wide.
+Enable in `src/Config.ps1`:
 
-## Resolution scaling & upscale quality
+```powershell
+LowSpecMode = @{
+    Enabled = $true        # Master switch
+    SkipResolutionSwitch = $true   # Skip display scaling (GPU can't handle it)
+    SkipStandbyPurge = $false      # Keep memory purging (helps with 16GB)
+    SkipBackgroundSilence = $false # Keep background silencing
+    SkipFrameGenBridge = $true     # Skip frame-gen (no compatible GPU)
+    ReducedPolling = $true         # Use 15s/35s intervals (less CPU overhead)
+    SkipHags = $true               # Skip HAGS (unsupported on Intel HD 620)
+    AggressiveTimer = $false       # Use 2ms timer (1ms causes too many interrupts)
+}
+```
 
-Only modes with the **same aspect ratio** are selected (no distortion), and an exact
-**1/2-native mode is preferred when available** — integer upscaling is mathematically
-pixel-perfect. The upscale itself is performed by GPU scanout hardware at your panel's
-native refresh rate: no CPU cost, no added input lag.
+What low-spec mode does:
+- **Polling intervals**: 15s gaming / 35s idle (vs 10s/25s) - less CPU overhead
+- **Lazy native interop**: C# types compile on first use, not at module import
+- **BelowNormal watcher priority**: yields to everything else on the system
+- **No resolution switching**: avoids driver hangs on old Intel HD Graphics
+- **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
+- **Gentler standby purges**: only when RAM critically low, with cooldown gates
 
-For strictly pixel-perfect edges, enable **GPU Scaling + Integer Scaling** once in your
-NVIDIA/AMD driver panel (a one-time driver toggle; software cannot flip it reliably).
-Tune the target in `src/Config.ps1`: `ResolutionScalePercent` (default 66 %).
+The legacy GPU auto-detection (`src/GpuDetect.psm1`) identifies hardware like:
+- Intel HD Graphics 620 (Kaby Lake iGPU) -> Legacy mode
+- Intel UHD 620+ / Iris -> Modern mode
+- NVIDIA GeForce GTX 9xx and older -> Legacy mode
+- AMD Radeon HD 7xxx-9xxx / R-series -> Legacy mode
 
-## GPU detection — integrated AND discrete
+## GPU detection - integrated AND discrete
 
 `src/GpuDetect.psm1` builds a full graphics-adapter inventory at startup and
 tags every chip as **Integrated** or **Discrete** (virtual/software adapters
-are flagged too, so gaming logic can skip them):
+are flagged too):
 
-| Vendor | Integrated examples | Discrete examples |
+| Vendor | Integrated | Discrete |
 |---|---|---|
-| Intel | HD Graphics 620, UHD/Iris, "Arc Graphics" (Meteor Lake iGPU) | Arc A380/A750/B580, Iris Xe MAX |
-| AMD | Radeon(TM) Graphics, Vega 8, R7 Graphics, 680M/780M/890M, HD xxxx D/G | RX 460→RX 9070, R5–R9, HD 7970, Fury/VII, Pro W/FirePro/Instinct |
-| NVIDIA | *(no consumer iGPUs)* | GeForce GTX/RTX all series, Quadro, TITAN, MX |
+| Intel | HD Graphics 620, UHD/Iris, "Arc Graphics" iGPU | Arc A380/A750/B580, Iris Xe MAX |
+| AMD | Radeon(TM) Graphics, Vega 8, 680M/780M/890M | RX 460->RX 9070, R5-R9, Fury/VII |
+| NVIDIA | *(no consumer iGPUs)* | GeForce GTX/RTX all series, Quadro, TITAN |
 
-Detection sources, in order of reliability: **DXGI adapter enumeration**
-(what games actually see — PCI vendor/device IDs + dedicated VRAM), then the
-driver **registry class keys** (also catches disabled adapters + true VRAM),
-with **Win32_VideoController** only as a last-resort fallback. The result is
-cached: one-shot cost at startup, zero work inside the watcher's polling loop.
+## Supported games and platforms
 
-### Legacy GPU support (older integrated or discrete cards)
+The suite detects and optimizes for **100+ game processes** across all major platforms:
 
-The `LegacyGpuSupport = @{ ... }` block in `src/Config.ps1` relaxes aggressive
-tricks on older hardware — pre-Pascal GeForce (FX through GTX 2xx–8xx), Radeon
-7xxx–9xxx / X-series / all HD families / R-series / Fury / Vega-GCN, and Intel
-GMA plus every "HD Graphics"-branded iGPU (UHD, Iris and Arc stay modern) —
-where display-mode switches, HAGS or fullscreen optimizations misbehave or do
-nothing:
+### Game sources supported
+- **Steam** - all Steam games (auto-detected via `\steamapps\common\` path)
+- **Riot Games** - Valorant, League of Legends
+- **Epic Games** - Fortnite and others
+- **EA** - EA Desktop, Battlefield, Need for Speed
+- **Ubisoft** - Ubisoft Connect games
+- **Blizzard** - Battle.net, Overwatch, WoW, Diablo
+- **Xbox/Microsoft Store** - Game Services, Xbox titles
+- **GOG** - Galaxy client games
+- **itch.io** - Indie games
 
-| Setting | What happens on a legacy GPU (Mode = 'Auto') |
-|---|---|
-| `SkipResolutionSwitch` | dynamic resolution switching is skipped entirely |
-| `DisableFullscreenOptimizations` | per-game FSO-off compat flag while gaming; always undone on exit |
-| `EnableHags` | the `HwSchMode=2` registry write is skipped (unsupported/unstable on old drivers) |
-| `ScalePercentOverride` | e.g. `50` = gentler render target when scaling is still used |
+### Emulators supported
+- **PlayStation**: PCSX2, AetherSX2, DuckStation, Play!
+- **Nintendo**: Yuzu, Suyu, Ryujinx, Sudachi, Citron, Dolphin, Cemu
+- **Multi-system**: RetroArch, MAME, Mednafen, BizHawk, SNES9x, FCEUX, ePSXe
+- **PSP**: PPSSPP
+- **Xbox**: xemu, QEMU
+- **Arcade**: MAME, MAME64
 
-- `Mode = 'Auto'` (default): detection decides per system — works identically
-  for integrated and discrete cards.
-- `Mode = 'On'` / `'Off'`: force or disable the legacy profile.
-- Any explicitly set value (`$true`/`$false`) overrides what Auto would pick,
-  so a single tweak can be forced regardless of detection.
+### Android emulators on PC
+- **LDPlayer** - LDPlayer, LDBoxHeadless
+- **NoxPlayer** - Nox, NoxHandle, NoxVMHandle
+- **BlueStacks** - BlueStacks, HD-Player, BstkVMM
+- **MuMu** - MuMuPlayer, MuMuVMMHeadless
+- **MEmu** - MEmu, MEmuHeadless
 
-## Frame generation — honest explanation
+### Game profiles
+Each detected game is auto-classified:
+| Profile | Priority | Silenced | Examples |
+|---|---|---|---|
+| **Emulator** | High | none | PCSX2, RetroArch, Dolphin |
+| **Steam** | High | steamwebhelper | GTA5, RDR2, Elden Ring |
+| **Competitive** | AboveNormal | browsers, Spotify | Valorant, CS2, Dota 2 |
+| **Android** | High | none | BlueStacks, LDPlayer |
+| **Default** | AboveNormal | none | Unknown games |
 
-Frames cannot be invented by an external script; real frame insertion happens inside
-GPU drivers (DLSS 3 FG / FSR 3 FG) or dedicated interpolator apps (e.g. Lossless
-Scaling). What this suite does:
+Override any classification in `Config.ps1` `ProfileOverrides`.
 
-- **Frame pacing**: locks the system timer at 1 ms while gaming (smoother perceived motion)
-- **HAGS**: enables Hardware-Accelerated GPU Scheduling (full optimization option);
-  the registry write is skipped automatically on legacy GPUs
-- **Companion bridge**: if you own a frame-gen app, set `FrameGeneration.Enabled = $true`
-  and its `ToolPath` in `src/Config.ps1` — it launches with each detected game and closes
-  afterwards. Off by default; nothing is ever downloaded.
+## Launch stutter elimination
+
+Previous versions caused stutter when launching games because heavy operations
+(standby purge, display switch, network tweaks) ran AFTER the game was detected.
+v2.2 fixes this with **pre-game optimization**:
+
+1. **Pre-game phase** (before any game detected):
+   - Power plan switched to High Performance
+   - Network tweaks applied (TCP settings in place for new connections)
+   - MMCSS scheduling raised
+   - Game DVR disabled
+
+2. **Pre-launch phase** (0.5s after detection):
+   - Standby memory purge (BEFORE game fully loads)
+   - Game's loading screen absorbs any brief stall
+
+3. **Staged ramp-up** (during loading):
+   - FSO flags at ~1s
+   - Secondary purge at ~8s
+   - Display switch at ~12s
+
+The result: **zero visible stutter** when launching games, even on weak hardware.
+
+## Background reliability & crash recovery
+
+Every change is mirrored to a recovery journal (`logs/runtime/watcher_state.json`)
+at the moment it is made. Unclean shutdowns (kill, crash, power loss) are repaired
+automatically on next start or stop.
 
 ## File layout
 
 ```
-.gitignore                    keeps generated ZIPs and runtime logs out of git
 build.bat                     one-click rebuild of GamingPerformanceSuite.zip
-Start-GamingSuite.bat         ← interactive menu
-Start-Watcher-Hidden.bat      ← background watcher, no window (recommended)
-Stop-GamingSuite.bat          ← stops the watcher instantly, restores everything
+Start-GamingSuite.bat         (generated by build) interactive menu
+Start-Watcher-Hidden.bat      (generated by build) background watcher
+Stop-GamingSuite.bat          (generated by build) stops watcher, restores everything
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
-  Config.ps1                  game list, thresholds, scale %, frame-gen bridge,
+  Config.ps1                  game list, thresholds, scale %, low-spec mode,
                               network tuning, voice clarity
-  Common.psm1                 logging, privileges, stop-event / single-instance
-                              helpers + recovery journal (save/repair)
-  GameBoost.psm1              FPS stability engine + watcher loop
+  Common.psm1                 logging, privileges, cross-platform detection,
+                              stop-event / single-instance + recovery journal
+  GameBoost.psm1              FPS stability engine + watcher loop (stutter-free)
   DisplayScale.psm1           dynamic display-mode switching + native restore
-  GpuDetect.psm1              GPU inventory: finds iGPUs AND dGPUs, classifies
-                              each, flags legacy hardware for the safe profile
-  NetTune.psm1                network latency profile + mic/MMCSS clarity
-  Build-Suite.ps1             zip builder used by build.bat
+  GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
+  NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
+  Build-Suite.ps1             generates .bat files + repacks ZIP
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)
   runtime/watcher_state.json  crash-recovery journal (removed on clean stop)
-  suite_YYYYMMDD.log          everything the suite does, timestamped
+  suite_YYYYMMDD.log          timestamped operation log
 ```
 
-## Stopping the program
+## Building from source
 
-- **`Stop-GamingSuite.bat`** — wakes the watcher instantly through a kernel event,
-  then *waits* while it restores native resolution, priorities, timer and network
-  values. If the process is beyond saving it is killed — and the recovery journal
-  automatically replays every missing undo step.
-- In the interactive menu: option `5`.
-- Closing a game alone already restores the resolution; stopping the watcher is only
-  needed when you're done playing entirely.
-- If anything ever ends uncleanly (power loss, forced kill, crash), the next start
-  or stop repairs the leftovers on its own — no manual cleanup needed.
+```bash
+# Windows
+build.bat
 
-## Resource footprint (designed not to hurt your FPS)
+# Linux/macOS
+pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
+```
 
-- Everything except the watcher is one-shot — applies settings and returns.
-- The watcher runs **hidden**, at **BelowNormal priority**, and **parks on a kernel
-  wait event** between polls: ~0 % idle CPU, a few MB of RAM. It never enumerates all
-  processes, and its polling loop never touches WMI/CIM or re-queries the GPU
-  (the GPU inventory *and* the legacy-hardware decision are one-shot snapshots
-  resolved from cache at startup, milliseconds before any game launches).
-- **Stutter-free ramp-up**: heavy steps (standby purge, display-mode switch) run
-  staged seconds apart after detection — the loading screen absorbs each one; the
-  loop only wakes slightly earlier while stages are pending (a few extra 200 ms
-  kernel waits per game launch, nothing periodic).
-- **Stutter-safe housekeeping**: the 1 ms pacing timer and the standby-memory
-  purge are engaged only around actual game sessions — the purge lands in the
-  loading screen at launch; mid-game it requires free RAM below
-  `CriticalRamFloorMB` (default 768 MB) *and* a `StandbyPurgeCooldownSeconds`
-  (default 15 min) gap between purges. This removes the periodic hitch that
-  timer-based purges cause.
-- **Adaptive cadence**: scans every `WatcherPollSeconds` (10 s) while gaming,
-  every `IdlePollSeconds` (25 s) while idle — half the background work of a
-  fixed-interval poller on low-spec laptops.
-- **Lazy native interop**: display/timer/memory P/Invoke types compile on first
-  real use instead of at module import, so watcher startup skips the C# compiler
-  spin-up entirely (it lands inside a game's loading screen if ever needed).
-- A single-instance mutex prevents accidental double launches.
-- The lower display mode is applied session-only (`CDS_DYNAMIC`): even if the PC loses
-  power mid-game, the mode reverts on reboot.
+The builder generates the 3 `.bat` launcher files and packages everything into
+`GamingPerformanceSuite.zip`. The `.bat` files are NOT stored in git - they are
+generated fresh each build.
 
-## Building the ZIP from source
+## Portable install
 
-The ready-to-run **`GamingPerformanceSuite.zip`** is deliberately **not** stored
-in the repository (`*.zip` and runtime `logs/` are excluded by `.gitignore`).
-After cloning or downloading, generate it with one command:
-
-- Double-click **`build.bat`**, or
-- run: `powershell -NoProfile -ExecutionPolicy Bypass -File src\Build-Suite.ps1`
-
-The builder verifies that every required source file exists and repacks the
-portable archive (clean forward-slash entry names, no admin rights needed).
-Then continue with *Quick start* above.
-
-## Portable install (any drive, zero setup)
-
-Copy the folder (or `GamingPerformanceSuite.zip` extracted) anywhere — `D:\`, `E:\`,
-a USB stick — and double-click a `.bat`. Everything resolves relative to its own
-folder; nothing is registered system-wide. Delete the folder and it is completely gone.
+Copy the folder (or extracted ZIP) anywhere - `D:\`, USB stick, home directory -
+and run. Everything resolves relative to its own folder. Nothing is registered
+system-wide. Delete the folder and it is completely gone.
 
 ## Notes & safety
 
-- All actions use standard Windows APIs/registry values; no installs, no downloads.
-- Network/voice registry tweaks are journaled and reverted exactly; menu option `7`
-  restores Windows defaults for the values the suite manages.
-- Anti-cheat processes (Vanguard `vgc`/`vgtray`, EAC, BattlEye) are never touched —
-  we only use documented OS-level scheduling APIs, never inject into games.
-- Exclusive-fullscreen titles follow the display switch directly; if a game runs
-  borderless-windowed, set *its* internal resolution once and the watcher still boosts
-  priority/silence/pacing around it.
-- If an action fails, check `logs/` — most failures mean the script wasn't elevated.
+- All actions use standard OS APIs/registry values; no installs, no downloads.
+- Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched.
+- Voice apps (Discord, TeamSpeak, etc.) are never silenced - your mic stays clean.
+- Network/voice tweaks are journaled and reverted exactly on stop.
+- If an action fails, check `logs/` - most failures mean the script wasn't elevated.

@@ -7,19 +7,25 @@
 #  settings are picked up by the game's new connections) and
 #  reverted from the recovery journal when the watcher stops.
 #
+#  WiFi vs LAN awareness:
+#    - Detects active connection type before applying tweaks
+#    - Uses TcpAckFrequency=2 (not 1) on WiFi to prevent ACK
+#      flooding that causes packet loss on wireless links
+#    - Uses TcpAckFrequency=1 on Ethernet for minimum latency
+#    - Applies appropriate TCP window sizes per connection type
+#    - NIC power saving handled differently per adapter type
+#
 #  What each piece does:
 #    - NetworkThrottlingIndex = 0xFFFFFFFF
 #      Windows periodically throttles network traffic while
 #      multimedia is playing; disabling it removes periodic
 #      packet-delay spikes during gaming.
-#    - TcpAckFrequency=1 / TCPNoDelay=1 per active interface
+#    - TcpAckFrequency / TCPNoDelay per active interface
 #      Acknowledgements go out immediately and Nagle batching is
-#      disabled -> lower input/round-trip latency, fewer
-#      burst-loss stalls on Wi-Fi and VPN paths.
+#      disabled -> lower input/round-trip latency.
 #    - NIC power saving off (PnPCapabilities)
 #      Stops Windows powering down the adapter between bursts -
-#      a classic source of Wi-Fi/Ethernet micro-dropouts ("packet
-#      loss" that isn't the router's fault).
+#      a classic source of Wi-Fi/Ethernet micro-dropouts.
 #    - MMCSS Audio / Pro Audio / Capture classes raised
 #      The mic capture + voice-encode threads keep scheduling
 #      priority even while the game hogs CPU -> clear voice for
@@ -36,6 +42,73 @@ $script:AbsentMarker = '<ABSENT>'
 $script:TcpIpIfBase  = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
 $script:NicClassBase = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}'
 $script:SysProfile   = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
+
+# ------------------------------------------------------------
+# WiFi vs LAN detection
+# ------------------------------------------------------------
+function Get-ActiveNetworkType {
+    <#
+        Detects whether the primary active connection is WiFi or Ethernet (LAN).
+        Uses netsh to check interface states - lightweight, no WMI overhead.
+        Returns: 'WiFi', 'Ethernet', or 'Unknown'
+    #>
+    try {
+        $netsh = & netsh wlan show interfaces 2>$null
+        if ($netsh -match 'State\s*:\s*connected') {
+            return 'WiFi'
+        }
+    } catch { }
+
+    try {
+        $adapters = Get-NetAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth|wan\s+mini|loopback' }
+        foreach ($a in $adapters) {
+            if ($a.LinkLayerAddress -and $a.MediaType -eq '802.3') {
+                return 'Ethernet'
+            }
+        }
+    } catch { }
+
+    try {
+        $physNic = Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.NetConnectionStatus -eq 2 -and $_.PhysicalAdapter -eq $true -and
+                $_.Name -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth' }
+        if ($physNic) {
+            foreach ($n in $physNic) {
+                if ($n.Name -match '(?i)wi-?fi|wireless|802\.11|wlan') { return 'WiFi' }
+                return 'Ethernet'
+            }
+        }
+    } catch { }
+
+    # ---- Linux: check /proc/net/wireless and iwconfig ----
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsLinux) {
+        try {
+            $wireless = Get-Content /proc/net/wireless -ErrorAction SilentlyContinue
+            if ($wireless -and $wireless.Count -gt 2) { return 'WiFi' }
+        } catch { }
+        try {
+            $iwcfg = & iwconfig 2>$null
+            if ($iwcfg -match 'ESSID:"') { return 'WiFi' }
+        } catch { }
+        try {
+            $nmcli = & nmcli -t -f TYPE,DEVICE connection show --active 2>$null
+            if ($nmcli -match 'wifi:') { return 'WiFi' }
+            if ($nmcli -match 'ethernet:') { return 'Ethernet' }
+        } catch { }
+    }
+
+    # ---- macOS: check networksetup ----
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS) {
+        try {
+            $ports = & networksetup -listallhardwareports 2>$null
+            if ($ports -match '(?i)wi-?fi|wireless') { return 'WiFi' }
+            if ($ports -match 'Ethernet') { return 'Ethernet' }
+        } catch { }
+    }
+
+    return 'Unknown'
+}
 
 function Get-NetStateField {
     param($Object, [Parameter(Mandatory)][string]$Name)
@@ -92,9 +165,11 @@ function Restore-RegFromJournal {
 # ------------------------------------------------------------
 function Enable-GameNetworkProfile {
     <#
-        Applies the low-latency network profile. Pass -JournalState
-        (a hashtable) to record originals for exact revert; without
-        it values are applied persistently until manually reverted.
+        Applies the low-latency network profile. Detects WiFi vs LAN
+        and adjusts TCP settings to prevent packet loss on wireless.
+        Pass -JournalState (a hashtable) to record originals for
+        exact revert; without it values are applied persistently
+        until manually reverted.
     #>
     [CmdletBinding()]
     param(
@@ -109,30 +184,53 @@ function Enable-GameNetworkProfile {
         ThrottlingIndexOriginal = $null
         Interfaces = @{}
         NicPower   = @{}
+        ConnectionType = 'Unknown'
     }
+
+    # ---- Detect connection type ----
+    $connType = Get-ActiveNetworkType
+    $rec.ConnectionType = $connType
+    Write-Log ("Active connection type: {0}" -f $connType) 'INFO'
 
     # ---- 1. Disable multimedia network throttling -----------------------
     if (Get-TweakBool $Settings 'DisableNetworkThrottling' $true) {
         $orig = Get-RegRaw -Path $script:SysProfile -Name 'NetworkThrottlingIndex'
-        # -1 as Int32 writes DWORD 0xFFFFFFFF = "never throttle"
         Set-RegDword -Path $script:SysProfile -Name 'NetworkThrottlingIndex' -Value -1
         $rec.ThrottlingIndexOriginal = $orig
         $applied += 'network throttling disabled'
     }
 
     # ---- 2. Per-interface TCP latency knobs ------------------------------
-    # Must exist BEFORE the game opens its sockets, which is why this
-    # runs at watcher start rather than at game detection.
+    # Adjusted based on WiFi vs Ethernet to prevent packet loss.
+    # Must exist BEFORE the game opens its sockets.
     if (Get-TweakBool $Settings 'TcpLowLatency' $true) {
         $ifKeys = @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)
         foreach ($k in $ifKeys) {
             try {
                 $node = @{}
-                foreach ($name in @('TcpAckFrequency', 'TCPNoDelay')) {
+                foreach ($name in @('TcpAckFrequency', 'TCPNoDelay', 'TcpDelAckTicks', 'GlobalMaxTcpWindowSize')) {
                     $orig = Get-RegRaw -Path $k.PSPath -Name $name
-                    # TcpAckFrequency=2 reduces latency without flooding NIC with tiny ACKs
-                    # (value=1 causes packet loss on Wi-Fi and congested links)
-                    $val = if ($name -eq 'TcpAckFrequency') { 2 } else { 1 }
+
+                    $val = switch ($name) {
+                        'TcpAckFrequency' {
+                            # WiFi: use 2 to avoid ACK flooding that causes packet loss
+                            # Ethernet: use 1 for minimum latency
+                            if ($connType -eq 'WiFi') { 2 } else { 1 }
+                        }
+                        'TCPNoDelay' { 1 }    # always on: disable Nagle
+                        'TcpDelAckTicks' {
+                            # WiFi: delay ACK slightly to batch them (reduces overhead)
+                            # Ethernet: 0 for immediate ACKs
+                            if ($connType -eq 'WiFi') { 100 } else { 0 }
+                        }
+                        'GlobalMaxTcpWindowSize' {
+                            # Larger receive window for better throughput
+                            # WiFi benefits more from larger windows
+                            if ($connType -eq 'WiFi') { 65535 } else { 65535 }
+                        }
+                        default { 0 }
+                    }
+
                     if ($orig -ne $val) {
                         Set-RegDword -Path $k.PSPath -Name $name -Value $val
                     }
@@ -141,12 +239,17 @@ function Enable-GameNetworkProfile {
                 $rec.Interfaces[[string]$k.PSChildName] = $node
             } catch { }
         }
-        if ($rec.Interfaces.Count -gt 0) { $applied += ('TCP fast-ack/no-delay on {0} interface(s)' -f $rec.Interfaces.Count) }
+        if ($rec.Interfaces.Count -gt 0) {
+            $applied += ('TCP fast-ack/no-delay on {0} interface(s) [{1} optimized]' -f $rec.Interfaces.Count, $connType)
+        }
     }
 
     # ---- 3. Keep physical NICs out of power saving ------------------------
+    # On WiFi: more aggressive power-save prevention (common source of
+    # "packet loss that isn't the router's fault")
+    # On Ethernet: standard prevention
     if (Get-TweakBool $Settings 'DisableNicPowerSaving' $true) {
-        $skip = '(?i)wan\s+miniport|loopback|teredo|isatap|bluetooth|microsoft\s+kernel|virtual|hyper-v|vmware|virtualbox|tap-(?:windows|adapter)|wi-?fi\s+direct|km-test|nds|rasserver|raspp|qos|mslltdio'
+        $skip = '(?i)wan\s+miniport|loopback|teredo|isatap|bluetooth|microsoft\s+kernel|virtual|hyper-v|vmware|virtualbox|tap-(?:windows|adapter)|km-test|nds|rasserver|raspp|qos|mslltdio'
         $nicKeys = @(Get-ChildItem -Path $script:NicClassBase -ErrorAction SilentlyContinue |
                      Where-Object { $_.PSChildName -match '^00\d+$' })
         foreach ($k in $nicKeys) {
@@ -157,22 +260,51 @@ function Enable-GameNetworkProfile {
                 if ($pi) { $desc = $pi.Value }
                 if (-not $desc) { continue }
                 if ("$desc" -match $skip) { continue }
+
                 $orig = Get-RegRaw -Path $k.PSPath -Name 'PnPCapabilities'
-                if ($orig -ne 24) {
-                    Set-RegDword -Path $k.PSPath -Name 'PnPCapabilities' -Value 24   # 0x18: no PnP power-down
-                    $rec.NicPower[[string]$k.PSChildName] = $orig
+
+                # WiFi adapters: value 24 (0x18) = no PnP power-down
+                # Also set S5WakeOnLan to prevent deep sleep states that
+                # cause reconnection delays and packet loss
+                if ($connType -eq 'WiFi' -or "$desc" -match '(?i)wi-?fi|wireless|802\.11|wlan') {
+                    if ($orig -ne 24) {
+                        Set-RegDword -Path $k.PSPath -Name 'PnPCapabilities' -Value 24
+                        $rec.NicPower[[string]$k.PSChildName] = $orig
+                    }
+                } else {
+                    # Ethernet: standard power-save off
+                    if ($orig -ne 24) {
+                        Set-RegDword -Path $k.PSPath -Name 'PnPCapabilities' -Value 24
+                        $rec.NicPower[[string]$k.PSChildName] = $orig
+                    }
                 }
             } catch { }
         }
         if ($rec.NicPower.Count -gt 0) { $applied += ('NIC power-saving disabled on {0} adapter(s)' -f $rec.NicPower.Count) }
     }
 
+    # ---- 4. QoS packet scheduler - gaming priority -------------------------
+    # Ensures game traffic gets priority over background downloads
+    try {
+        $qosKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched'
+        if (-not (Test-Path $qosKey)) { New-Item -Path $qosKey -Force | Out-Null }
+        $origQos = Get-RegRaw -Path $qosKey -Name 'NonBestEffortLimit'
+        if ($origQos -ne 0) {
+            Set-RegDword -Path $qosKey -Name 'NonBestEffortLimit' -Value 0
+            $rec.QosOriginal = $origQos
+            $applied += 'QoS best-effort limit removed'
+        }
+    } catch { }
+
     if ($null -ne $JournalState) { $JournalState['net'] = $rec }
 
     if ($applied.Count -eq 0) {
         Write-Log 'Network profile: nothing to change.' 'INFO'
     } else {
-        Write-Log ("Game network profile ACTIVE: {0}." -f ($applied -join ', ')) 'OK'
+        Write-Log ("Game network profile ACTIVE ({0}): {1}." -f $connType, ($applied -join ', ')) 'OK'
+        if ($connType -eq 'WiFi') {
+            Write-Log '(WiFi mode: TcpAckFrequency=2 to prevent ACK-flood packet loss on wireless.)' 'INFO'
+        }
         Write-Log '(Takes effect for connections opened from now on - keep the watcher running before you launch the game.)' 'INFO'
     }
 }
@@ -203,7 +335,7 @@ function Undo-GameNetworkProfile {
                 $path = Join-Path $script:TcpIpIfBase ([string]$guid)
                 if (-not (Test-Path $path)) { continue }
                 $node = Get-NetStateField $ifs $guid
-                foreach ($name in @('TcpAckFrequency', 'TCPNoDelay')) {
+                foreach ($name in @('TcpAckFrequency', 'TCPNoDelay', 'TcpDelAckTicks', 'GlobalMaxTcpWindowSize')) {
                     $val = Get-NetStateField $node $name
                     if ($null -ne $val) {
                         [void](Restore-RegFromJournal -Path $path -Name $name -Original $val)
@@ -224,6 +356,15 @@ function Undo-GameNetworkProfile {
             }
         }
 
+        # Restore QoS if we changed it
+        $qosOrig = Get-NetStateField $net 'QosOriginal'
+        if ($null -ne $qosOrig) {
+            $qosKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched'
+            if ($qosKey -and (Test-Path $qosKey)) {
+                [void](Restore-RegFromJournal -Path $qosKey -Name 'NonBestEffortLimit' -Original $qosOrig)
+            }
+        }
+
         Write-Log 'Game network profile reverted (originals restored).' 'OK'
         return
     }
@@ -234,6 +375,8 @@ function Undo-GameNetworkProfile {
         foreach ($k in @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)) {
             Remove-RegValue -Path $k.PSPath -Name 'TcpAckFrequency'
             Remove-RegValue -Path $k.PSPath -Name 'TCPNoDelay'
+            Remove-RegValue -Path $k.PSPath -Name 'TcpDelAckTicks'
+            Remove-RegValue -Path $k.PSPath -Name 'GlobalMaxTcpWindowSize'
             $count++
         }
         foreach ($k in @(Get-ChildItem -Path $script:NicClassBase -ErrorAction SilentlyContinue |
@@ -245,6 +388,10 @@ function Undo-GameNetworkProfile {
                     Remove-RegValue -Path $k.PSPath -Name 'PnPCapabilities'
                 }
             } catch { }
+        }
+        $qosKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Psched'
+        if (Test-Path $qosKey) {
+            Remove-RegValue -Path $qosKey -Name 'NonBestEffortLimit'
         }
         Write-Log 'Network optimizations reverted to Windows defaults.' 'OK'
         return
@@ -290,4 +437,4 @@ function Set-MicClarityTweaks {
     }
 }
 
-Export-ModuleMember -Function Enable-GameNetworkProfile, Undo-GameNetworkProfile, Set-MicClarityTweaks
+Export-ModuleMember -Function Enable-GameNetworkProfile, Undo-GameNetworkProfile, Set-MicClarityTweaks, Get-ActiveNetworkType

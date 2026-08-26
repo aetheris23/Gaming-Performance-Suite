@@ -354,8 +354,50 @@ function Stop-BackgroundWatcher {
     }
 }
 
+# ------------------------------------------------------------
+# Cross-platform detection helpers
+# ------------------------------------------------------------
+function Get-PlatformInfo {
+    <#
+        Returns platform information for cross-platform awareness.
+        Works on Windows PowerShell 5.1+ and PowerShell Core 7+.
+    #>
+    $info = @{
+        Platform     = 'Unknown'
+        IsWindows    = $false
+        IsLinux      = $false
+        IsMacOS      = $false
+        IsAndroid    = $false
+        PSVersion    = $PSVersionTable.PSVersion.ToString()
+        Arch         = if ([Environment]::Is64BitProcess) { 'x64' } else { 'x86' }
+    }
+
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # PowerShell Core 7+
+        $info.IsLinux = $IsLinux
+        $info.IsMacOS = $IsMacOS
+        $info.IsWindows = $IsWindows
+        if ($IsLinux) {
+            $info.Platform = 'Linux'
+            # Detect Android via system properties
+            try {
+                $brand = & getprop ro.build.brand 2>$null
+                $maker = & getprop ro.product.manufacturer 2>$null
+                if ($brand -or $maker) { $info.IsAndroid = $true; $info.Platform = 'Android' }
+            } catch { }
+        }
+        if ($IsMacOS) { $info.Platform = 'macOS' }
+    } else {
+        # Windows PowerShell 5.1
+        $info.IsWindows = $true
+        $info.Platform = 'Windows'
+    }
+    return $info
+}
+
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
     Get-SuiteRoot, Get-LogPath, Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
     New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive,
     Get-WatcherJournalPath, Save-WatcherJournal, Get-WatcherJournal, Clear-WatcherJournal,
-    ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher
+    ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher,
+    Get-PlatformInfo
