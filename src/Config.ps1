@@ -148,10 +148,11 @@
 
     # ---- Low-spec / legacy PC mode ---------------------------
     # For older or low-spec hardware (e.g. Intel i3 7th Gen,
-    # 16GB RAM, Intel HD Graphics 620). Reduces overhead and
+    # 8-16GB RAM, Intel HD/UHD Graphics). Reduces overhead and
     # skips heavy optimizations that cause stutter on weak hardware.
+    # Recommended for any PC that struggles with modern games.
     LowSpecMode = @{
-        Enabled                 = $false  # set $true for old/low-spec PCs
+        Enabled                 = $true   # set $false for high-end PCs
         SkipResolutionSwitch    = $false  # skip display resolution changes
         SkipStandbyPurge        = $false  # skip standby memory purging
         SkipBackgroundSilence   = $false  # skip background app deprioritization
@@ -161,6 +162,27 @@
         SkipHags                = $true   # skip HAGS registry write on old GPUs
         MaxCpuCores             = 0       # 0 = auto-detect; >0 = limit affinity to N cores
         AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
+    }
+
+    # ---- Recording software awareness ---------------------------
+    # Detects OBS Studio / other capture tools running alongside
+    # games. When a recorder is active, the suite avoids operations
+    # that cause frame drops or black-frame flashes in the recording
+    # (e.g. display resolution switches). The game still gets
+    # priority/CPU/Network boosts, but capture-safe paths are taken.
+    RecordingSoftware = @{
+        Enabled                 = $true   # master switch for recording detection
+        SkipResolutionSwitch    = $true   # never switch display while recording (prevents black frames)
+        SkipStandbyPurge        = $true   # defer mid-game purge while recording (prevents hitch)
+        ProtectedProcesses      = @(      # process names (without .exe) to NEVER deprioritize
+            'obs64', 'obs32',           # OBS Studio
+            'Streamlabs',               # Streamlabs Desktop
+            'StreamElements',           # StreamElements OBS Live
+            'x264',                     # x264 encoder process
+            'NVENC',                    # NVIDIA encoder helper
+            'AMDUSBWakeupService',      # AMD capture helper
+            'TwitchStudio'              # Twitch Studio
+        )
     }
 
     # ---- Per-game classification -----------------------------

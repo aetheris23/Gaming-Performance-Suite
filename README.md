@@ -1,11 +1,11 @@
-# Gaming Performance Suite v2.2
+# Gaming Performance Suite v2.3
 
 Zero-install performance toolkit for gaming across **Windows, Linux, and macOS**
 (PowerShell 5.1+ / PowerShell Core 7+), with foundational Android support via
 Termux. Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in your
 system, tunes your network for lower latency (with WiFi vs LAN awareness to
-prevent packet loss), keeps your microphone clear, adapts to older hardware, and
-eliminates launch stutter.
+prevent packet loss), keeps your microphone clear, adapts to older hardware,
+eliminates launch stutter, and **works smoothly alongside OBS/capture software**.
 
 ## Quick start (Windows)
 
@@ -47,8 +47,9 @@ pwsh -NoProfile -File src/Main.ps1
 
 ## What happens when you start a game
 
-The watcher polls cheaply - every 10 s while a game runs, every 25 s while idle
-(both tunable in `src/Config.ps1`). On detection of a known game process it:
+The watcher polls cheaply - every 15 s while a game runs (low-spec default),
+every 35 s while idle (both tunable in `src/Config.ps1`). On detection of a
+known game process it:
 
 | When | Action |
 |---|---|
@@ -62,6 +63,11 @@ The watcher polls cheaply - every 10 s while a game runs, every 25 s while idle
 Heavy steps are **staged with optimized timing** to eliminate the stutter/frame-drop
 burst that used to hit when launching games. The pre-game optimization ensures network
 tweaks are in place BEFORE the game opens its sockets.
+
+> **Recording software detected?** When OBS, Streamlabs, or another capture tool
+> is running, the suite automatically takes **capture-safe paths**: display resolution
+> switches and standby purges are deferred to prevent black frames or hitches in
+> your recording. Game priority/CPU/network boosts still apply normally.
 
 ## Network optimization - WiFi and LAN aware
 
@@ -103,19 +109,20 @@ are gracefully skipped on other platforms.
 
 ## Low-spec / legacy PC support
 
-For older or low-spec hardware (e.g. **Intel i3 7th Gen, 16GB RAM, Intel HD Graphics 620**):
+For older or low-spec hardware (e.g. **Intel i3 7th Gen, 8-16GB RAM, Intel HD/UHD Graphics**).
 
-Enable in `src/Config.ps1`:
+Low-spec mode is **enabled by default** in v2.3 for minimal resource usage.
+If you have a high-end PC, set `Enabled = $false` in `src/Config.ps1`:
 
 ```powershell
 LowSpecMode = @{
-    Enabled = $true        # Master switch
-    SkipResolutionSwitch = $true   # Skip display scaling (GPU can't handle it)
-    SkipStandbyPurge = $false      # Keep memory purging (helps with 16GB)
+    Enabled = $true        # Master switch (ON by default in v2.3)
+    SkipResolutionSwitch = $false  # Keep display scaling (helps FPS on weak GPUs)
+    SkipStandbyPurge = $false      # Keep memory purging (helps with 8-16GB)
     SkipBackgroundSilence = $false # Keep background silencing
     SkipFrameGenBridge = $true     # Skip frame-gen (no compatible GPU)
     ReducedPolling = $true         # Use 15s/35s intervals (less CPU overhead)
-    SkipHags = $true               # Skip HAGS (unsupported on Intel HD 620)
+    SkipHags = $true               # Skip HAGS (unsupported on Intel HD)
     AggressiveTimer = $false       # Use 2ms timer (1ms causes too many interrupts)
 }
 ```
@@ -124,9 +131,53 @@ What low-spec mode does:
 - **Polling intervals**: 15s gaming / 35s idle (vs 10s/25s) - less CPU overhead
 - **Lazy native interop**: C# types compile on first use, not at module import
 - **BelowNormal watcher priority**: yields to everything else on the system
-- **No resolution switching**: avoids driver hangs on old Intel HD Graphics
 - **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
 - **Gentler standby purges**: only when RAM critically low, with cooldown gates
+- **Throttled exit checks**: process exit scans every other cycle during gaming
+
+## Recording software support (OBS, Streamlabs, etc.)
+
+The suite **auto-detects** when capture/recording software is running alongside a
+game and automatically takes **capture-safe paths** to prevent frame drops, black
+frames, or hitches in your recording:
+
+| When recorder is active | Behavior |
+|---|---|
+| Display resolution switch | **Deferred** - prevents black-frame flashes in the recording |
+| Standby memory purge | **Deferred** - prevents visible hitch mid-recording |
+| Game priority boost | **Still applied** - game stays smooth |
+| CPU/affinity steering | **Still applied** - game gets clean cores |
+| Network optimization | **Still applied** - low latency for streaming |
+| Background silencing | **Still applied** - but recorder process is never touched |
+
+### Protected recording processes
+
+These processes are **never deprioritized** by background silencing:
+
+- OBS Studio (`obs64`, `obs32`)
+- Streamlabs Desktop
+- StreamElements OBS Live
+- Twitch Studio
+- x264 / NVENC encoder helpers
+
+Additional processes can be added in `Config.ps1`:
+
+```powershell
+RecordingSoftware = @{
+    Enabled                 = $true
+    SkipResolutionSwitch    = $true   # Prevents black frames in recording
+    SkipStandbyPurge        = $true   # Prevents hitch in recording
+    ProtectedProcesses      = @(
+        'obs64', 'obs32',
+        'Streamlabs',
+        'MyCustomRecorder'            # Add your own
+    )
+}
+```
+
+> **Tip:** If you record with OBS, leave both `Skip` options at `$true` for the
+> smoothest recording. The game still gets all priority/CPU/network boosts - only
+> the capture-disruptive operations are deferred.
 
 The legacy GPU auto-detection (`src/GpuDetect.psm1`) identifies hardware like:
 - Intel HD Graphics 620 (Kaby Lake iGPU) -> Legacy mode
@@ -192,7 +243,7 @@ Override any classification in `Config.ps1` `ProfileOverrides`.
 
 Previous versions caused stutter when launching games because heavy operations
 (standby purge, display switch, network tweaks) ran AFTER the game was detected.
-v2.2 fixes this with **pre-game optimization**:
+v2.2 introduced pre-game optimization; v2.3 adds recording-aware capture-safe paths:
 
 1. **Pre-game phase** (before any game detected):
    - Power plan switched to High Performance
@@ -227,10 +278,11 @@ Stop-GamingSuite.bat          (generated by build) stops watcher, restores every
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
   Config.ps1                  game list, thresholds, scale %, low-spec mode,
-                              network tuning, voice clarity
+                              network tuning, voice clarity, recording detection
   Common.psm1                 logging, privileges, cross-platform detection,
                               stop-event / single-instance + recovery journal
-  GameBoost.psm1              FPS stability engine + watcher loop (stutter-free)
+  GameBoost.psm1              FPS stability engine + watcher loop (stutter-free,
+                              recording-aware, low-spec optimized)
   DisplayScale.psm1           dynamic display-mode switching + native restore
   GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
   NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
@@ -266,5 +318,7 @@ system-wide. Delete the folder and it is completely gone.
 - All actions use standard OS APIs/registry values; no installs, no downloads.
 - Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched.
 - Voice apps (Discord, TeamSpeak, etc.) are never silenced - your mic stays clean.
+- Recording software (OBS, Streamlabs, etc.) is never deprioritized or disrupted.
+- Capture-safe paths prevent black frames and hitches while recording.
 - Network/voice tweaks are journaled and reverted exactly on stop.
 - If an action fails, check `logs/` - most failures mean the script wasn't elevated.

@@ -346,6 +346,17 @@ $script:VoiceAppPatterns = @(
     'zoom*', 'skype*', 'webex*'
 )
 
+# Recording/capture software that must NEVER be deprioritized or
+# disrupted. These processes compete with the game for GPU/CPU and
+# any hitch in their scheduling causes visible stutter in recordings.
+# Extended via Config.ps1 RecordingSoftware.ProtectedProcesses.
+$script:RecordingPatterns = @(
+    'obs64', 'obs32',                   # OBS Studio
+    'streamlabs',                        # Streamlabs Desktop
+    'streamelements',                    # StreamElements
+    'twitchstudio'                       # Twitch Studio
+)
+
 function Get-GameProfile {
     <#
         Classifies a running game process into one of the profile names:
@@ -434,6 +445,7 @@ function Update-BackgroundSilence {
         [hashtable]$State,           # pid -> info of processes currently silenced
         [hashtable]$Journal,         # recovery journal (optional)
         [string[]]$ProtectedPatterns = @(),
+        [string[]]$RecordingPatterns = @(),
         [switch]$Activate            # off = restore everything in $State to Normal
     )
 
@@ -465,6 +477,12 @@ function Update-BackgroundSilence {
                 if ($t.ProcessName -like $pat) { $isVoice = $true; break }
             }
             if ($isVoice) { continue }
+            # Never touch recording/capture software - causes frame drops in recordings
+            $isRecorder = $false
+            foreach ($pat in $RecordingPatterns) {
+                if ($t.ProcessName -like $pat) { $isRecorder = $true; break }
+            }
+            if ($isRecorder) { continue }
             if (-not $State.ContainsKey($t.Id)) {
                 $t.PriorityClass = 'BelowNormal'
                 $State[$t.Id] = @{ Name = $t.ProcessName; Priority = 'BelowNormal' }
@@ -528,6 +546,37 @@ function Update-VoiceChatSupport {
             Write-Log ("Voice app '{0}' (PID {1}) -> AboveNormal for stutter-free mic" -f $t.ProcessName, $t.Id) 'INFO'
         } catch { }
     }
+}
+
+# ------------------------------------------------------------
+# Recording-software detection: lightweight one-shot check
+# ------------------------------------------------------------
+function Test-RecordingSoftwareActive {
+    <#
+        Returns $true if any known recording/capture software is running.
+        Uses a focused Get-Process -Name call (kernel-level, no WMI/CIM).
+        The result is cached for the duration of one poll cycle so multiple
+        checks within the same iteration don't repeat the syscall.
+    #>
+    param(
+        [string[]]$ExtraPatterns = @(),
+        [ref]$CacheVar
+    )
+
+    $all = @($script:RecordingPatterns) + @($ExtraPatterns)
+    if ($all.Count -eq 0) { return $false }
+
+    # Return cached result if still valid this poll cycle
+    if ($CacheVar -and $CacheVar.Value -ne $null) { return [bool]$CacheVar.Value }
+
+    $found = $false
+    try {
+        $procs = Get-Process -Name @($all) -ErrorAction SilentlyContinue
+        if ($procs -and $procs.Count -gt 0) { $found = $true }
+    } catch { }
+
+    if ($CacheVar) { $CacheVar.Value = $found }
+    return $found
 }
 
 # ------------------------------------------------------------
@@ -675,6 +724,7 @@ function Start-GameWatcher {
         [hashtable]$NetworkSettings    = @{ Enabled = $true },
         [hashtable]$VoiceSettings      = @{},
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
+        [hashtable]$RecordingSettings  = @{ Enabled = $true },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [System.Threading.EventWaitHandle]$StopEvent = $null
@@ -712,6 +762,25 @@ function Start-GameWatcher {
         }
     }
 
+    # ---- resolve recording software settings --------------------
+    $recOn = $true
+    if ($RecordingSettings -and $RecordingSettings.ContainsKey('Enabled')) { $recOn = [bool]$RecordingSettings['Enabled'] }
+    $recSkipRes  = $false
+    $recSkipPurge = $false
+    $recExtraProtected = @()
+    if ($recOn) {
+        if ($RecordingSettings.ContainsKey('SkipResolutionSwitch')) { $recSkipRes = [bool]$RecordingSettings['SkipResolutionSwitch'] }
+        if ($RecordingSettings.ContainsKey('SkipStandbyPurge'))    { $recSkipPurge = [bool]$RecordingSettings['SkipStandbyPurge'] }
+        if ($RecordingSettings.ContainsKey('ProtectedProcesses')) {
+            $recExtraProtected = @($RecordingSettings['ProtectedProcesses']) | ForEach-Object { "$_*" }
+        }
+        if ($recSkipRes -or $recSkipPurge) {
+            Write-Log 'Recording software detection ACTIVE: capture-safe paths enabled.' 'INFO'
+            if ($recSkipRes)  { Write-Log '  - Resolution switch: DEFERRED while recorder running' 'INFO' }
+            if ($recSkipPurge) { Write-Log '  - Standby purge: DEFERRED while recorder running' 'INFO' }
+        }
+    }
+
     Write-GpuInventory
 
     $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
@@ -730,7 +799,7 @@ function Start-GameWatcher {
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('ExtraProtectedProcessNames')) {
         $protectedExtra = @($VoiceSettings['ExtraProtectedProcessNames']) | ForEach-Object { "$_*" }
     }
-    $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra
+    $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra + $recExtraProtected
 
     $boostVoice = $true
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('BoostVoiceAppsDuringGame')) { $boostVoice = [bool]$VoiceSettings['BoostVoiceAppsDuringGame'] }
@@ -828,8 +897,30 @@ function Start-GameWatcher {
     }
     $extrasQueued = @{}
 
+    # ---- recording detection cache (reset each poll cycle) ------
+    $recordingCache = $null          # $true/$false, cleared each iteration
+
+    # ---- performance throttling: avoid redundant work per cycle --
+    # Background silence is expensive (iterates all target processes);
+    # only re-run it every N cycles (30s at 15s poll) instead of every poll.
+    $silenceThrottleSec = if ($isLowSpec) { 45 } else { 30 }
+    $lastSilenceUtc     = [datetime]::MinValue
+    # PID exit checks: only scan the boosted table every other cycle
+    # when gaming (the common case is no exits), halving the Get-Process
+    # calls inside the cleanup loop.
+    $exitCheckCounter   = 0
+
     try {
         while ($true) {
+            # Reset per-cycle caches
+            $recordingCache = $null
+
+            # Detect recording software (lightweight single Get-Process call)
+            $isRecording = $false
+            if ($recOn) {
+                $isRecording = Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected -CacheVar ([ref]$recordingCache)
+            }
+
             # Name-filtered lookup at the provider level - no full process
             # enumeration, no WMI. Two cheap native calls per poll total.
             $running = @(Get-Process -Name $GameNames -ErrorAction SilentlyContinue)
@@ -856,17 +947,21 @@ function Start-GameWatcher {
                         # ---- PRE-LAUNCH PURGE: run BEFORE game fully loads ----
                         #     to prevent launch stutter. The game's own loading
                         #     screen will mask any remaining memory pressure.
-                        if ($PrePurgeBeforeLaunch -and -not $preGamePurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge')) {
+                        #     DEFERRED while recording software is active to
+                        #     prevent hitch in the captured output.
+                        $recSkipPurgeNow = $isRecording -and $recSkipPurge
+                        if ($PrePurgeBeforeLaunch -and -not $preGamePurged -and -not $lowSpecSkipPurge -and -not $recSkipPurgeNow -and -not (Test-RampPending 'purge')) {
                             Add-Ramp 'purge' 0.5 0   # 0.5s delay - fast enough to run before game loads
                         }
                         $preGamePurged = $true
 
                         # ---- HEAVY steps go onto the staged ramp so the loading
                         #      screen absorbs them one at a time (no launch hitch) ----
-                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge2')) {
+                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not $lowSpecSkipPurge -and -not $recSkipPurgeNow -and -not (Test-RampPending 'purge2')) {
                             Add-Ramp 'purge2' 8 0   # secondary purge during loading
                         }
-                        if (-not $skipScale -and -not $scaledApplied -and -not (Test-RampPending 'resscale')) {
+                        $recSkipResNow = $isRecording -and $recSkipRes
+                        if (-not $skipScale -and -not $recSkipResNow -and -not $scaledApplied -and -not (Test-RampPending 'resscale')) {
                             Add-Ramp 'resscale' 12 0   # display switch after game stabilizes
                         }
                         if (-not $extrasQueued.ContainsKey($game.Id)) {
@@ -879,7 +974,8 @@ function Start-GameWatcher {
                         if (-not $lowSpecSkipSilence) {
                             Update-BackgroundSilence -Names @($prof.Deprioritize) `
                                 -ExceptPid $game.Id -State $silenced -Journal $journal `
-                                -ProtectedPatterns $protectedNames -Activate
+                                -ProtectedPatterns $protectedNames -RecordingPatterns $script:RecordingPatterns -Activate
+                            $lastSilenceUtc = [datetime]::UtcNow
                         }
 
                         if ($boostVoice) {
@@ -899,12 +995,18 @@ function Start-GameWatcher {
             }
 
             # Clean exited PIDs from tracking table
+            # Throttled: only scan every other cycle to halve Get-Process calls.
             $removedAny = $false
-            foreach ($procId in @($boosted.Keys)) {
-                if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
-                    Write-Log ("'{0}' session ended (PID {1})." -f $boosted[$procId], $procId) 'INFO'
-                    $null = $boosted.Remove($procId)
-                    $removedAny = $true
+            $exitCheckCounter++
+            $exitCheckInterval = if ($running.Count -gt 0) { 2 } else { 1 }
+            if ($exitCheckCounter -ge $exitCheckInterval) {
+                $exitCheckCounter = 0
+                foreach ($procId in @($boosted.Keys)) {
+                    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+                        Write-Log ("'{0}' session ended (PID {1})." -f $boosted[$procId], $procId) 'INFO'
+                        $null = $boosted.Remove($procId)
+                        $removedAny = $true
+                    }
                 }
             }
 
@@ -1014,8 +1116,8 @@ function Start-GameWatcher {
             # stalls the whole memory manager (a visible hitch if it lands
             # mid-frame), so during play it happens ONLY below the critical
             # floor AND at most once per cooldown window. Skipped entirely
-            # in low-spec mode to avoid additional overhead.
-            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
+            # in low-spec mode or while recording software is active.
+            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge -and -not ($isRecording -and $recSkipPurge)) {
                 if (([datetime]::UtcNow - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
                     $freeMB = Get-FreeRamMB
                     if ($freeMB -lt $CriticalRamFloorMB) {

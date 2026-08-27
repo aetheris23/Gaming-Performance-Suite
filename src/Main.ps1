@@ -51,6 +51,7 @@ $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { 
 $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Enabled = $false } }
+$recCfg     = if ($cfg['RecordingSoftware'])   { $cfg['RecordingSoftware'] }   else { @{ Enabled = $true } }
 
 # Apply LowSpec polling overrides early
 if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
@@ -138,7 +139,7 @@ function Invoke-Watcher {
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
-            -LowSpecSettings $lowSpecCfg `
+            -LowSpecSettings $lowSpecCfg -RecordingSettings $recCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
             -StopEvent $StopEvent
@@ -169,9 +170,9 @@ if ($BackgroundWatch) {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.2'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.3'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
-    Write-Host '  Cross-platform ready | Low-spec optimized'           -ForegroundColor Cyan
+    Write-Host '  Cross-platform | Low-spec optimized | OBS-aware'      -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
@@ -314,6 +315,16 @@ function Show-Status {
         Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
     }
     Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
+
+    # ---- recording software summary ------------------------------------
+    $recOnCfg = if ($null -ne $recCfg['Enabled']) { [bool]$recCfg['Enabled'] } else { $true }
+    if ($recOnCfg) {
+        $recSkipResInfo = if ($recCfg.ContainsKey('SkipResolutionSwitch')) { [bool]$recCfg['SkipResolutionSwitch'] } else { $true }
+        $recSkipPurgeInfo = if ($recCfg.ContainsKey('SkipStandbyPurge'))   { [bool]$recCfg['SkipStandbyPurge'] }   else { $true }
+        Write-Log ("Recording software detection: ACTIVE (res switch deferred: {0}, purge deferred: {1})" -f $recSkipResInfo, $recSkipPurgeInfo) 'INFO'
+    } else {
+        Write-Log 'Recording software detection: DISABLED' 'INFO'
+    }
 
     # ---- platform info ------------------------------------------
     Write-Log ("Platform: {0} | PowerShell {1}" -f $PSVersionTable.Platform, $PSVersionTable.PSVersion) 'INFO'
