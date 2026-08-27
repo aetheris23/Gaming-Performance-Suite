@@ -30,8 +30,17 @@ function Write-Log {
 }
 
 function Test-Administrator {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    # Windows: membership in the Administrators group.
+    # Unix (Linux/macOS): running as root (UID 0) - the standard equivalent.
+    try {
+        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+            try { return ((& id -u) -eq '0') } catch { return $false }
+        }
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
 }
 
 function Assert-AdminOrThrow {
@@ -147,6 +156,36 @@ function Test-WatcherPidAlive {
     return $watcherPid
 }
 
+function Test-WatcherRunning {
+    <#
+        Reports whether a game watcher is alive RIGHT NOW by probing the
+        named instance mutex the watcher holds for its entire lifetime
+        (created in Invoke-Watcher, released only on exit). This does not
+        depend on watcher.pid being present, so it stays correct even if
+        the pid file was lost or removed by a recovery. Falls back to the
+        pid-file check when the mutex cannot be opened (e.g. no watcher
+        has ever run, or cross-session rights).
+    #>
+    $m = $null
+    try { $m = [System.Threading.Mutex]::OpenExisting((Get-WatcherMutexName)) }
+    catch { return ((Test-WatcherPidAlive) -gt 0) }
+    try {
+        if ($m.WaitOne(0)) {
+            # Nothing owns it right now -> no watcher alive. Release the probe hold.
+            try { [void]$m.ReleaseMutex() } catch { }
+            return $false
+        }
+        # It is owned by the live watcher -> RUNNING.
+        return $true
+    } catch {
+        # Owner died while holding it (abandoned) - we now own it. Not running.
+        try { [void]$m.ReleaseMutex() } catch { }
+        return $false
+    } finally {
+        if ($m) { try { $m.Dispose() } catch { } }
+    }
+}
+
 # ------------------------------------------------------------
 # Recovery journal.
 #
@@ -182,7 +221,8 @@ function Clear-WatcherJournal {
 function ConvertTo-HashtableDeep {
     <# Recursively converts PSCustomObject/arrays from ConvertFrom-Json
        into hashtables so StrictMode-safe lookups work everywhere. #>
-    param([Parameter(Mandatory)]$Value)
+    param($Value)
+    if ($null -eq $Value) { return $null }
     if ($Value -is [System.Management.Automation.PSCustomObject]) {
         $h = @{}
         foreach ($p in $Value.PSObject.Properties) { $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }
@@ -300,7 +340,17 @@ function Repair-OrphanedWatcherState {
     } catch { Write-Log "Recovery: network revert failed: $_" 'WARN' }
 
     Clear-WatcherJournal
-    Remove-Item (Get-WatcherPidFile) -Force -ErrorAction SilentlyContinue
+
+    # Remove the pid file ONLY if it does not describe a live watcher.
+    # Repair runs at the top of a FRESH watcher start, after Invoke-Watcher
+    # already wrote watcher.pid for the process that is now repairing us.
+    # Deleting that file unconditionally orphaned our own live marker and
+    # made every status check report "watcher is not running" even while
+    # the new watcher was running fine.
+    if ((Test-WatcherPidAlive) -eq 0) {
+        Remove-Item (Get-WatcherPidFile) -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Log 'Recovery complete - system state restored.' 'OK'
     return $true
 }
@@ -397,7 +447,7 @@ function Get-PlatformInfo {
 
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
     Get-SuiteRoot, Get-LogPath, Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
-    New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive,
+    New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive, Test-WatcherRunning,
     Get-WatcherJournalPath, Save-WatcherJournal, Get-WatcherJournal, Clear-WatcherJournal,
     ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher,
     Get-PlatformInfo

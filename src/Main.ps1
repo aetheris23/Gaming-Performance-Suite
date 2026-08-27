@@ -46,6 +46,10 @@ $resSettings = @{
     ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
 }
+# Session lifecycle: after the last monitored game closes, the watcher
+# undoes every change and exits completely instead of staying resident
+# and polling for a "next game" in the background.
+$exitWhenGameEnds = if ($null -ne $cfg['ExitWhenGameSessionEnds']) { [bool]$cfg['ExitWhenGameSessionEnds'] } else { $true }
 $fgSettings = if ($cfg['FrameGeneration']) { $cfg['FrameGeneration'] } else { @{ Enabled = $false; ToolPath = '' } }
 $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { @{ Mode = 'Auto' } }
 $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
@@ -142,6 +146,7 @@ function Invoke-Watcher {
             -LowSpecSettings $lowSpecCfg -RecordingSettings $recCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
+            -ExitWhenGameSessionEnds:([bool]$exitWhenGameEnds) `
             -StopEvent $StopEvent
     } finally {
         if ($TrackPidFile) {
@@ -194,10 +199,10 @@ function Show-Banner {
     $watcherAlive = $false
     try { $watcherAlive = Test-WatcherAlive } catch { }
     if ($watcherAlive) {
-        Write-Host (' Watcher: RUNNING in background') -ForegroundColor Green
+        Write-Host (' Game watcher running.') -ForegroundColor Green
     } else {
         Write-Host ''
-        Write-Host ' !!! WARNING: Game Watcher is NOT running !!!' -ForegroundColor Red -BackgroundColor Black
+        Write-Host ' !!! WARNING: Game watcher is not running !!' -ForegroundColor Red -BackgroundColor Black
         Write-Host ' Games will NOT be auto-optimized. Start the watcher' -ForegroundColor Red
         Write-Host ' with option 3 below, or run Start-Watcher-Hidden.bat' -ForegroundColor Red
         Write-Host ''
@@ -244,7 +249,9 @@ function Invoke-FullOptimization {
 }
 
 function Test-WatcherAlive {
-    return ((Test-WatcherPidAlive) -gt 0)
+    # Robust liveness: probes the named instance mutex (falling back to the
+    # pid file) - not just the pid file, which a recovery could have removed.
+    return [bool](Test-WatcherRunning)
 }
 
 function Show-Status {
@@ -352,8 +359,17 @@ function Wait-MenuKey {
                         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
                         '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
                     )
-                    Start-Sleep -Seconds 1
-                    if (Test-WatcherAlive) { Write-Log 'Background watcher started. No window needed - play your game.' 'OK' }
+                    # Wait for the watcher to announce itself (instance mutex /
+                    # pid file) instead of a fixed 1s guess - module import and
+                    # GPU detection can take a moment on slower machines.
+                    $deadline = [datetime]::UtcNow.AddSeconds(8)
+                    $launched = $false
+                    while ([datetime]::UtcNow -lt $deadline -and -not $launched) {
+                        Start-Sleep -Milliseconds 400
+                        $launched = Test-WatcherAlive
+                    }
+                    if ($launched) { Write-Log 'Background watcher started. No window needed - play your game.' 'OK' }
+                    else          { Write-Log 'Watcher did not come up within 8s; check logs/ for errors.' 'WARN' }
                 }
             } catch { Write-Log $_.Exception.Message 'ERROR' }
             Wait-MenuKey

@@ -697,6 +697,16 @@ function Undo-FsoCompatFlags {
 #    exit or stop. Parks on a wait handle => ~0% idle CPU and an
 #    instantly-responsive stop signal.
 #
+#    SESSION-SCOPED LIFE (ExitWhenGameSessionEnds, default on):
+#    - before any game appears it waits patiently (no heavy load)
+#    - when the last monitored game exits it undoes every change
+#      and EXITS completely instead of staying resident, so no
+#      background process keeps polling for a "next game" on a
+#      low-spec machine. Stop-GamingSuite.bat / menu option 5
+#      still stop it instantly at any time.
+#    Set ExitWhenGameSessionEnds = $false in Config.ps1 for the
+#    old always-on behavior.
+#
 #    STUTTER-FREE DESIGN:
 #    - Pre-game optimizations applied BEFORE game process appears
 #    - Standby purge BEFORE game launch (during pre-detect phase)
@@ -727,6 +737,7 @@ function Start-GameWatcher {
         [hashtable]$RecordingSettings  = @{ Enabled = $true },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
+        [bool]$ExitWhenGameSessionEnds = $true,
         [System.Threading.EventWaitHandle]$StopEvent = $null
     )
 
@@ -865,6 +876,7 @@ function Start-GameWatcher {
     $fsoDone       = @{}   # exe paths we flagged for FSO-off this session
     $fgByUs        = $false
     $fgPid         = 0
+    $hadSession    = $false   # any game was actually detected+boosted this run
     $pollMs        = $PollSeconds * 1000
     $idleMs        = [Math]::Max($pollMs, $IdlePollSeconds * 1000)
     $extIdleMs     = [Math]::Max($idleMs, $ExtendedIdlePollSeconds * 1000)
@@ -970,6 +982,7 @@ function Start-GameWatcher {
                         }
 
                         $boosted[$game.Id] = $profName
+                        $hadSession = $true
 
                         if (-not $lowSpecSkipSilence) {
                             Update-BackgroundSilence -Names @($prof.Deprioritize) `
@@ -1010,7 +1023,9 @@ function Start-GameWatcher {
                 }
             }
 
-            # Last game closed -> undo every session change, but watcher PERSISTS
+            # Last game closed -> undo every session change, then shut the
+            # watcher down completely (final cleanup runs in the finally block).
+            # The watcher is session-scoped, NOT a resident background service.
             if ($boosted.Count -eq 0) {
                 if ($silenced.Count -gt 0) {
                     Update-BackgroundSilence -State $silenced -Journal $journal
@@ -1035,8 +1050,12 @@ function Start-GameWatcher {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
                     }
-                    Write-Log ('Game session ended. Watcher still running - waiting for next game...') 'INFO'
-                    $idleSinceUtc = [datetime]::UtcNow
+                    if ($ExitWhenGameSessionEnds) {
+                        Write-Log 'Game session ended. Watcher shutting down completely - nothing keeps polling for another game.' 'ACTION'
+                    } else {
+                        Write-Log 'Game session ended. Watcher still running - waiting for next game...' 'INFO'
+                        $idleSinceUtc = [datetime]::UtcNow
+                    }
                 }
                 # Release the pacing timer while idle (guarded, so this runs
                 # once per game session, not on every idle poll).
@@ -1046,6 +1065,14 @@ function Start-GameWatcher {
                 }
                 $sessionPurged = $false
                 $preGamePurged = $false
+
+                # COMPLETE SHUTDOWN after a real game session: undo steps above
+                # already restored the system; break out so the finally block
+                # reverts the network profile, clears the recovery journal and
+                # removes the pid file, then this watcher process exits.
+                if ($ExitWhenGameSessionEnds -and $hadSession -and $removedAny) {
+                    break
+                }
             }
 
             # ---- execute due ramp stages ---------------------------------

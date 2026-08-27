@@ -130,6 +130,15 @@
     ExtendedIdlePollSeconds= 60      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
     IdleHeartbeatMinutes   = 5       # log "watcher alive" every N minutes while idle (0 = off)
 
+    # ---- Session lifecycle ----------------------------------
+    # When the last monitored game exits, the watcher undoes every
+    # optimization and EXITS completely instead of staying resident
+    # and polling for a "next game". Nothing is left running in the
+    # background on low-spec machines. It still stops instantly via
+    # Stop-GamingSuite.bat or menu option 5. Set $false to keep the
+    # old always-on behavior (watcher waits for future games).
+    ExitWhenGameSessionEnds = $true
+
     # ---- Standby memory (stutter-safe policy) -----------------
     # A standby-list purge stalls the whole memory manager, so it is
     # never repeated mid-gameplay on a timer. It runs once when a game

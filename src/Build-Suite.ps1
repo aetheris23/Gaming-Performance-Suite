@@ -7,6 +7,13 @@
 
     The 3 .bat launcher files are GENERATED during build (not tracked in git)
     and included in the output ZIP so end-users get a ready-to-run package.
+
+    The output ZIP is a RUNTIME-ONLY distribution:
+      - includes: Start-GamingSuite.bat, Start-Watcher-Hidden.bat,
+        Stop-GamingSuite.bat, README.md, .gitignore and the src/ suite
+      - EXCLUDES the build tooling (build.bat and src\Build-Suite.ps1),
+        so extracting the ZIP can never duplicate or overwrite the builder.
+    Rebuild from the source repository, not from the ZIP.
 #>
 [CmdletBinding()]
 param(
@@ -120,8 +127,10 @@ Set-Content -Path (Join-Path $genDir 'Stop-GamingSuite.bat') -Value $batStop -En
 Write-Host 'Generated launcher .bat files in .build_generated/' -ForegroundColor Green
 
 # ---- Source files that live in the repo ----
+# RUNTIME-ONLY package: the build tooling (build.bat, src\Build-Suite.ps1)
+# is deliberately excluded from the ZIP so it can never be duplicated or
+# overwritten by extracting the distribution over the source tree.
 $srcFiles = @(
-    'build.bat',
     'README.md',
     '.gitignore',
     'src\Common.psm1',
@@ -130,8 +139,7 @@ $srcFiles = @(
     'src\DisplayScale.psm1',
     'src\GameBoost.psm1',
     'src\GpuDetect.psm1',
-    'src\NetTune.psm1',
-    'src\Build-Suite.ps1'
+    'src\NetTune.psm1'
 )
 
 $missing = @($srcFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })
@@ -182,4 +190,4 @@ try {
 Remove-Item $genDir -Recurse -Force -ErrorAction SilentlyContinue
 
 $info = Get-Item -LiteralPath $outPath
-Write-Host ('Created {0} ({1:N0} bytes, {2} entries)' -f $info.FullName, $info.Length, $allFiles.Count)
+Write-Host ('Created {0} ({1:N0} bytes, {2} entries) - runtime-only package, builder excluded.' -f $info.FullName, $info.Length, $allFiles.Count)

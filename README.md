@@ -9,10 +9,12 @@ eliminates launch stutter, and **works smoothly alongside OBS/capture software**
 
 ## Quick start (Windows)
 
-1. Double-click **`Start-Watcher-Hidden.bat`** (generated during build) - accept the UAC prompt.
+1. Extract `GamingPerformanceSuite.zip` and double-click **`Start-Watcher-Hidden.bat`** - accept the UAC prompt.
    The watcher starts hidden in the background.
 2. Launch your game normally.
-3. Stop the watcher any time with **`Stop-GamingSuite.bat`**.
+3. When you close the game, the watcher undoes every optimization and **shuts itself
+   down completely** - nothing stays resident waiting for another game. You can also
+   stop it at any time with **`Stop-GamingSuite.bat`**.
 
 Prefer a menu? Double-click **`Start-GamingSuite.bat`** for interactive options.
 
@@ -63,6 +65,13 @@ known game process it:
 Heavy steps are **staged with optimized timing** to eliminate the stutter/frame-drop
 burst that used to hit when launching games. The pre-game optimization ensures network
 tweaks are in place BEFORE the game opens its sockets.
+
+> **Session-scoped:** the moment the last monitored game closes, the watcher undoes
+> every change (native resolution, priorities, timer, network) and exits completely.
+> It is a single-session optimizer, not a resident service - it will not keep polling
+> on a low-spec machine waiting to detect a "next game". To play again later, just
+> start it again. (For the old always-on behavior set `ExitWhenGameSessionEnds = $false`
+> in `src/Config.ps1`.)
 
 > **Recording software detected?** When OBS, Streamlabs, or another capture tool
 > is running, the suite automatically takes **capture-safe paths**: display resolution
@@ -293,6 +302,10 @@ logs/
   suite_YYYYMMDD.log          timestamped operation log
 ```
 
+> The ZIP only ships the runtime layout (the three `.bat` launchers + `src/` +
+> `README.md` + `.gitignore`). `build.bat` and `src/Build-Suite.ps1` are build
+> tooling and live only in the source repository, never inside the ZIP.
+
 ## Building from source
 
 ```bash
@@ -303,9 +316,23 @@ build.bat
 pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
 ```
 
-The builder generates the 3 `.bat` launcher files and packages everything into
-`GamingPerformanceSuite.zip`. The `.bat` files are NOT stored in git - they are
-generated fresh each build.
+The builder generates the 3 `.bat` launcher files and packages them with the
+suite into `GamingPerformanceSuite.zip`. The `.bat` files are NOT stored in git -
+they are generated fresh each build.
+
+The ZIP is a **runtime-only** distribution: it contains the three ready-to-use
+launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
+`Stop-GamingSuite.bat`), the `src/` suite, `README.md` and `.gitignore`.
+The build tooling (`build.bat` and `src\Build-Suite.ps1`) is deliberately
+**excluded** from the ZIP, so extracting it can never duplicate or overwrite the
+builder. Rebuild only from the source repository.
+
+## Installation (from the ZIP)
+
+Extract `GamingPerformanceSuite.zip` anywhere you want to run it from -
+`D:\`, a USB stick, or your home folder. No installation or build step is
+needed: the ZIP already contains the three launchers. See
+[Quick start](#quick-start-windows) for usage.
 
 ## Portable install
 
