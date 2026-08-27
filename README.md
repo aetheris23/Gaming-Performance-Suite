@@ -7,45 +7,147 @@ system, tunes your network for lower latency (with WiFi vs LAN awareness to
 prevent packet loss), keeps your microphone clear, adapts to older hardware,
 eliminates launch stutter, and **works smoothly alongside OBS/capture software**.
 
-## Quick start (Windows)
+## Installation & usage
 
-1. Extract `GamingPerformanceSuite.zip` and double-click **`Start-Watcher-Hidden.bat`** - accept the UAC prompt.
-   The watcher starts hidden in the background.
-2. Launch your game normally.
-3. When you close the game, the watcher undoes every optimization and **shuts itself
-   down completely** - nothing stays resident waiting for another game. You can also
-   stop it at any time with **`Stop-GamingSuite.bat`**.
+Every platform follows the same four steps: **download** the source, **run the
+build** to generate `GamingPerformanceSuite.zip`, **install** it, and **run** it.
 
-Prefer a menu? Double-click **`Start-GamingSuite.bat`** for interactive options.
+| Step | Windows | Linux | macOS | Android (Termux) |
+|---|---|---|---|---|
+| **1. Download** | `git clone` or download the repo ZIP | `git clone` or download the repo ZIP | `git clone` or download the repo ZIP | `git clone` or copy onto the device |
+| **2. Build** | double-click `build.bat`, or `powershell -File src\Build-Suite.ps1` | `pwsh -File src/Build-Suite.ps1` | `pwsh -File src/Build-Suite.ps1` | `pwsh -File src/Build-Suite.ps1` (optional) |
+| **3. Install** | extract `GamingPerformanceSuite.zip` anywhere | extract the ZIP, or run from the source folder | extract the ZIP, or run from the source folder | run from the source folder |
+| **4. Run** | `Start-Watcher-Hidden.bat` / `Start-GamingSuite.bat` / `Stop-GamingSuite.bat` | `pwsh -File src/Main.ps1` | `pwsh -File src/Main.ps1` | `pwsh -File src/Main.ps1` |
 
-## Quick start (Linux / macOS)
+> **What the build produces:** the ZIP is a **runtime-only** package. It ships the
+> three Windows launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
+> `Stop-GamingSuite.bat`), the `src/` suite, `README.md` and `.gitignore`. The
+> build tooling (`build.bat` / `src/Build-Suite.ps1`) is deliberately **excluded**,
+> so extracting the ZIP can never duplicate or overwrite the builder. Rebuild only
+> from the source repository (step 2 of each platform below).
 
-Requires PowerShell Core 7+ (`pwsh`):
+### Windows (full support)
+
+Prerequisite: Windows 10/11 with built-in PowerShell 5.1+ - nothing to install.
+
+1. **Download** - `git clone <repository-url>`, or download the repository as a
+   ZIP and extract it.
+2. **Build** - generate `GamingPerformanceSuite.zip` once:
+   - double-click **`build.bat`**, or
+   - run `powershell -NoProfile -ExecutionPolicy Bypass -File src\Build-Suite.ps1`
+3. **Install** - extract the ZIP anywhere - `D:\`, a USB stick, or your home
+   folder. Copyable to any PC; nothing is registered system-wide.
+4. **Run**
+   - **Background watcher (recommended):** double-click **`Start-Watcher-Hidden.bat`**
+     and accept the UAC prompt. Play your game normally - the watcher detects it,
+     boosts it and drops the render resolution, then restores everything and shuts
+     itself down when you close the game. Use **`Stop-GamingSuite.bat`** to stop it
+     at any time.
+   - **Interactive menu:** double-click **`Start-GamingSuite.bat`** for one-click
+     optimization, starting/stopping the watcher, network & mic tuning, and status.
+   - **Stop:** double-click **`Stop-GamingSuite.bat`** - restores native
+     resolution, priorities, timer and network settings.
+
+### Linux
+
+Prerequisite: PowerShell Core 7+ (`pwsh`) and an unzip tool.
 
 ```bash
-# Install PowerShell Core (if not installed)
-# Ubuntu/Debian: sudo apt install powershell
-# macOS:         brew install --cask powershell
-
-# Run the interactive menu
-pwsh -NoProfile -File src/Main.ps1
-
-# Run as background watcher
-pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch
+# Ubuntu / Debian
+sudo apt install powershell unzip
+# Fedora
+sudo dnf install powershell unzip
+# Snap
+sudo snap install powershell --classic
 ```
 
-## Quick start (Android via Termux)
+1. **Download**
+   ```bash
+   git clone <repository-url>
+   cd <repository-folder>
+   ```
+2. **Build**
+   ```bash
+   pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
+   ```
+   Produces `GamingPerformanceSuite.zip`. The launchers inside are Windows `.bat`
+   files, so Linux users normally just run the suite straight from the source
+   folder instead (steps 3-4).
+3. **Install**
+   ```bash
+   unzip GamingPerformanceSuite.zip -d ~/gaming-suite
+   cd ~/gaming-suite
+   ```
+   or keep running from the cloned source folder.
+4. **Run**
+   ```bash
+   # interactive menu
+   pwsh -NoProfile -File src/Main.ps1
+
+   # background watcher (runs until the game session ends, then exits)
+   pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch
+   ```
+   Elevate with `sudo` for full capabilities (process priority boosting, network
+   tuning). Display scaling uses `xrandr` when available. The clickable `.bat`
+   launch/stop channels are Windows-specific; on Linux, stop the watcher with
+   Ctrl+C in its own terminal, or open the menu and choose "STOP background
+   watcher".
+
+### macOS
+
+Prerequisite: PowerShell Core 7+ (`pwsh`) via Homebrew; `displayplacer` enables
+display scaling.
 
 ```bash
-# Install Termux from F-Droid (not Play Store)
+brew install --cask powershell
+brew install displayplacer       # optional: display scaling support
+```
+
+1. **Download**
+   ```bash
+   git clone <repository-url>
+   cd <repository-folder>
+   ```
+2. **Build**
+   ```bash
+   pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
+   ```
+3. **Install**
+   ```bash
+   unzip GamingPerformanceSuite.zip -d ~/gaming-suite
+   cd ~/gaming-suite
+   ```
+   or run from the cloned source folder.
+4. **Run**
+   ```bash
+   pwsh -NoProfile -File src/Main.ps1                        # interactive menu
+   pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch       # background watcher
+   ```
+   Elevate with `sudo` for full capabilities. The `.bat` launchers are
+   Windows-specific; use the menu or Ctrl+C to stop the watcher.
+
+### Android (Termux)
+
+Prerequisite: **Termux** from F-Droid (not the Play Store) and PowerShell.
+
+```bash
+pkg install git
 pkg install powershell
-
-# Clone or copy the suite, then:
-pwsh -NoProfile -File src/Main.ps1
 ```
 
-> **Note:** Android support is limited. Process priority boosting and display
-> scaling require root. Network optimization and game detection work without root.
+1. **Download** - `git clone <repository-url>`, or copy the suite folder onto the
+   device.
+2. **Build** - *optional*: `pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1`
+   produces the Windows-targeted ZIP. Android users normally skip this step and
+   run directly from the source folder.
+3. **Install** - there is no system install; run from the downloaded/cloned folder.
+4. **Run**
+   ```bash
+   pwsh -NoProfile -File src/Main.ps1
+   ```
+
+> **Note:** Android support is limited. Game detection and network optimization
+> work without root; process priority boosting and display scaling require root.
 
 ## What happens when you start a game
 
@@ -306,39 +408,12 @@ logs/
 > `README.md` + `.gitignore`). `build.bat` and `src/Build-Suite.ps1` are build
 > tooling and live only in the source repository, never inside the ZIP.
 
-## Building from source
-
-```bash
-# Windows
-build.bat
-
-# Linux/macOS
-pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
-```
-
-The builder generates the 3 `.bat` launcher files and packages them with the
-suite into `GamingPerformanceSuite.zip`. The `.bat` files are NOT stored in git -
-they are generated fresh each build.
-
-The ZIP is a **runtime-only** distribution: it contains the three ready-to-use
-launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
-`Stop-GamingSuite.bat`), the `src/` suite, `README.md` and `.gitignore`.
-The build tooling (`build.bat` and `src\Build-Suite.ps1`) is deliberately
-**excluded** from the ZIP, so extracting it can never duplicate or overwrite the
-builder. Rebuild only from the source repository.
-
-## Installation (from the ZIP)
-
-Extract `GamingPerformanceSuite.zip` anywhere you want to run it from -
-`D:\`, a USB stick, or your home folder. No installation or build step is
-needed: the ZIP already contains the three launchers. See
-[Quick start](#quick-start-windows) for usage.
-
 ## Portable install
 
-Copy the folder (or extracted ZIP) anywhere - `D:\`, USB stick, home directory -
-and run. Everything resolves relative to its own folder. Nothing is registered
-system-wide. Delete the folder and it is completely gone.
+The suite is fully portable. Copy the folder (or extracted ZIP) anywhere -
+`D:\`, USB stick, home directory - and run. Everything resolves relative to its
+own folder; nothing is registered system-wide. Delete the folder and it is
+completely gone.
 
 ## Notes & safety
 
