@@ -45,6 +45,9 @@ $prePurge     = if ($null -ne $cfg['PrePurgeBeforeLaunch'])  { [bool]$cfg['PrePu
 $resSettings = @{
     ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
+    Tiers             = if ($cfg['ResolutionTiers'])      { $cfg['ResolutionTiers'] }      else { @{ Low = 55; Medium = 75; High = 88; Native = 0 } }
+    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Low'; Android = 'Medium'; Default = 'Medium' } }
+    GameTierOverrides = if ($cfg['GameTierOverrides'])    { $cfg['GameTierOverrides'] }    else { @{} }
 }
 # Session lifecycle: after the last monitored game closes, the watcher
 # undoes every change and exits completely instead of staying resident
@@ -107,15 +110,14 @@ function Resolve-LegacySettings {
 # ---------------- shared watcher invocation ----------------
 function Invoke-Watcher {
     param(
-        [System.Threading.EventWaitHandle]$StopEvent,
+        [AllowNull()][System.Threading.EventWaitHandle]$StopEvent = $null,
         [switch]$TrackPidFile
     )
-    # Single-instance guard: a second watcher would fight itself
-    $createdNew = $false
-    $mutex = [System.Threading.Mutex]::new($true, (Get-WatcherMutexName), [ref]$createdNew)
-    if (-not $createdNew) {
+    # Single-instance guard: a second watcher would fight itself.
+    # Named mutex on Windows/modern .NET, exclusive file lock elsewhere.
+    $guard = New-WatcherInstanceGuard
+    if (-not $guard) {
         Write-Log 'A game watcher is already running. Use Stop-GamingSuite.bat first.' 'WARN'
-        $mutex.Dispose()
         return
     }
     try {
@@ -152,8 +154,7 @@ function Invoke-Watcher {
         if ($TrackPidFile) {
             Remove-Item (Get-WatcherPidFile) -Force -ErrorAction SilentlyContinue
         }
-        $mutex.ReleaseMutex()
-        $mutex.Dispose()
+        try { $guard.Release() } catch { }
     }
 }
 
@@ -175,7 +176,7 @@ if ($BackgroundWatch) {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.3'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.4'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
     Write-Host '  Cross-platform | Low-spec optimized | OBS-aware'      -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
@@ -221,7 +222,7 @@ function Show-Menu {
     Write-Host '  5) STOP background watcher'
     Write-Host ' --- NETWORK & MICROPHONE ------------------------------' -ForegroundColor Yellow
     Write-Host '  6) Apply network + mic optimizations NOW'
-    Write-Host '  7) Revert network optimizations (Windows defaults)'
+    Write-Host '  7) Revert network optimizations (restore originals)'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
     Write-Host '  8) Show watcher / display / network / GPU status'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
@@ -256,14 +257,7 @@ function Test-WatcherAlive {
 
 function Show-Status {
     $alive = Test-WatcherAlive
-    $evt = $null
-    $state = if ($alive) {
-        'RUNNING (background)'
-    } else {
-        $evt = Open-OrCreateStopEvent
-        if ($evt) { 'RUNNING' } else { 'stopped' }
-    }
-    if ($evt) { $evt.Dispose() }
+    $state = if ($alive) { 'RUNNING (background)' } else { 'stopped' }
     Write-Log "Watcher state: $state" 'INFO'
     if (-not $alive) {
         Write-Log '!!! Watcher is NOT running - games will NOT be auto-optimized !!!' 'ERROR'
@@ -274,7 +268,12 @@ function Show-Status {
     }
     try {
         $mode = Get-CurrentDisplayMode
-        Write-Log ("Display: {0}x{1} @ {2} Hz ({3} bpp)" -f $mode.Width, $mode.Height, $mode.Frequency, $mode.Bits) 'INFO'
+        if ($mode) {
+            $bppStr = if ($mode.ContainsKey('Bits')) { " ({0} bpp)" -f $mode.Bits } else { '' }
+            Write-Log ("Display: {0}x{1} @ {2} Hz{3}" -f $mode.Width, $mode.Height, $mode.Frequency, $bppStr) 'INFO'
+        } else {
+            Write-Log 'Display: no scaling backend available (xrandr / displayplacer missing).' 'INFO'
+        }
     } catch { }
     try {
         $gpus = @(Get-GpuInfo)
@@ -290,7 +289,22 @@ function Show-Status {
     } catch { }
     $fg = if ($fgSettings['Enabled']) { "enabled -> $($fgSettings['ToolPath'])" } else { 'disabled (enable in Config.ps1)' }
     Write-Log "Frame generation: $fg" 'INFO'
-    Write-Log ("Resolution scaling: {0}% (integer preferred: {1})" -f $resSettings.ScalePercent, $resSettings.PreferIntegerScale) 'INFO'
+
+    # ---- resolution tiers summary --------------------------------------
+    $tierStr = ''
+    if ($resSettings['Tiers'] -is [hashtable]) {
+        $tierStr = (@($resSettings['Tiers'].GetEnumerator() | Sort-Object { $_.Value } |
+            ForEach-Object { "$($_.Key)=$($_.Value)%" }) -join ', ')
+    }
+    $profTierStr = ''
+    if ($resSettings['ProfileTiers'] -is [hashtable]) {
+        $profTierStr = (@($resSettings['ProfileTiers'].GetEnumerator() |
+            ForEach-Object { "$($_.Key)->$($_.Value)" }) -join ', ')
+    }
+    Write-Log ("Resolution tiers: {0}  [default {1}%; per-profile: {2}]" -f `
+        $(if ($tierStr) { $tierStr } else { "$($resSettings.ScalePercent)% (single mode)" }), `
+        $resSettings.ScalePercent, $(if ($profTierStr) { $profTierStr } else { 'default' })) 'INFO'
+    Write-Log ("Integer scaling preferred: {0}" -f $resSettings.PreferIntegerScale) 'INFO'
 
     # ---- network + voice summary ---------------------------------------
     $netOn  = if ($null -ne $netCfg['Enabled'])   { [bool]$netCfg['Enabled'] }   else { $true }
@@ -355,10 +369,24 @@ function Wait-MenuKey {
                     Write-Log 'Watcher already running in background.' 'WARN'
                 } else {
                     Write-Log 'Launching hidden background watcher...' 'ACTION'
-                    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(
-                        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-                        '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
-                    )
+                    if (Test-SuitePlatformWindows) {
+                        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(
+                            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                            '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
+                        )
+                    } else {
+                        $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+                        if (-not $pwsh) { throw 'pwsh (PowerShell 7+) is required on this platform but was not found.' }
+                        $args = @('-NoProfile', '-File', $PSCommandPath, '-BackgroundWatch')
+                        if (Test-Administrator) {
+                            Start-Process -FilePath $pwsh.Source -ArgumentList $args -WindowStyle Hidden
+                        } else {
+                            # non-root: elevate through sudo, backgrounded with -b.
+                            # ($args must be flattened into the list - PS Core
+                            # rejects a nested array in -ArgumentList.)
+                            Start-Process -FilePath 'sudo' -ArgumentList (@('-b', $pwsh.Source) + $args) -WindowStyle Hidden
+                        }
+                    }
                     # Wait for the watcher to announce itself (instance mutex /
                     # pid file) instead of a fixed 1s guess - module import and
                     # GPU detection can take a moment on slower machines.

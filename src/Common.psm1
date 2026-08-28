@@ -45,7 +45,10 @@ function Test-Administrator {
 
 function Assert-AdminOrThrow {
     if (-not (Test-Administrator)) {
-        throw "This action requires Administrator privileges. Re-run via Start-GamingSuite.bat."
+        if (Test-SuitePlatformWindows) {
+            throw "This action requires Administrator privileges. Re-run via Start-GamingSuite.bat."
+        }
+        throw 'This action requires root privileges. Re-run via `sudo pwsh Start-GamingSuite.ps1` (or `sudo bash start.sh`).'
     }
 }
 
@@ -117,8 +120,25 @@ function Get-LogPath {
     $script:LogFile
 }
 
+function Test-SuitePlatformWindows {
+    <# True on Windows PowerShell 5.1 AND PowerShell Core on Windows;
+       false on Linux / macOS / Android (Termux). #>
+    if ($PSVersionTable.PSVersion.Major -ge 6) { return [bool]$IsWindows }
+    return $true   # Windows PowerShell 5.1 only ever runs on Windows
+}
+
 # ------------------------------------------------------------
 # Runtime coordination: single instance, background stop signal
+#
+# Cross-platform design:
+#   - WINDOWS: a named kernel Mutex gates the single instance and a
+#     named EventWaitHandle carries the stop signal (instant wake).
+#   - UNIX (Linux/macOS/Android): named event handles are NOT
+#     supported by .NET, so the stop signal is a marker file that the
+#     watcher polls in short slices while idling. The named Mutex is
+#     supported on .NET 6+ Unix, but we keep an exclusive file-lock
+#     fallback so ancient/Termux builds stay safe too. The pid file
+#     remains the universal liveness backstop on every platform.
 # ------------------------------------------------------------
 $script:RuntimeDir = Join-Path $script:LogDir 'runtime'
 if (-not (Test-Path $script:RuntimeDir)) { New-Item -ItemType Directory -Path $script:RuntimeDir | Out-Null }
@@ -126,24 +146,153 @@ if (-not (Test-Path $script:RuntimeDir)) { New-Item -ItemType Directory -Path $s
 function Get-WatcherStopEventName { 'Global\GamingPerformanceSuite_Stop' }
 function Get-WatcherMutexName     { 'Global\GamingPerformanceSuite_Instance' }
 function Get-WatcherPidFile       { Join-Path $script:RuntimeDir 'watcher.pid' }
+function Get-WatcherStopFile      { Join-Path $script:RuntimeDir 'stop.requested' }
+function Get-WatcherLockFile      { Join-Path $script:RuntimeDir 'instance.lock' }
 
 function New-WatcherStopEvent {
-    <# Manual-reset kernel event; visible across sessions (Global). #>
-    $evt = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, (Get-WatcherStopEventName))
-    $evt.Reset()   # clear a stale signal left by an aborted session
-    return $evt
+    <#
+        Returns the cross-process stop handle, or $null on Unix where
+        named events are unsupported (there a stop file is used instead).
+        Windows: manual-reset kernel event, cleared of stale signals.
+    #>
+    if (Test-SuitePlatformWindows) {
+        $evt = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, (Get-WatcherStopEventName))
+        $evt.Reset()   # clear a stale signal left by an aborted session
+        return $evt
+    }
+    Clear-StopRequest                       # never inherit an aborted session's stop
+    return $null
 }
 
 function Open-OrCreateStopEvent {
+    <# Opens the existing stop event (Windows) or $null (Unix). Never
+       fabricates an event just to exist - callers must handle $null. #>
+    if (-not (Test-SuitePlatformWindows)) { return $null }
     try   { return [System.Threading.EventWaitHandle]::OpenExisting((Get-WatcherStopEventName)) }
     catch { return $null }
+}
+
+function Test-StopRequested {
+    <# True when a stop has been requested (Unix marker file present). #>
+    Test-Path (Get-WatcherStopFile)
+}
+
+function Set-StopRequested {
+    <# Persist the stop marker (Unix) - Windows callers use the event. #>
+    try {
+        Set-Content -Path (Get-WatcherStopFile) -Value (Get-Date -Format o) -Encoding ASCII -Force
+    } catch { }
+}
+
+function Clear-StopRequest {
+    <#
+        Clears a pending stop signal (Unix marker file; the Windows kernel
+        event is reset by the next session). The instance.lock file is also
+        removed, but ONLY when no live watcher currently holds it - deleting
+        a lock that a running watcher still owns lets a second instance
+        create and lock a fresh file, breaking the single-instance guarantee.
+        (On Windows a process cannot delete a file another process has open
+        with FileShare.None, so this only ever matters on Unix.)
+    #>
+    Remove-Item (Get-WatcherStopFile) -Force -ErrorAction SilentlyContinue
+    if (-not (Test-WatcherLockHeld)) {
+        Remove-Item (Get-WatcherLockFile) -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Wait-StopOrTimeout {
+    <#
+        Parks the watcher for up to $Milliseconds. Returns $true when a
+        stop was requested. When a kernel event is available (Windows)
+        the stop is instant; otherwise the marker file is polled in
+        250 ms slices so shutdown stays responsive with minimal CPU.
+    #>
+    param(
+        [int]$Milliseconds = 1000,
+        [System.Threading.EventWaitHandle]$StopEvent = $null
+    )
+    if ($StopEvent) { return $StopEvent.WaitOne($Milliseconds) }
+
+    $deadline = [datetime]::UtcNow.AddMilliseconds([Math]::Max(0, $Milliseconds))
+    while ([datetime]::UtcNow -lt $deadline) {
+        if (Test-StopRequested) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function New-WatcherInstanceGuard {
+    <#
+        Returns a guard object that holds the single-instance lock, or
+        $null when another watcher already owns it. Windows uses a named
+        Mutex (kernel-level, detects any owner). The exclusive
+        instance.lock file backs EVERY platform - on Unix it is the
+        authority (named mutexes there are per-process handle tables and
+        do not detect a second owner in the same process). The returned
+        guard always has a Release() method - call it exactly once when
+        the watcher exits, or the instance is never freed.
+    #>
+    $mutex = $null
+    if (Test-SuitePlatformWindows) {
+        $createdNew = $false
+        try {
+            $mutex = [System.Threading.Mutex]::new($true, (Get-WatcherMutexName), [ref]$createdNew)
+            if (-not $createdNew) {
+                try { $mutex.Dispose() } catch { }
+                $mutex = $null    # already owned by another live watcher
+            }
+        } catch {
+            $mutex = $null
+        }
+    }
+
+    $lock = $null
+    try {
+        $lock = [System.IO.File]::Open((Get-WatcherLockFile),
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None)
+    } catch { $lock = $null }
+
+    if ($null -eq $mutex -and $null -eq $lock) { return $null }
+
+    $lockPath = Get-WatcherLockFile
+    $release = {
+        if ($mutex) { try { [void]$mutex.ReleaseMutex() } catch { } }
+        if ($mutex) { try { $mutex.Dispose() } catch { } }
+        if ($lock)  { try { $lock.Dispose() } catch { } }
+        if ($lockPath) { Remove-Item $lockPath -Force -ErrorAction SilentlyContinue }
+    }.GetNewClosure()
+
+    $guard = [pscustomobject]@{ IsHeld = $true }
+    $guard | Add-Member -MemberType ScriptMethod -Name Release -Value $release -Force
+    return $guard
+}
+
+function Test-WatcherLockHeld {
+    <# True when the instance lock file is exclusively held. A failed
+       open means another process owns it. The side-effect of leaving a
+       zero-byte lock file behind is harmless. #>
+    if (Test-SuitePlatformWindows) { return $false }
+    try {
+        $fs = [System.IO.File]::Open((Get-WatcherLockFile),
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None)
+        $fs.Dispose()
+        Remove-Item (Get-WatcherLockFile) -Force -ErrorAction SilentlyContinue
+        return $false
+    } catch {
+        return $true
+    }
 }
 
 function Test-WatcherPidAlive {
     <#
         Reads watcher.pid and reports whether that PID belongs to a
-        LIVE powershell process. Guards against PID reuse by another
-        program claiming the file after a crash.
+        LIVE powershell/pwsh process. On Unix the process command line
+        is additionally verified to contain Main.ps1 so a recycled PID
+        can never satisfy the check. Returns the PID when alive, else 0.
     #>
     $pidFile = Get-WatcherPidFile
     if (-not (Test-Path $pidFile)) { return 0 }
@@ -153,37 +302,52 @@ function Test-WatcherPidAlive {
     $proc = Get-Process -Id $watcherPid -ErrorAction SilentlyContinue
     if (-not $proc) { return 0 }
     if ($proc.ProcessName -notmatch '^(powershell|pwsh)$') { return 0 }
+
+    # Unix: verify the command line really is our entry point.
+    if (-not (Test-SuitePlatformWindows)) {
+        try {
+            $cmdline = Get-Content ("/proc/{0}/cmdline" -f $watcherPid) -Raw -ErrorAction Stop
+            if ($cmdline -notmatch 'Main\.ps1') { return 0 }
+        } catch { return 0 }
+    }
     return $watcherPid
 }
 
 function Test-WatcherRunning {
     <#
-        Reports whether a game watcher is alive RIGHT NOW by probing the
-        named instance mutex the watcher holds for its entire lifetime
-        (created in Invoke-Watcher, released only on exit). This does not
-        depend on watcher.pid being present, so it stays correct even if
-        the pid file was lost or removed by a recovery. Falls back to the
-        pid-file check when the mutex cannot be opened (e.g. no watcher
-        has ever run, or cross-session rights).
+        Reports whether a game watcher is alive RIGHT NOW.
+        Probe order, all cheap:
+          1. the named instance mutex the watcher holds for its entire
+             lifetime (created in Invoke-Watcher, released only on exit);
+          2. on Unix (where some builds reject named mutexes) the
+             exclusive instance.lock file;
+          3. the pid file with strict validation (live pwsh running
+             Main.ps1), as the cross-platform backstop.
+        A watcher that is running is always reported running, even if a
+        recovery removed one of the earlier signals.
     #>
     $m = $null
     try { $m = [System.Threading.Mutex]::OpenExisting((Get-WatcherMutexName)) }
-    catch { return ((Test-WatcherPidAlive) -gt 0) }
-    try {
-        if ($m.WaitOne(0)) {
-            # Nothing owns it right now -> no watcher alive. Release the probe hold.
-            try { [void]$m.ReleaseMutex() } catch { }
-            return $false
+    catch { $m = $null }
+    if ($m) {
+        try {
+            if ($m.WaitOne(0)) {
+                # Nothing owns it right now -> no watcher alive.
+                try { [void]$m.ReleaseMutex() } catch { }
+                $m.Dispose()
+                return $false
+            }
+            $m.Dispose()
+            return $true    # owned by the live watcher -> RUNNING
+        } catch {
+            # Abandoned (owner died while holding) -> not running.
+            try { $m.Dispose() } catch { }
+            $m = $null
         }
-        # It is owned by the live watcher -> RUNNING.
-        return $true
-    } catch {
-        # Owner died while holding it (abandoned) - we now own it. Not running.
-        try { [void]$m.ReleaseMutex() } catch { }
-        return $false
-    } finally {
-        if ($m) { try { $m.Dispose() } catch { } }
     }
+
+    if (-not (Test-SuitePlatformWindows) -and (Test-WatcherLockHeld)) { return $true }
+    return ((Test-WatcherPidAlive) -gt 0)
 }
 
 # ------------------------------------------------------------
@@ -305,15 +469,17 @@ function Repair-OrphanedWatcherState {
         }
     } catch { }
 
-    # ---- 4. Fullscreen-optimization compat flags ------------------------
-    try {
-        $flags = @(Get-StateField $j 'fsoFlags') | Where-Object { $_ }
-        foreach ($path in $flags) {
-            Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers' `
-                -Name ([string]$path) -ErrorAction SilentlyContinue
-        }
-        if (@($flags).Count -gt 0) { Write-Log 'Fullscreen-optimization overrides cleared.' 'RECOVER' }
-    } catch { }
+    # ---- 4. Fullscreen-optimization compat flags (Windows only) ---------
+    if (Test-SuitePlatformWindows) {
+        try {
+            $flags = @(Get-StateField $j 'fsoFlags') | Where-Object { $_ }
+            foreach ($path in $flags) {
+                Remove-ItemProperty -Path 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers' `
+                    -Name ([string]$path) -ErrorAction SilentlyContinue
+            }
+            if (@($flags).Count -gt 0) { Write-Log 'Fullscreen-optimization overrides cleared.' 'RECOVER' }
+        } catch { }
+    }
 
     # ---- 5. Orphaned frame-generation tool ------------------------------
     try {
@@ -358,19 +524,20 @@ function Repair-OrphanedWatcherState {
 function Stop-BackgroundWatcher {
     <#
         Signals the running watcher to exit NOW. The watcher parks on
-        this event between polls, so shutdown begins instantly and its
-        finally block restores resolution/priorities/timer/network on
-        its own. We WAIT for that cleanup to finish (instead of the old
-        fixed 600 ms kill, which truncated cleanup and left broken state
-        behind). A kill is only ever the last resort, and afterwards the
+        this event between polls (Windows), or on the stop marker file
+        (Unix), so shutdown begins instantly and its finally block
+        restores resolution/priorities/timer/network on its own. We
+        WAIT for that cleanup to finish (instead of the old fixed
+        kill) - a kill is only ever the last resort, and afterwards the
         recovery journal replays the missing undo steps automatically.
     #>
     $evt = Open-OrCreateStopEvent
     if ($evt) {
         [void]$evt.Set()
         $evt.Dispose()
-        Write-Log 'Stop signal delivered to the game watcher.' 'OK'
     }
+    Set-StopRequested                       # Unix marker; harmless on Windows
+    Write-Log 'Stop signal delivered to the game watcher.' 'OK'
 
     # Graceful window: let the watcher run its full restore path.
     $watcherPid = Test-WatcherPidAlive
@@ -402,6 +569,8 @@ function Stop-BackgroundWatcher {
     } elseif (-not $evt) {
         Write-Log 'Watcher is not running.' 'INFO'
     }
+
+    Clear-StopRequest                       # never leave a stale stop marker
 }
 
 # ------------------------------------------------------------
@@ -446,8 +615,11 @@ function Get-PlatformInfo {
 }
 
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
-    Get-SuiteRoot, Get-LogPath, Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
+    Get-SuiteRoot, Get-LogPath, Test-SuitePlatformWindows,
+    Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
     New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive, Test-WatcherRunning,
+    New-WatcherInstanceGuard, Test-WatcherLockHeld, Test-StopRequested, Set-StopRequested,
+    Clear-StopRequest, Wait-StopOrTimeout,
     Get-WatcherJournalPath, Save-WatcherJournal, Get-WatcherJournal, Clear-WatcherJournal,
     ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher,
     Get-PlatformInfo

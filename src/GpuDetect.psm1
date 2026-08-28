@@ -31,11 +31,13 @@
 Set-StrictMode -Version Latest
 
 # ------------------------------------------------------------
-# Native interop: DXGI factory enumeration (no COM registration
-# gymnastics - flat export + explicit vtable slots, which is
-# both fast and stable across Windows versions).
+# Native interop: DXGI factory enumeration (Windows only; compiled
+# LAZILY on first real use, not at module import - on low-spec
+# machines the C# compile at startup cost real seconds).
 # ------------------------------------------------------------
-if (-not ('Suite.Gpu.DxgiNative' -as [type])) {
+function Add-NativeDxgiType {
+    if ('Suite.Gpu.DxgiNative' -as [type]) { return }
+    if (-not (Test-SuitePlatformWindows)) { return }
     Add-Type -Namespace Suite.Gpu -Name DxgiNative -MemberDefinition @'
 [DllImport("dxgi.dll", EntryPoint = "CreateDXGIFactory1")]
 public static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
@@ -113,6 +115,9 @@ function ConvertTo-MemoryBytes {
 # Source 1: DXGI - adapters currently visible to applications
 # ------------------------------------------------------------
 function Get-GpuViaDxgi {
+    if (-not (Test-SuitePlatformWindows)) { return $null }
+    Add-NativeDxgiType
+    if (-not ('Suite.Gpu.DxgiNative' -as [type])) { return $null }
     $list  = New-Object System.Collections.Generic.List[object]
     $m     = [Runtime.InteropServices.Marshal]
     $fact  = [IntPtr]::Zero
@@ -180,6 +185,7 @@ function Get-GpuViaDxgi {
 $script:DisplayClassKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
 
 function Get-GpuViaRegistry {
+    if (-not (Test-SuitePlatformWindows)) { return $null }
     $list = New-Object System.Collections.Generic.List[object]
     try {
         $keys = @(Get-ChildItem -Path $script:DisplayClassKey -ErrorAction Stop |
@@ -257,8 +263,127 @@ function Get-GpuViaCim {
 }
 
 # ------------------------------------------------------------
-# Vendor resolution
+# Source 3b (Linux): sysfs DRM cards + lspci descriptions.
+# One-shot at startup only - never called from the poll loop.
 # ------------------------------------------------------------
+function Get-GpuViaLinux {
+    $list = New-Object System.Collections.Generic.List[object]
+    $cards = @(Get-ChildItem '/sys/class/drm' -Directory -ErrorAction SilentlyContinue |
+               Where-Object { $_.Name -match '^card\d+$' })
+    if ($cards.Count -eq 0) { return $null }
+
+    # Optional lspci map: "vendor:device" -> human model string.
+    $lspciMap = @{}
+    try {
+        foreach ($line in @(& lspci -nn 2>$null)) {
+            if ($line -match '(?i)(vga compatible controller|3d controller|display controller)') {
+                $vm = [regex]::Match($line, '\[([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\]')
+                if ($vm.Success) {
+                    $desc = [regex]::Replace($line, '^.*?\]:\s*', '')
+                    $desc = ($desc -replace '\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$', '').Trim(' .')
+                    if ($desc) {
+                        $lspciMap['{0}:{1}' -f $vm.Groups[1].Value.ToLowerInvariant(), $vm.Groups[2].Value.ToLowerInvariant()] = $desc
+                    }
+                }
+            }
+        }
+    } catch { }
+
+    $seen = @{}
+    foreach ($card in $cards) {
+        try {
+            $dev = Join-Path $card.FullName 'device'
+            if (-not (Test-Path $dev)) { continue }
+
+            $vendor = ''; $device = ''; $driver = ''
+            try { $vendor = (Get-Content (Join-Path $dev 'vendor') -Raw).Trim() } catch { }
+            try { $device = (Get-Content (Join-Path $dev 'device') -Raw).Trim() } catch { }
+            try {
+                $target = Get-Item (Join-Path $dev 'driver') -ErrorAction SilentlyContinue
+                if ($target) { $driver = (Split-Path -Leaf $target.Target) }
+            } catch { }
+            if ($driver -match 'vfio|drm|mgag200|virtio') { continue }
+            if (-not $driver) {
+                try {
+                    $uevent = Get-Content (Join-Path $dev 'uevent') -Raw
+                    if ($uevent -match 'DRIVER=([^\r\n]+)') { $driver = $Matches[1] }
+                } catch { }
+            }
+
+            $vid = $null; $did = $null
+            if ($vendor -match '0x([0-9a-fA-F]{4})$') { $vid = [Convert]::ToUInt32($Matches[1], 16) }
+            if ($device -match '0x([0-9a-fA-F]{4})$') { $did = [Convert]::ToUInt32($Matches[1], 16) }
+
+            $key = $null
+            if ($vid -and $did) { $key = '{0:x4}:{1:x4}' -f $vid, $did }
+            $name = $null
+            if ($key -and $lspciMap.ContainsKey($key)) { $name = $lspciMap[$key] }
+            if (-not $name) {
+                $name = switch -Regex ([string]$driver) {
+                    'amdgpu|^radeon$'        { 'AMD Graphics' }
+                    'i915|i965|^intel'       { 'Intel Graphics' }
+                    '^nvidia$'               { 'NVIDIA Graphics' }
+                    '^nouveau$'              { 'NVIDIA Graphics (nouveau)' }
+                    default                  { if ($driver) { "$driver Graphics Adapter" } else { 'Graphics Adapter' } }
+                }
+            }
+
+            $sk = $key
+            if (-not $sk) { $sk = $name }
+            if ($seen.ContainsKey($sk)) { continue }
+            $seen[$sk] = $true
+
+            $ded = $null
+            try {
+                $vram = Get-Content (Join-Path $dev 'mem_info_vram_total') -Raw -ErrorAction SilentlyContinue
+                if ($vram -and $vram.Trim() -match '^\d+$') { $ded = [uint64][int64]$vram.Trim() }
+            } catch { }
+
+            $list.Add(@{
+                Name           = $name
+                VendorId       = $vid
+                DeviceId       = $did
+                DedicatedBytes = $ded
+                SoftwareFlag   = $false
+                DriverVersion  = $null
+                Present        = $true
+            })
+        } catch { continue }
+    }
+    if ($list.Count -eq 0) { return $null }
+    return ,$list.ToArray()
+}
+
+# ------------------------------------------------------------
+# Source 3c (macOS): system_profiler SPDisplaysDataType.
+# One-shot at startup only - never called from the poll loop.
+# ------------------------------------------------------------
+function Get-GpuViaMacos {
+    $list = New-Object System.Collections.Generic.List[object]
+    try {
+        $jsonText = & /usr/sbin/system_profiler SPDisplaysDataType -json 2>$null | Out-String
+        if (-not $jsonText) { return $null }
+        $js = $jsonText | ConvertFrom-Json -ErrorAction Stop
+        $arr = @($js.SPDisplaysDataType)
+        if ($arr.Count -eq 0) { return $null }
+        foreach ($g in $arr) {
+            $name = $g.'_name'
+            if (-not $name) { $name = $g.sppci_model }
+            if (-not $name) { continue }
+            $list.Add(@{
+                Name           = ([string]$name).Trim()
+                VendorId       = $null
+                DeviceId       = $null
+                DedicatedBytes = $null
+                SoftwareFlag   = $false
+                DriverVersion  = $null
+                Present        = $true
+            })
+        }
+    } catch { return $null }
+    if ($list.Count -eq 0) { return $null }
+    return ,$list.ToArray()
+}
 $script:PciVendorNames = @{
     '0x10DE' = 'NVIDIA'
     '0x1002' = 'AMD'
@@ -462,12 +587,20 @@ function Get-GpuInfo {
 
     if (-not $Refresh -and $null -ne $script:DetectedGpus) { return $script:DetectedGpus }
 
-    $dxgi = Get-GpuViaDxgi
-    $reg  = Get-GpuViaRegistry
+    $dxgi = $null; $reg = $null; $os = $null
+    if (Test-SuitePlatformWindows) {
+        $dxgi = Get-GpuViaDxgi
+        $reg  = Get-GpuViaRegistry
+    } elseif ($IsLinux) {
+        $os = Get-GpuViaLinux
+    } elseif ($IsMacOS) {
+        $os = Get-GpuViaMacos
+    }
 
     $sources = @()
     if ($dxgi) { $sources += @{ Tag = 'DXGI';     List = $dxgi } }
     if ($reg)  { $sources += @{ Tag = 'Registry'; List = $reg  } }
+    if ($os)   { $sources += @{ Tag = 'OS';       List = $os   } }
     if ($sources.Count -eq 0) {
         $cim = Get-GpuViaCim
         if ($cim) { $sources += @{ Tag = 'CIM'; List = $cim } }

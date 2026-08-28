@@ -190,7 +190,14 @@
             'x264',                     # x264 encoder process
             'NVENC',                    # NVIDIA encoder helper
             'AMDUSBWakeupService',      # AMD capture helper
-            'TwitchStudio'              # Twitch Studio
+            'TwitchStudio',             # Twitch Studio
+            'Bandicam', 'bdcam',        # Bandicam recorder
+            'BANDICAM64',               # Bandicam (x64)
+            'Fraps', 'gamesvr32',       # Fraps
+            'Action', 'RecBox',         # Mirillis Action!
+            'XSplit.Core', 'XSplit.Gamecaster',   # XSplit
+            'GameBar', 'GameBarPresenceWriter',   # Xbox Game Bar
+            'ShareX'                    # ShareX
         )
     }
 
@@ -206,6 +213,41 @@
     # ---- Dynamic resolution scaling --------------------------
     # While a game runs the display drops to a lower same-aspect
     # mode (GPU load falls hard); native is restored on exit/stop.
+    #
+    # One of four QUALITY TIERS is picked per game, so different
+    # titles get the resolution that suits them automatically:
+    #   Low    -> aggressive drop - the biggest FPS gain
+    #   Medium -> balanced (the classic default)
+    #   High   -> mild drop - nearly native sharpness, still helps
+    #   Native -> no switch (keep the panel's native resolution)
+    # Each tier = target render width as % of native (25-99).
+    ResolutionTiers = @{
+        Low    = 55
+        Medium = 75
+        High   = 88
+        Native = 0
+    }
+
+    # Default tier for every detected profile:
+    #   Emulator / Steam / Competitive / Android / Default
+    ProfileTiers = @{
+        Emulator    = 'Medium'   # emulators upscale crisp at half/quarter steps
+        Steam       = 'Medium'   # balanced for most AAA titles
+        Competitive = 'Low'      # max FPS + lowest input latency for esports
+        Android     = 'Medium'   # Android emulators are very GPU-heavy
+        Default     = 'Medium'   # any unclassified game
+    }
+
+    # Per-game tier override (process name WITHOUT .exe -> tier):
+    GameTierOverrides = @{
+        # 'pcsx2'          = 'Low'
+        # 'cs2'            = 'High'
+        # 'VALORANT-Win64' = 'Low'
+        # 'dolphin'        = 'Native'
+    }
+
+    # Legacy single-value override: this is the fallback only for a
+    # profile/game that resolves to no tier (or uses the old setting).
     ResolutionScalePercent = 75      # target width as % of native (25-99)
     PreferIntegerScale     = $true   # use exactly 1/2 native when available:
                                      # pixel-perfect upscale, no blur/pixelation

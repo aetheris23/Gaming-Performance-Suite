@@ -21,19 +21,25 @@
 *.tgz
 GamingPerformanceSuite.zip
 
-# Generated .bat launchers (created by Build-Suite.ps1 during build)
+# Generated launchers (created by Build-Suite.ps1 during build)
 # These are NOT tracked in git; they are generated and included in the ZIP
 Start-GamingSuite.bat
 Start-Watcher-Hidden.bat
 Stop-GamingSuite.bat
+Start-GamingSuite.sh
+Start-Watcher-Hidden.sh
 
 # Build temp directory
 .build_generated/
 
-# Runtime output created while the suite runs (watcher.pid, suite_*.log)
+# Runtime output created while the suite runs (watcher.pid, instance.lock,
+# stop.requested, watcher_state.json, suite_*.log)
 logs/
 *.log
 *.pid
+*.lock
+stop.requested
+watcher_state.json
 
 # OS / editor / temp cruft
 Thumbs.db

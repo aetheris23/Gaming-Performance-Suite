@@ -184,6 +184,8 @@ function Enable-GameNetworkProfile {
         ThrottlingIndexOriginal = $null
         Interfaces = @{}
         NicPower   = @{}
+        Sysctls    = @{}
+        WifiPs     = @{}
         ConnectionType = 'Unknown'
     }
 
@@ -192,6 +194,7 @@ function Enable-GameNetworkProfile {
     $rec.ConnectionType = $connType
     Write-Log ("Active connection type: {0}" -f $connType) 'INFO'
 
+    if (Test-SuitePlatformWindows) {
     # ---- 1. Disable multimedia network throttling -----------------------
     if (Get-TweakBool $Settings 'DisableNetworkThrottling' $true) {
         $orig = Get-RegRaw -Path $script:SysProfile -Name 'NetworkThrottlingIndex'
@@ -295,6 +298,73 @@ function Enable-GameNetworkProfile {
             $applied += 'QoS best-effort limit removed'
         }
     } catch { }
+    } else {
+        #
+        # ---- Unix backend (Linux / macOS / Android via Termux): ----
+        #      journaled sysctl tuning + WiFi power-save off. Every value is
+        #      read BEFORE writing and restored exactly by Undo-GameNetworkProfile.
+        #      Write access to net.* needs root; a non-applicable or skipped key
+        #      is reported as WARN and never crashes the watcher.
+        #
+        $sysctlKeys = if ($IsLinux) {
+            @{
+                'net.core.rmem_max'           = '1048576'
+                'net.core.wmem_max'           = '1048576'
+                'net.core.netdev_max_backlog' = '30000'
+                'net.ipv4.tcp_fastopen'       = '3'
+                'net.ipv4.tcp_low_latency'    = '1'
+            }
+        } else {
+            @{
+                'net.inet.tcp.delayed_ack' = '0'
+                'net.inet.tcp.rfc1323'     = '1'
+            }
+        }
+
+        if (Get-TweakBool $Settings 'TcpLowLatency' $true) {
+            foreach ($k in $sysctlKeys.Keys) {
+                try {
+                    $orig = ((& sysctl -n "$k" 2>$null) -join ' ').Trim()
+                } catch { $orig = $null }
+                if ($null -eq $orig -or $orig -eq '') { continue }   # not supported on this kernel
+                $target = $sysctlKeys[$k]
+                if (("$orig").Trim() -ne $target) {
+                    $res = & sysctl -w "$k=$target" 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        $rec.Sysctls[$k] = ([string]$orig).Trim()
+                        $applied += "sysctl $k -> $target"
+                    } else {
+                        Write-Log ("Sysctl {0} left unchanged ({1})." -f $k, ($res -join '; ')) 'WARN'
+                    }
+                }
+            }
+        }
+
+        # WiFi power-save off is the single biggest wireless packet-loss
+        # fix on Linux (the kernel powers the radio down between bursts).
+        if ($IsLinux -and $connType -eq 'WiFi') {
+            try {
+                $iwOut = @(& iw dev 2>$null)
+                $curIface = $null
+                foreach ($line in $iwOut) {
+                    $im = [regex]::Match($line, '^\s*Interface\s+(\S+)\s*$')
+                    if ($im.Success) { $curIface = $im.Groups[1].Value; continue }
+                    if (-not $curIface) { continue }
+                    $ps = & iw dev "$curIface" get power_save 2>$null
+                    if ($LASTEXITCODE -eq 0 -and $ps -match 'Power save:\s*(\w+)') {
+                        if ($Matches[1] -ieq 'on') {
+                            [void](& iw dev "$curIface" set power_save off 2>&1)
+                            if ($LASTEXITCODE -eq 0) {
+                                $rec.WifiPs[$curIface] = $Matches[1]
+                                $applied += "WiFi power-save off on $curIface"
+                            }
+                        }
+                    }
+                    $curIface = $null
+                }
+            } catch { }
+        }
+    }
 
     if ($null -ne $JournalState) { $JournalState['net'] = $rec }
 
@@ -302,7 +372,7 @@ function Enable-GameNetworkProfile {
         Write-Log 'Network profile: nothing to change.' 'INFO'
     } else {
         Write-Log ("Game network profile ACTIVE ({0}): {1}." -f $connType, ($applied -join ', ')) 'OK'
-        if ($connType -eq 'WiFi') {
+        if ($connType -eq 'WiFi' -and (Test-SuitePlatformWindows)) {
             Write-Log '(WiFi mode: TcpAckFrequency=2 to prevent ACK-flood packet loss on wireless.)' 'INFO'
         }
         Write-Log '(Takes effect for connections opened from now on - keep the watcher running before you launch the game.)' 'INFO'
@@ -356,6 +426,22 @@ function Undo-GameNetworkProfile {
             }
         }
 
+        # Unix: restore sysctls and WiFi power-save to their exact originals.
+        $sctl = Get-NetStateField $net 'Sysctls'
+        if ($sctl -is [hashtable]) {
+            foreach ($k in @($sctl.Keys)) {
+                $val = Get-NetStateField $sctl $k
+                if ($null -ne $val) { [void](& sysctl -w "$k=$val" 2>$null) }
+            }
+        }
+        $wps = Get-NetStateField $net 'WifiPs'
+        if ($wps -is [hashtable]) {
+            foreach ($iface in @($wps.Keys)) {
+                $val = Get-NetStateField $wps $iface
+                if ($val -ieq 'on') { [void](& iw dev "$iface" set power_save on 2>$null) }
+            }
+        }
+
         # Restore QoS if we changed it
         $qosOrig = Get-NetStateField $net 'QosOriginal'
         if ($null -ne $qosOrig) {
@@ -370,6 +456,10 @@ function Undo-GameNetworkProfile {
     }
 
     if ($RemoveKnownDefaults) {
+        if (-not (Test-SuitePlatformWindows)) {
+            Write-Log 'Nothing to revert (registry defaults are Windows-only).' 'INFO'
+            return
+        }
         Remove-RegValue -Path $script:SysProfile -Name 'NetworkThrottlingIndex'
         $count = 1
         foreach ($k in @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)) {
@@ -412,6 +502,11 @@ function Set-MicClarityTweaks {
     #>
     [CmdletBinding()]
     param([bool]$IncludeMmcss = $true)
+
+    if (-not (Test-SuitePlatformWindows)) {
+        Write-Log 'Voice clarity (MMCSS) tuning is Windows-only; skipping.' 'INFO'
+        return
+    }
 
     Assert-AdminOrThrow
 

@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.3
+# Gaming Performance Suite v2.4
 
 Zero-install performance toolkit for gaming across **Windows, Linux, and macOS**
 (PowerShell 5.1+ / PowerShell Core 7+), with foundational Android support via
@@ -6,6 +6,37 @@ Termux. Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in your
 system, tunes your network for lower latency (with WiFi vs LAN awareness to
 prevent packet loss), keeps your microphone clear, adapts to older hardware,
 eliminates launch stutter, and **works smoothly alongside OBS/capture software**.
+
+## What's new in v2.4
+
+- **Fixed false "Watcher is not running" reports.** The background-watcher
+  liveness probe now checks the live instance signal correctly on every
+  platform (named mutex on Windows, exclusive file lock + strict PID/command-line
+  validation on Linux/macOS), and a crash-recovery no longer deletes the new
+  watcher's PID file while it is running.
+- **Fixed a startup error that crashed the watcher on Linux/macOS.** Named
+  `EventWaitHandle` sync objects are Windows-only; non-Windows now uses a
+  journaled stop marker + polling instead, so watcher start/stop work on all
+  platforms without exceptions.
+- **Recording-aware ramp steps** (display switch, standby purge): each deferred
+  step now *re-checks* whether OBS/Bandicam/other capture software is still live
+  right before it runs, preventing the 1 FPS recording slideshow and black-frame
+  flashes that occurred when a recorder was detected later than the game.
+- **Added Bandicam, Fraps, Mirillis Action!, XSplit, Xbox Game Bar and ShareX**
+  to the protected recorder list (never deprioritized, capture-safe paths).
+- **Real network tuning on Linux/macOS** (journaled `sysctl` changes + WiFi
+  power-save off on Linux) instead of only Windows registry tweaks - fixes
+  wireless packet loss outside Windows too.
+- **Lower idle resource use:** one native process snapshot per poll serves both
+  game detection and recorder detection (no repeated `Get-Process` scans), plus
+  cross-process watchdog coordination that clears hardware even after kills.
+- Graceful no-op display scaling everywhere (Linux `xrandr` / macOS
+  `displayplacer` / none elsewhere) - resolution switching can never throw.
+- **Per-game resolution tiers (Low / Medium / High / Native).** Instead of one
+  global percentage, the watcher now assigns a quality tier per game profile -
+  Steam, Riot/esports, PS2/console emulators and Android emulators each get a
+  resolution that suits them, tunable via `ResolutionTiers`, `ProfileTiers` and
+  per-game `GameTierOverrides` in `src/Config.ps1`.
 
 ## Installation & usage
 
@@ -20,8 +51,9 @@ build** to generate `GamingPerformanceSuite.zip`, **install** it, and **run** it
 | **4. Run** | `Start-Watcher-Hidden.bat` / `Start-GamingSuite.bat` / `Stop-GamingSuite.bat` | `pwsh -File src/Main.ps1` | `pwsh -File src/Main.ps1` | `pwsh -File src/Main.ps1` |
 
 > **What the build produces:** the ZIP is a **runtime-only** package. It ships the
-> three Windows launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
-> `Stop-GamingSuite.bat`), the `src/` suite, `README.md` and `.gitignore`. The
+> Windows launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
+> `Stop-GamingSuite.bat`), the Linux/macOS launchers (`Start-GamingSuite.sh`,
+> `Start-Watcher-Hidden.sh`), the `src/` suite, `README.md` and `.gitignore`. The
 > build tooling (`build.bat` / `src/Build-Suite.ps1`) is deliberately **excluded**,
 > so extracting the ZIP can never duplicate or overwrite the builder. Rebuild only
 > from the source repository (step 2 of each platform below).
@@ -70,9 +102,8 @@ sudo snap install powershell --classic
    ```bash
    pwsh -NoProfile -ExecutionPolicy Bypass -File src/Build-Suite.ps1
    ```
-   Produces `GamingPerformanceSuite.zip`. The launchers inside are Windows `.bat`
-   files, so Linux users normally just run the suite straight from the source
-   folder instead (steps 3-4).
+   Produces `GamingPerformanceSuite.zip` (includes a Linux `Start-GamingSuite.sh`
+   launcher), or just run the suite straight from the source folder (steps 3-4).
 3. **Install**
    ```bash
    unzip GamingPerformanceSuite.zip -d ~/gaming-suite
@@ -81,17 +112,21 @@ sudo snap install powershell --classic
    or keep running from the cloned source folder.
 4. **Run**
    ```bash
-   # interactive menu
-   pwsh -NoProfile -File src/Main.ps1
+   # interactive menu (elevates to root via sudo for full capabilities)
+   ./Start-GamingSuite.sh
 
    # background watcher (runs until the game session ends, then exits)
+   ./Start-Watcher-Hidden.sh
+   ```
+   Equivalent manual commands:
+   ```bash
+   pwsh -NoProfile -File src/Main.ps1
    pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch
    ```
    Elevate with `sudo` for full capabilities (process priority boosting, network
-   tuning). Display scaling uses `xrandr` when available. The clickable `.bat`
-   launch/stop channels are Windows-specific; on Linux, stop the watcher with
-   Ctrl+C in its own terminal, or open the menu and choose "STOP background
-   watcher".
+   tuning). Display scaling uses `xrandr` when available; otherwise scaling is a
+   safe no-op. Stop the background watcher with menu option 5, or
+   `pwsh -NoProfile -Command "Import-Module ./src/Common.psm1 -Force; Stop-BackgroundWatcher"`.
 
 ### macOS
 
@@ -120,11 +155,14 @@ brew install displayplacer       # optional: display scaling support
    or run from the cloned source folder.
 4. **Run**
    ```bash
-   pwsh -NoProfile -File src/Main.ps1                        # interactive menu
-   pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch       # background watcher
+   ./Start-GamingSuite.sh                         # interactive menu
+   ./Start-Watcher-Hidden.sh                      # background watcher
    ```
-   Elevate with `sudo` for full capabilities. The `.bat` launchers are
-   Windows-specific; use the menu or Ctrl+C to stop the watcher.
+   Equivalent manual commands are `pwsh -NoProfile -File src/Main.ps1` and
+   `pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch`. Elevate with `sudo` for
+   full capabilities. Display scaling uses `displayplacer` when installed (safe
+   no-op otherwise); stop the watcher with menu option 5 or
+   `Stop-BackgroundWatcher`.
 
 ### Android (Termux)
 
@@ -162,11 +200,31 @@ known game process it:
 | **~0.5 s** | Standby-memory purge (BEFORE game fully loads - eliminates launch stutter) |
 | **~1 s later** | Legacy FSO flag + optional frame-generation companion app |
 | **~8 s later** | Secondary standby purge during loading screen |
-| **~12 s later** | Display switches to a lower same-aspect resolution -> GPU load drops hard |
+| **~12 s later** | Display switches to the game's resolution tier (Low / Medium / High / Native) -> GPU load drops hard |
 
 Heavy steps are **staged with optimized timing** to eliminate the stutter/frame-drop
 burst that used to hit when launching games. The pre-game optimization ensures network
 tweaks are in place BEFORE the game opens its sockets.
+
+> **Resolution tiers (auto per game):** instead of one global percentage, every
+> detected game is assigned a quality tier based on its **profile**, so the right
+> resolution is picked for Steam, Riot/esports, PS2/console emulators (PCSX2,
+> PPSSPP, Dolphin, RetroArch, DuckStation...), Android emulators (Bluestacks, LDPlayer,
+> NOX, MuMu...), and anything else:
+
+| Tier | Target width | Typical use |
+|---|---|---|
+| **Low** | 55% of native | Competitive/esports (max FPS, lowest input latency) |
+| **Medium** | 75% of native | Balanced default for Steam & emulators |
+| **High** | 88% of native | Nearly-native sharpness, still a solid gain |
+| **Native** | 100% (no switch) | When you want zero display changes |
+
+Supported games run at 480p, 720p, 900p, 1080p etc. - `Select-ScaledMode`
+picks the closest **same-aspect-ratio** mode to the tier's target, preferring
+exact 1/2 integer scaling when available (crisp, never stretched or blurry).
+You can adjust every tier, every profile default, and even add per-game
+overrides in `src/Config.ps1` (`ResolutionTiers`, `ProfileTiers`,
+`GameTierOverrides`).
 
 > **Session-scoped:** the moment the last monitored game closes, the watcher undoes
 > every change (native resolution, priorities, timer, network) and exits completely.
@@ -175,10 +233,11 @@ tweaks are in place BEFORE the game opens its sockets.
 > start it again. (For the old always-on behavior set `ExitWhenGameSessionEnds = $false`
 > in `src/Config.ps1`.)
 
-> **Recording software detected?** When OBS, Streamlabs, or another capture tool
+> **Recording software detected?** When OBS, Bandicam, Streamlabs, or another capture tool
 > is running, the suite automatically takes **capture-safe paths**: display resolution
 > switches and standby purges are deferred to prevent black frames or hitches in
-> your recording. Game priority/CPU/network boosts still apply normally.
+> your recording, and each deferred step re-checks the recorder just before it runs.
+> Game priority/CPU/network boosts still apply normally.
 
 ## Network optimization - WiFi and LAN aware
 
@@ -205,13 +264,26 @@ reverted exactly on stop.
 - **TCP delayed ACK tuning**: WiFi gets 100ms delayed ACK batching to reduce overhead
 - **Per-adapter power management**: prevents deep sleep states that cause reconnection drops
 
+### Network tuning on Linux / macOS
+
+v2.4 applies the same journaled, exactly-reverted tuning on non-Windows hosts:
+
+| Platform | Tuning |
+|---|---|
+| **Linux** | `net.core.rmem_max` / `wmem_max`, `net.core.netdev_max_backlog`, `net.ipv4.tcp_fastopen`, `net.ipv4.tcp_low_latency`, plus **WiFi power-save off** (`iw dev ... set power_save off`) - the biggest wireless packet-loss fix |
+| **macOS** | `net.inet.tcp.delayed_ack=0`, `net.inet.tcp.rfc1323=1` |
+
+Every value is read *before* it is written, stored in the recovery journal, and
+restored exactly when the watcher stops. Writes need root (`sudo`); a key that is
+missing or unwritable is logged as a warning and skipped - it never stops the watcher.
+
 ## Cross-platform support
 
 | Platform | Support Level | Features |
 |---|---|---|
 | **Windows** | Full | All features: display scaling, GPU detection, network tuning, priority boosting, memory management |
-| **Linux** | Good | Process priority, network tuning, game detection. Display scaling via xrandr (when available) |
-| **macOS** | Good | Process priority, network tuning, game detection. Display scaling via displayplacer (when available) |
+| **Linux** | Good | Process priority, sysctl network tuning (+ WiFi power-save off), game detection, memory purge. Display scaling via xrandr (when available) |
+| **macOS** | Good | Process priority, sysctl network tuning, game detection, memory purge. Display scaling via displayplacer (when available) |
 | **Android** | Basic | Game detection, network optimization (root). Priority boosting requires root access |
 
 The suite auto-detects the platform via PowerShell Core's `$IsWindows`/`$IsLinux`/`$IsMacOS`
@@ -222,12 +294,12 @@ are gracefully skipped on other platforms.
 
 For older or low-spec hardware (e.g. **Intel i3 7th Gen, 8-16GB RAM, Intel HD/UHD Graphics**).
 
-Low-spec mode is **enabled by default** in v2.3 for minimal resource usage.
+Low-spec mode is **enabled by default** in v2.4 for minimal resource usage.
 If you have a high-end PC, set `Enabled = $false` in `src/Config.ps1`:
 
 ```powershell
 LowSpecMode = @{
-    Enabled = $true        # Master switch (ON by default in v2.3)
+    Enabled = $true        # Master switch (ON by default in v2.4)
     SkipResolutionSwitch = $false  # Keep display scaling (helps FPS on weak GPUs)
     SkipStandbyPurge = $false      # Keep memory purging (helps with 8-16GB)
     SkipBackgroundSilence = $false # Keep background silencing
@@ -269,6 +341,12 @@ These processes are **never deprioritized** by background silencing:
 - Streamlabs Desktop
 - StreamElements OBS Live
 - Twitch Studio
+- Bandicam (`Bandicam`, `bdcam`, `BANDICAM64`)
+- Fraps (`Fraps`)
+- Mirillis Action! (`Action`, `RecBox`)
+- XSplit (`XSplit.Core`, `XSplit.Gamecaster`)
+- Xbox Game Bar (`GameBar`, `GameBarPresenceWriter`)
+- ShareX
 - x264 / NVENC encoder helpers
 
 Additional processes can be added in `Config.ps1`:
@@ -354,7 +432,9 @@ Override any classification in `Config.ps1` `ProfileOverrides`.
 
 Previous versions caused stutter when launching games because heavy operations
 (standby purge, display switch, network tweaks) ran AFTER the game was detected.
-v2.2 introduced pre-game optimization; v2.3 adds recording-aware capture-safe paths:
+v2.2 introduced pre-game optimization; v2.3 adds recording-aware capture-safe paths;
+v2.4 re-checks the recorder right before each deferred step so a recorder detected
+after the game can never stall the recording loop:
 
 1. **Pre-game phase** (before any game detected):
    - Power plan switched to High Performance
@@ -386,25 +466,32 @@ build.bat                     one-click rebuild of GamingPerformanceSuite.zip
 Start-GamingSuite.bat         (generated by build) interactive menu
 Start-Watcher-Hidden.bat      (generated by build) background watcher
 Stop-GamingSuite.bat          (generated by build) stops watcher, restores everything
+Start-GamingSuite.sh          (generated by build) interactive menu (Linux/macOS)
+Start-Watcher-Hidden.sh       (generated by build) background watcher (Linux/macOS)
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
   Config.ps1                  game list, thresholds, scale %, low-spec mode,
                               network tuning, voice clarity, recording detection
   Common.psm1                 logging, privileges, cross-platform detection,
-                              stop-event / single-instance + recovery journal
+                              stop-signal / single-instance + recovery journal
   GameBoost.psm1              FPS stability engine + watcher loop (stutter-free,
                               recording-aware, low-spec optimized)
   DisplayScale.psm1           dynamic display-mode switching + native restore
+                              (user32 / xrandr / displayplacer; no-op elsewhere)
   GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
+                              (DXGI / sysfs+lspci / system_profiler)
   NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
-  Build-Suite.ps1             generates .bat files + repacks ZIP
+                              (registry on Windows, sysctl on Linux/macOS)
+  Build-Suite.ps1             generates .bat/.sh launchers + repacks ZIP
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)
   runtime/watcher_state.json  crash-recovery journal (removed on clean stop)
+  runtime/stop.requested      stop signal (non-Windows only, removed on clean stop)
+  runtime/instance.lock       single-instance guard (non-Windows)
   suite_YYYYMMDD.log          timestamped operation log
 ```
 
-> The ZIP only ships the runtime layout (the three `.bat` launchers + `src/` +
+> The ZIP only ships the runtime layout (the five launchers + `src/` +
 > `README.md` + `.gitignore`). `build.bat` and `src/Build-Suite.ps1` are build
 > tooling and live only in the source repository, never inside the ZIP.
 
@@ -423,4 +510,5 @@ completely gone.
 - Recording software (OBS, Streamlabs, etc.) is never deprioritized or disrupted.
 - Capture-safe paths prevent black frames and hitches while recording.
 - Network/voice tweaks are journaled and reverted exactly on stop.
-- If an action fails, check `logs/` - most failures mean the script wasn't elevated.
+- If an action fails, check `logs/` - most failures mean the script wasn't elevated
+  (Windows: run as Administrator; Linux/macOS: run with `sudo`).

@@ -71,11 +71,12 @@ function Write-GpuInventory {
 function Add-NativeBoostType {
     <#
         Compiles the timer/memory interop lazily, on first real use.
-        None of these native calls are needed while the watcher idles,
-        so deferring the one-time C# compile keeps startup instant on
-        low-spec machines (it lands at first game detection instead).
+        Windows-only (winmm/ntdll P/Invokes); on Linux/macOS/Android
+        these native calls do not exist so we never compile them and
+        the helper functions transparently use platform equivalents.
     #>
     if ('Suite.NativeBoost' -as [type]) { return }
+    if (-not (Test-SuitePlatformWindows)) { return }
     Add-Type -Namespace Suite -Name NativeBoost -MemberDefinition @'
 [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint uPeriod);
 [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint uPeriod);
@@ -105,14 +106,35 @@ public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 $script:TimerActive = $false
 
 # ------------------------------------------------------------
-# Free RAM via a single native call (no WMI/CIM session overhead)
+# Free RAM (per-platform, single call)
 # ------------------------------------------------------------
 function Get-FreeRamMB {
     Add-NativeBoostType
-    $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
-    $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
-    [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
-    [int]($ms.ullAvailPhys / 1MB)
+    if (Test-SuitePlatformWindows) {
+        if (-not ('Suite.NativeBoost' -as [type])) { return 0 }
+        $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
+        $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
+        [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
+        [int]($ms.ullAvailPhys / 1MB)
+    } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $IsLinux) {
+        try {
+            $memo = Get-Content /proc/meminfo -ErrorAction Stop
+            foreach ($line in $memo) {
+                if ($line -match '^MemAvailable:\s+(\d+)\s*kB') {
+                    return [int](([int64]$Matches[1] * 1024) / 1MB)
+                }
+            }
+        } catch { }
+        0
+    } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS) {
+        try {
+            $out = & vm_stat 2>$null | Out-String
+            $free = 0L; $inactive = 0L
+            if ($out -match 'Pages free:\s+(\d+)')            { $free = [int64]$Matches[1] }
+            if ($out -match 'Pages inactive:\s+(\d+)')        { $inactive = [int64]$Matches[1] }
+            [int](($free + $inactive) * 4096 / 1MB)
+        } catch { 0 }
+    } else { 0 }
 }
 
 # ------------------------------------------------------------
@@ -121,6 +143,10 @@ function Get-FreeRamMB {
 function Enable-GamingPowerPlan {
     [CmdletBinding()] param()
 
+    if (-not (Test-SuitePlatformWindows)) {
+        Write-Log 'Power-plan switching is Windows-only; skipped on this platform.' 'INFO'
+        return
+    }
     Assert-AdminOrThrow
 
     # Duplicate "High performance" into a dedicated gaming plan if missing
@@ -163,6 +189,10 @@ function Enable-GamingPowerPlan {
 # 2. Kill Game DVR / Game Bar capture (classic Valorant stutters)
 # ------------------------------------------------------------
 function Disable-GameDVR {
+    if (-not (Test-SuitePlatformWindows)) {
+        Write-Log 'Game DVR / Game Bar tuning is Windows-only; skipped on this platform.' 'INFO'
+        return
+    }
     Assert-AdminOrThrow
 
     $paths = @(
@@ -192,6 +222,10 @@ function Set-MultimediaTweaks {
     #>
     [CmdletBinding()] param([bool]$EnableHags = $true)
 
+    if (-not (Test-SuitePlatformWindows)) {
+        Write-Log 'MMCSS scheduling tweaks are Windows-only; skipped on this platform.' 'INFO'
+        return
+    }
     Assert-AdminOrThrow
 
     $sysProfile = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
@@ -228,6 +262,10 @@ function Set-TimerResolution {
         [switch]$Restore,
         [bool]$UseAggressive = $false
     )
+    if (-not (Test-SuitePlatformWindows)) {
+        if (-not $Restore) { Write-Log 'Windows timer-resolution locking is unavailable on this platform; skipping.' 'INFO' }
+        return
+    }
     Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
@@ -252,20 +290,58 @@ function Set-TimerResolution {
 #    after the PC has been on for hours)
 # ------------------------------------------------------------
 function Clear-StandbyMemory {
-    Assert-AdminOrThrow
+    <#
+        Frees the OS standby/cleanable memory. Windows uses the classic
+        EmptyStandbyList system call; Linux drops page caches via
+        /proc/sys/vm/drop_caches; macOS uses the system 'purge' tool.
+        Elevation is required wherever a write is involved.
+    #>
+    if (Test-SuitePlatformWindows) {
+        Assert-AdminOrThrow
 
-    Add-NativeBoostType
-    [void](Enable-Privilege 'SeProfileSingleProcessPrivilege')
+        Add-NativeBoostType
+        if (-not ('Suite.NativeBoost' -as [type])) { return }
+        [void](Enable-Privilege 'SeProfileSingleProcessPrivilege')
 
-    # SystemMemoryListInformation(80): command 4 = PurgeStandbyList
-    $cmd = 4
-    $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
-    if ($status -eq 0) {
-        $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
-        Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
-    } else {
-        Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8} (privilege not held?)" -f $status) 'ERROR'
+        # SystemMemoryListInformation(80): command 4 = PurgeStandbyList
+        $cmd = 4
+        $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
+        if ($status -eq 0) {
+            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
+            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
+        } else {
+            Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8} (privilege not held?)" -f $status) 'ERROR'
+        }
+        return
     }
+
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsLinux) {
+        try {
+            if (-not (Test-Path /proc/sys/vm/drop_caches)) {
+                Write-Log 'Standby purge unavailable (no /proc/sys/vm/drop_caches).' 'WARN'
+                return
+            }
+            Set-Content -Path /proc/sys/vm/drop_caches -Value '3' -NoNewline -ErrorAction Stop
+            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
+            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
+        } catch {
+            Write-Log ("Linux standby purge failed: {0}" -f $_.Exception.Message) 'ERROR'
+        }
+        return
+    }
+
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS) {
+        try {
+            & /usr/sbin/purge 2>$null | Out-Null
+            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
+            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
+        } catch {
+            Write-Log ("macOS purge failed: {0}" -f $_.Exception.Message) 'ERROR'
+        }
+        return
+    }
+
+    Write-Log 'Standby memory purge is unavailable on this platform.' 'WARN'
 }
 
 # ------------------------------------------------------------
@@ -357,6 +433,14 @@ $script:RecordingPatterns = @(
     'twitchstudio'                       # Twitch Studio
 )
 
+function Test-MatchAny {
+    <# Wildcard matcher over many patterns (all lowercase). Returns $true
+       when $Name matches any pattern. Case-insensitive on every platform. #>
+    param([string]$Name, [string[]]$Patterns)
+    foreach ($p in $Patterns) { if ($Name -like $p) { return $true } }
+    return $false
+}
+
 function Get-GameProfile {
     <#
         Classifies a running game process into one of the profile names:
@@ -397,9 +481,72 @@ function Get-GameProfile {
     return 'Default'
 }
 
+function Get-GameScalePercent {
+    <#
+        Resolves the display-scaling target (% of native width) for a
+        detected game. Could be met by ANY display mode the monitor
+        advertises (480p / 720p / 900p / 1080p / etc.) because
+        Select-ScaledMode picks the closest same-aspect mode to the
+        target percent.
+        Resolution precedence:
+          1. GameTierOverrides keyed by the exact process name
+          2. ProfileTiers default for the game's profile
+             (Emulator / Steam / Competitive / Android / Default)
+          3. the global ScalePercent fallback (legacy single value)
+        Tier values come from ResolutionTiers (Low/Medium/High/Native).
+        Returns 0 for 'Native' (keep the panel resolution - no switch).
+        Never throws.
+    #>
+    param(
+        [string]$ProfileName,
+        [string]$ProcessName,
+        [hashtable]$Settings = @{}
+    )
+
+    $tiers  = @{}
+    $pTiers = @{}
+    $o      = @{}
+    if ($Settings.ContainsKey('Tiers'))             { $tiers  = $Settings['Tiers'] }
+    if ($Settings.ContainsKey('ProfileTiers'))      { $pTiers = $Settings['ProfileTiers'] }
+    if ($Settings.ContainsKey('GameTierOverrides')) { $o      = $Settings['GameTierOverrides'] }
+
+    $fallback = 66
+    if ($Settings.ContainsKey('ScalePercent')) { $fallback = [int]$Settings['ScalePercent'] }
+
+    # 1) per-game override (exact, case-insensitive process name)
+    $tier = $null
+    foreach ($k in $o.Keys) {
+        if ([string]::Equals([string]$k, $ProcessName, [StringComparison]::OrdinalIgnoreCase)) {
+            $tier = $o[$k]
+            break
+        }
+    }
+    # 2) default tier for this profile
+    if (-not $tier -and $pTiers.ContainsKey($ProfileName)) { $tier = $pTiers[$ProfileName] }
+
+    # 3) tier name -> target percent
+    $percent = $null
+    if ($tier) {
+        foreach ($tk in $tiers.Keys) {
+            if ([string]::Equals([string]$tk, [string]$tier, [StringComparison]::OrdinalIgnoreCase)) {
+                $percent = $tiers[$tk]
+                break
+            }
+        }
+    }
+    if ($null -eq $percent) { $percent = $fallback }
+
+    $p = [int]$percent
+    if ($p -ge 25 -and $p -le 99) { return $p }   # valid scaled target
+    return 0                                      # <=0/<25 -> Native (no switch)
+}
+
 # ------------------------------------------------------------
 # 6. Per-process boost driven by the game's profile
 # ------------------------------------------------------------
+$script:PriorityCapable = $true
+$script:PriorityCapWarned = $false
+
 function Invoke-ProcessBoost {
     param(
         [Parameter(Mandatory)][Diagnostics.Process]$Process,
@@ -412,9 +559,25 @@ function Invoke-ProcessBoost {
 
         # Realtime is deliberately never used - it starves input threads
         $wantPri = [string]$Profile.Priority
-        if ($Process.PriorityClass -ne $wantPri) {
-            $Process.PriorityClass = $wantPri
-            Write-Log ("Priority -> {0} for '{1}' (PID {2})" -f $wantPri, $Process.ProcessName, $Process.Id) 'OK'
+        if ($script:PriorityCapable) {
+            try {
+                if ($Process.PriorityClass -ne $wantPri) {
+                    $Process.PriorityClass = $wantPri
+                    Write-Log ("Priority -> {0} for '{1}' (PID {2})" -f $wantPri, $Process.ProcessName, $Process.Id) 'OK'
+                }
+            } catch {
+                # Not elevated on Unix (or exotic process): drop PR permanently
+                # instead of hammering the watcher with a warning every poll.
+                if (-not (Test-SuitePlatformWindows)) {
+                    $script:PriorityCapable = $false
+                    if (-not $script:PriorityCapWarned) {
+                        $script:PriorityCapWarned = $true
+                        Write-Log 'Process-priority boosting unavailable (needs root on this platform); falling back to affinity steering only.' 'WARN'
+                    }
+                } else {
+                    throw
+                }
+            }
         }
 
         # Spread the game off the interrupt core (USB/NIC DPCs land there)
@@ -647,6 +810,7 @@ function Invoke-FsoCompatFlag {
         [hashtable]$Journal,
         [switch]$Undo
     )
+    if (-not (Test-SuitePlatformWindows)) { return }   # AppCompat registry is Windows-only
     $path = $null
     try   { $path = $Process.Path } catch { }
     if (-not $path) { try { $path = $Process.MainModule.FileName } catch { } }
@@ -679,6 +843,7 @@ function Invoke-FsoCompatFlag {
 
 function Undo-FsoCompatFlags {
     param([hashtable]$State, [hashtable]$Journal)
+    if (-not (Test-SuitePlatformWindows)) { return }
     foreach ($path in @($State.Keys)) {
         try {
             Remove-ItemProperty -Path $script:FsoKey -Name ([string]$path) -ErrorAction SilentlyContinue
@@ -746,6 +911,11 @@ function Start-GameWatcher {
     # ---- recover anything a previous unclean session left behind ----
     try { Repair-OrphanedWatcherState | Out-Null } catch { }
 
+    # A killed watcher can leave a stale stop marker behind (Unix stop
+    # file; on Windows the kernel event dies with the process). Clear it
+    # so this fresh session is not stopped before it even starts.
+    Clear-StopRequest
+
     # Never compete with the game: our own watcher yields under any load
     try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 
@@ -795,7 +965,10 @@ function Start-GameWatcher {
     Write-GpuInventory
 
     $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
-    $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations']
+    # Display scaling picks its own backend by platform (user32 / xrandr /
+    # displayplacer) and is a safe no-op where none is available, so Unix
+    # hosts are only excluded here if the user or legacy profile asks.
+    $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations'] -and (Test-SuitePlatformWindows)
     if ($skipScale)  { Write-Log 'Resolution switching is DISABLED for this session.' 'INFO' }
     if ($fsoDisable) { Write-Log 'Fullscreen optimizations will be disabled for detected games.' 'INFO' }
 
@@ -871,6 +1044,7 @@ function Start-GameWatcher {
     else            { Write-Log 'Press Ctrl+C to stop the watcher.' 'INFO' }
 
     $boosted       = @{}   # pid -> profile name
+    $scalePctByPid = @{}   # pid -> resolution tier percent chosen on detect
     $silenced      = @{}   # pid -> info (background apps we deprioritized)
     $voiceBoosted  = @{}   # pid -> info (voice apps bumped for mic clarity)
     $fsoDone       = @{}   # exe paths we flagged for FSO-off this session
@@ -900,8 +1074,8 @@ function Start-GameWatcher {
     # stages are pending the loop wakes early, still parking on the
     # kernel event, so the stop signal stays instant.
     $ramp = [System.Collections.Generic.List[object]]::new()
-    function Add-Ramp { param([string]$Kind, [double]$DelaySec, [int]$TargetPid)
-        $ramp.Add(@{ DueUtc = [datetime]::UtcNow.AddSeconds($DelaySec); Kind = $Kind; Pid = $TargetPid })
+    function Add-Ramp { param([string]$Kind, [double]$DelaySec, [int]$TargetPid, [int]$Value = 0)
+        $ramp.Add(@{ DueUtc = [datetime]::UtcNow.AddSeconds($DelaySec); Kind = $Kind; Pid = $TargetPid; Value = $Value })
     }
     function Test-RampPending { param([string]$Kind)
         foreach ($a in $ramp) { if ($a.Kind -eq $Kind) { return $true } }
@@ -909,33 +1083,59 @@ function Start-GameWatcher {
     }
     $extrasQueued = @{}
 
-    # ---- recording detection cache (reset each poll cycle) ------
-    $recordingCache = $null          # $true/$false, cleared each iteration
-
     # ---- performance throttling: avoid redundant work per cycle --
     # Background silence is expensive (iterates all target processes);
     # only re-run it every N cycles (30s at 15s poll) instead of every poll.
     $silenceThrottleSec = if ($isLowSpec) { 45 } else { 30 }
     $lastSilenceUtc     = [datetime]::MinValue
     # PID exit checks: only scan the boosted table every other cycle
-    # when gaming (the common case is no exits), halving the Get-Process
-    # calls inside the cleanup loop.
+    # when gaming (the common case is no exits), halving the process
+    # checks inside the cleanup loop.
     $exitCheckCounter   = 0
+
+    # ---- precompiled matchers (once per watcher run) -----------------
+    # Watching 100+ game names individually via Get-Process -Name forces
+    # PowerShell to enumerate the whole process table per name-list. We
+    # instead snapshot the table ONCE per poll and run cheap lowercase
+    # wildcard matches in-process - cheaper on every platform, and on a
+    # low-spec machine this is the difference between 1% and 0.05% CPU.
+    $gameWatchPatterns = @($GameNames | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $recWatchPatterns  = @($script:RecordingPatterns + $recExtraProtected | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $recWatchPatterns  = @($recWatchPatterns | Where-Object { $_ })
 
     try {
         while ($true) {
-            # Reset per-cycle caches
-            $recordingCache = $null
+            # One native process snapshot serves both the game lookup and
+            # the recording-detection check for this poll cycle.
+            try {
+                $allProc = [Diagnostics.Process]::GetProcesses()
+            } catch {
+                Write-Log ("Process snapshot failed: {0}" -f $_.Exception.Message) 'WARN'
+                $allProc = @()
+            }
+            $processes = @($allProc | ForEach-Object {
+                $n = ''
+                try { $n = $_.ProcessName } catch { }
+                if (-not $n) { return }
+                $nl = $n.ToLowerInvariant()
+                $isGameMatch = Test-MatchAny -Name $nl -Patterns $gameWatchPatterns
+                $isRecMatch  = $recOn -and (Test-MatchAny -Name $nl -Patterns $recWatchPatterns)
+                if ($isGameMatch -or $isRecMatch) {
+                    $_                     # game OR recorder - keep the Process object
+                }
+            })
 
-            # Detect recording software (lightweight single Get-Process call)
+            $running = @($processes | Where-Object {
+                try { $nl = $_.ProcessName.ToLowerInvariant() } catch { return $false }
+                Test-MatchAny -Name $nl -Patterns $gameWatchPatterns
+            })
             $isRecording = $false
             if ($recOn) {
-                $isRecording = Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected -CacheVar ([ref]$recordingCache)
+                $isRecording = @($processes | Where-Object {
+                    try { $nl = $_.ProcessName.ToLowerInvariant() } catch { return $false }
+                    Test-MatchAny -Name $nl -Patterns $recWatchPatterns
+                }).Count -gt 0
             }
-
-            # Name-filtered lookup at the provider level - no full process
-            # enumeration, no WMI. Two cheap native calls per poll total.
-            $running = @(Get-Process -Name $GameNames -ErrorAction SilentlyContinue)
 
             foreach ($game in $running) {
                 try {
@@ -946,8 +1146,17 @@ function Start-GameWatcher {
                         if (-not $script:GameProfiles.ContainsKey($profName)) { $profName = 'Default' }
                         $prof = $script:GameProfiles[$profName]
 
-                        Write-Log ("Detected '{0}' (PID {1}) -> {2} profile [{3}]" -f `
-                            $game.ProcessName, $game.Id, $profName, $prof.Description) 'ACTION'
+                        # ---- resolve this game's resolution tier ----
+                        #     Low/Medium/High/Native -> a % of native width.
+                        #     Zero means "Native" = no display switch at all.
+                        $scalePctForGame = Get-GameScalePercent -ProfileName $profName `
+                            -ProcessName $game.ProcessName -Settings $ResolutionSettings
+                        $scalePctByPid[$game.Id] = $scalePctForGame
+
+                        Write-Log ("Detected '{0}' (PID {1}) -> {2} profile [{3}] ; res tier {4} (target {5}% of native)" -f `
+                            $game.ProcessName, $game.Id, $profName, $prof.Description, `
+                            $(if ($scalePctForGame -gt 0) { "scaled" } else { "native" }), `
+                            $(if ($scalePctForGame -gt 0) { $scalePctForGame } else { 100 })) 'ACTION'
 
                         # ---- INSTANT, cheap steps: pacing timer + scheduling ----
                         if (-not $timerOn) {
@@ -973,8 +1182,8 @@ function Start-GameWatcher {
                             Add-Ramp 'purge2' 8 0   # secondary purge during loading
                         }
                         $recSkipResNow = $isRecording -and $recSkipRes
-                        if (-not $skipScale -and -not $recSkipResNow -and -not $scaledApplied -and -not (Test-RampPending 'resscale')) {
-                            Add-Ramp 'resscale' 12 0   # display switch after game stabilizes
+                        if (-not $skipScale -and -not $recSkipResNow -and -not $scaledApplied -and -not (Test-RampPending 'resscale') -and $scalePctForGame -gt 0) {
+                            Add-Ramp 'resscale' 12 0 $scalePctForGame   # display switch after game stabilizes
                         }
                         if (-not $extrasQueued.ContainsKey($game.Id)) {
                             $extrasQueued[$game.Id] = $true
@@ -997,7 +1206,9 @@ function Start-GameWatcher {
                         }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
-                        if ($game.PriorityClass -ne [string]$prof.Priority) {
+                        $needBoost = $true
+                        try { $needBoost = ($game.PriorityClass -ne [string]$prof.Priority) } catch { }
+                        if ($needBoost -and $script:PriorityCapable) {
                             # Re-assert if something knocked it back down
                             Invoke-ProcessBoost -Process $game -Profile $prof -MaxCores $lowSpecMaxCores
                         }
@@ -1018,6 +1229,7 @@ function Start-GameWatcher {
                     if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
                         Write-Log ("'{0}' session ended (PID {1})." -f $boosted[$procId], $procId) 'INFO'
                         $null = $boosted.Remove($procId)
+                        $null = $scalePctByPid.Remove($procId)
                         $removedAny = $true
                     }
                 }
@@ -1085,28 +1297,53 @@ function Start-GameWatcher {
                 switch ([string]$item.Kind) {
                     'purge' {
                         # Pre-launch purge: eliminates launch stutter by
-                        # clearing standby memory before game loads
-                        try   { Clear-StandbyMemory } catch { }
-                        $sessionPurged = $true
-                        $lastPurgeUtc  = [datetime]::UtcNow
+                        # clearing standby memory before game loads.
+                        # RE-CHECK for recording at execution time: a capture
+                        # app might have started since the ramp was queued,
+                        # and a purge mid-recording hammers the captured FPS.
+                        if ($recOn -and $recSkipPurge -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
+                            Write-Log 'Standby purge deferred: recording software active.' 'INFO'
+                        } else {
+                            try   { Clear-StandbyMemory } catch { }
+                            $sessionPurged = $true
+                            $lastPurgeUtc  = [datetime]::UtcNow
+                        }
                     }
                     'purge2' {
                         # Secondary purge during loading screen
-                        try   { Clear-StandbyMemory } catch { }
-                        $lastPurgeUtc  = [datetime]::UtcNow
+                        if ($recOn -and $recSkipPurge -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
+                            Write-Log 'Secondary standby purge deferred: recording software active.' 'INFO'
+                        } else {
+                            try   { Clear-StandbyMemory } catch { }
+                            $lastPurgeUtc  = [datetime]::UtcNow
+                        }
                     }
                     'resscale' {
                         try {
                             if (-not $scaledApplied) {
-                                # Remember native FIRST so even a crash between the
-                                # two calls below is recoverable via the journal.
-                                $nativeNow = Get-CurrentDisplayMode
-                                $ok = Enable-LowResolutionMode -ScalePercent $scalePct -PreferInteger:([bool]$prefInt)
-                                if ($ok) {
-                                    $scaledApplied = $true
-                                    $journal['scaledActive'] = $true
-                                    $journal['nativeMode']   = $nativeNow
-                                    Save-Journal
+                                # A resolution flip while OBS/Bandicam is
+                                # capturing causes black frames + 1fps drops,
+                                # so if a recorder appeared since we queued the
+                                # switch, hold native until it exits.
+                                if ($recOn -and $recSkipRes -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
+                                    Write-Log 'Display switch deferred: recording software active (keeps captured output clean).' 'INFO'
+                                } else {
+                                    # Remember native FIRST so even a crash between the
+                                    # two calls below is recoverable via the journal.
+                                    # The target comes from the game's resolution tier
+                                    # (set when it was detected); 0 falls back to the
+                                    # legacy global percent.
+                                    $targetPct = $item.Value
+                                    if ($targetPct -le 0) { $targetPct = $scalePct }
+                                    $nativeNow = Get-CurrentDisplayMode
+                                    $ok = Enable-LowResolutionMode -ScalePercent $targetPct -PreferInteger:([bool]$prefInt)
+                                    if ($ok) {
+                                        $scaledApplied = $true
+                                        $journal['scaledActive'] = $true
+                                        $journal['nativeMode']   = $nativeNow
+                                        Save-Journal
+                                        Write-Log ("Display switched to {0}% of native (tier {1}%)." -f $targetPct, $targetPct) 'OK'
+                                    }
                                 }
                             }
                         } catch {
@@ -1203,13 +1440,13 @@ function Start-GameWatcher {
                 $untilDueMs = [int][math]::Ceiling(($minDue - [datetime]::UtcNow).TotalMilliseconds)
                 if ($untilDueMs -lt $waitMs) { $waitMs = [Math]::Max(200, $untilDueMs) }
             }
-            if ($StopEvent) {
-                if ($StopEvent.WaitOne($waitMs)) {
-                    Write-Log 'Stop signal received.' 'ACTION'
-                    break
-                }
-            } else {
-                Start-Sleep -Milliseconds $waitMs
+
+            # Park on the stop signal (instant on Windows) or poll the stop
+            # marker in 250ms slices elsewhere, then loop again.
+            $stopping = Wait-StopOrTimeout -Milliseconds $waitMs -StopEvent $StopEvent
+            if ($stopping) {
+                Write-Log 'Stop signal received.' 'ACTION'
+                break
             }
         }
     } finally {
@@ -1223,6 +1460,7 @@ function Start-GameWatcher {
         if ($netOn) {
             try { Undo-GameNetworkProfile -JournalState $journal['net'] } catch { }
         }
+        Clear-StopRequest                  # Unix stop marker (Windows: event reset by next start)
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair
         Write-Log 'Game watcher stopped, priorities/timer/resolution/network restored.' 'INFO'
