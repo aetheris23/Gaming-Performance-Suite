@@ -157,7 +157,7 @@ function New-WatcherStopEvent {
     #>
     if (Test-SuitePlatformWindows) {
         $evt = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, (Get-WatcherStopEventName))
-        $evt.Reset()   # clear a stale signal left by an aborted session
+        $null = $evt.Reset()   # clear a stale signal left by an aborted session (results discarded so the handle stays the ONLY return value)
         return $evt
     }
     Clear-StopRequest                       # never inherit an aborted session's stop

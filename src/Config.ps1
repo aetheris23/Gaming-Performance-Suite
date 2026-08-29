@@ -206,15 +206,19 @@
     # out in FPS and competitive games (works fullscreen + borderless;
     # applied only while such a game runs, removed on exit).
     #   Mode:
-    #     'Off'      - disabled (default)
-    #     'Vibrant'  - moderate boost (safe default)
-    #     'FPS'      - stronger contrast + balance for dark enemies
-    #     'Max'      - aggressive contrast + vivid colors
+    #     'Vibrant'      - moderate boost (safe default)
+    #     'FPS'          - stronger contrast + balance for dark enemies
+    #     'Max'          - aggressive contrast + vivid colors
+    #     'Red'          - color-blind flag: strong red boost (enemy outlines pop)
+    #     'Tritanopia'   - color-blind flag: purple tint (blue/yellow deficient)
+    #     'Protanopia'   - color-blind flag: yellow tint (red-deficient)
+    #     'Deuteranopia' - color-blind flag: yellow/warm tint (green-deficient)
+    #     'Off'          - disabled
     #   OnlyProfiles : apply only while games of these profiles run.
     #   (See src/ColorCorrect.psm1 for the per-mode curves.)
     ColorCorrection = @{
-        Enabled        = $false   # master switch
-        Mode           = 'FPS'    # 'Vibrant' | 'FPS' | 'Max' | 'Off'
+        Enabled        = $true    # master switch
+        Mode           = 'Deuteranopia'   # 'Vibrant' | 'FPS' | 'Max' | 'Red' | 'Tritanopia' | 'Protanopia' | 'Deuteranopia' | 'Off'
         OnlyProfiles   = @('Competitive', 'Default')   # watch profiles that get the filter
     }
 

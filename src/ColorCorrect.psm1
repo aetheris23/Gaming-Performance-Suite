@@ -22,11 +22,15 @@
 #               route instead.
 #
 #  Presets (Config.ps1 -> ColorCorrection.Mode):
-#    'Off'      : no change (default)
-#    'Vibrant'  : moderate RGB boost + contrast (safe default)
-#    'FPS'      : stronger contrast + balance that lifts reds/darks so
-#                 dark enemies separate from bright scenes
-#    'Max'      : aggressive contrast + strong saturation feel
+#    'Off'          : no change (default)
+#    'Vibrant'      : moderate RGB boost + contrast (safe default)
+#    'FPS'          : stronger contrast + balance that lifts reds/darks so
+#                     dark enemies separate from bright scenes
+#    'Max'          : aggressive contrast + strong saturation feel
+#    'Red'          : color-blind flag - heavy red boost, enemy outlines pop
+#    'Tritanopia'   : color-blind flag - purple tint (blue/yellow deficient)
+#    'Protanopia'   : color-blind flag - yellow tint (red-deficient)
+#    'Deuteranopia' : color-blind flag - yellow/warm tint (green-deficient)
 #
 #  Journaled: Enable captures the original ramp / gamma triple so
 #  Undo restores it exactly. The watcher applies it while an FPS /
@@ -131,10 +135,14 @@ function Get-ColorPreset {
     param([string]$Name)
     if (-not $Name) { $Name = 'Off' }
     switch -Regex ($Name.ToLowerInvariant()) {
-        'vibrant' { return @{ Gamma=1.0;  Contrast=1.15; Brightness=0.0; RedGain=1.05; GreenGain=1.02; BlueGain=0.95 } }
-        'fps'     { return @{ Gamma=1.05; Contrast=1.25; Brightness=0.0; RedGain=1.12; GreenGain=1.04; BlueGain=0.90 } }
-        'max'     { return @{ Gamma=1.10; Contrast=1.40; Brightness=0.0; RedGain=1.20; GreenGain=1.06; BlueGain=0.82 } }
-        default   { return $null }
+        'vibrant'          { return @{ Gamma=1.0;  Contrast=1.15; Brightness=0.0; RedGain=1.05; GreenGain=1.02; BlueGain=0.95 } }
+        'fps'              { return @{ Gamma=1.05; Contrast=1.25; Brightness=0.0; RedGain=1.12; GreenGain=1.04; BlueGain=0.90 } }
+        'max'              { return @{ Gamma=1.10; Contrast=1.40; Brightness=0.0; RedGain=1.20; GreenGain=1.06; BlueGain=0.82 } }
+        '^red$'            { return @{ Gamma=1.05; Contrast=1.25; Brightness=0.0; RedGain=1.25; GreenGain=1.00; BlueGain=0.90 } }
+        'tritanopia|purple'{ return @{ Gamma=1.05; Contrast=1.22; Brightness=0.0; RedGain=1.18; GreenGain=0.88; BlueGain=1.15 } }
+        'protanopia|yellow'{ return @{ Gamma=1.05; Contrast=1.22; Brightness=0.0; RedGain=1.18; GreenGain=1.12; BlueGain=0.82 } }
+        'deuteranopia'     { return @{ Gamma=1.05; Contrast=1.20; Brightness=0.0; RedGain=1.20; GreenGain=1.05; BlueGain=0.85 } }
+        default            { return $null }
     }
 }
 

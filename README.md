@@ -416,13 +416,18 @@ Configure in `src/Config.ps1` under `ColorCorrection`:
 ```powershell
 ColorCorrection = @{
     Enabled     = $true      # $false = feature off (never auto-applied)
-    Mode        = 'FPS'      # Off | Vibrant | FPS | Max
+    Mode        = 'Deuteranopia'   # Off | Vibrant | FPS | Max | Red | Tritanopia | Protanopia | Deuteranopia
     OnlyProfiles= @('Competitive', 'Default')   # game profiles that trigger it
 }
 ```
 
-The preset table (`Get-ColorPreset`) tunes red/green/blue gain, gamma and
-contrast per mode; `Max` is the strongest for dark competitive games.
+The preset table (`Get-ColorPreset`) tunes
+red/green/blue gain, gamma and contrast per mode; `Max` is the strongest
+for dark competitive games. The color-blind presets mimic classic FPS
+filters: `Red` (strong red boost), `Tritanopia` (purple tint),
+`Protanopia` (yellow tint) and `Deuteranopia` (yellow/warm tint) - pick
+whichever makes enemy outlines pop clearest for you in Valorant and
+switch it any time (menu option 9 re-applies instantly).
 
 ## GPU detection - integrated AND discrete
 
