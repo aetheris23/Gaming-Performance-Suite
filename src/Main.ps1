@@ -21,6 +21,7 @@ Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')   -Force
+Import-Module (Join-Path $root 'ColorCorrect.psm1') -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -59,6 +60,7 @@ $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } e
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Enabled = $false } }
 $recCfg     = if ($cfg['RecordingSoftware'])   { $cfg['RecordingSoftware'] }   else { @{ Enabled = $true } }
+$colorCfg   = if ($cfg['ColorCorrection'])     { $cfg['ColorCorrection'] }     else { @{ Enabled = $false; Mode = 'Off' } }
 
 # Apply LowSpec polling overrides early
 if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
@@ -107,6 +109,15 @@ function Resolve-LegacySettings {
     return $eff
 }
 
+# ---------------- color correction settings ----------------
+function Resolve-ColorMode {
+    <# Returns the configured color mode name ('Off' if disabled). #>
+    if (-not $colorCfg -or -not $colorCfg['Enabled']) { return 'Off' }
+    $m = 'Off'
+    if ($colorCfg['Mode']) { $m = [string]$colorCfg['Mode'] }
+    return $m
+}
+
 # ---------------- shared watcher invocation ----------------
 function Invoke-Watcher {
     param(
@@ -146,6 +157,7 @@ function Invoke-Watcher {
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
             -LowSpecSettings $lowSpecCfg -RecordingSettings $recCfg `
+            -ColorSettings $colorCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
             -ExitWhenGameSessionEnds:([bool]$exitWhenGameEnds) `
@@ -196,6 +208,14 @@ function Show-Banner {
         Write-Host (' Low-spec mode: ACTIVE - minimal resource usage') -ForegroundColor Yellow
     }
 
+    # Show color correction mode
+    try {
+        $cm = Resolve-ColorMode
+        if ($cm -ne 'Off') {
+            Write-Host (" Color correction: {0}" -f (Get-ColorCorrectionStatus -Mode $cm)) -ForegroundColor Green
+        }
+    } catch { }
+
     # ---- WATCHER STATUS: prominent warning when not running ----
     $watcherAlive = $false
     try { $watcherAlive = Test-WatcherAlive } catch { }
@@ -223,6 +243,9 @@ function Show-Menu {
     Write-Host ' --- NETWORK & MICROPHONE ------------------------------' -ForegroundColor Yellow
     Write-Host '  6) Apply network + mic optimizations NOW'
     Write-Host '  7) Revert network optimizations (restore originals)'
+    Write-Host ' --- COLOR & VISIBILITY (FPS enemy clarity) -------------' -ForegroundColor Yellow
+    Write-Host '  9) Apply color correction NOW (contrast/RGB)'
+    Write-Host '  0) Remove color correction (restore normal color)'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
     Write-Host '  8) Show watcher / display / network / GPU status'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
@@ -347,6 +370,12 @@ function Show-Status {
         Write-Log 'Recording software detection: DISABLED' 'INFO'
     }
 
+    # ---- color correction status ----------------------------------
+    try {
+        $cm = Resolve-ColorMode
+        Write-Log ("Color correction: {0}" -f (Get-ColorCorrectionStatus -Mode $cm)) 'INFO'
+    } catch { Write-Log 'Color correction: n/a' 'INFO' }
+
     # ---- platform info ------------------------------------------
     Write-Log ("Platform: {0} | PowerShell {1}" -f $PSVersionTable.Platform, $PSVersionTable.PSVersion) 'INFO'
 }
@@ -381,10 +410,21 @@ function Wait-MenuKey {
                         if (Test-Administrator) {
                             Start-Process -FilePath $pwsh.Source -ArgumentList $args -WindowStyle Hidden
                         } else {
-                            # non-root: elevate through sudo, backgrounded with -b.
-                            # ($args must be flattened into the list - PS Core
-                            # rejects a nested array in -ArgumentList.)
-                            Start-Process -FilePath 'sudo' -ArgumentList (@('-b', $pwsh.Source) + $args) -WindowStyle Hidden
+                            # non-root: elevate through sudo. Try a non-interactive,
+                            # passwordless launch first (works with NOPASSWD sudoers
+                            # rules); if sudo needs a password, prompt the user in
+                            # THIS terminal instead of silently failing in the
+                            # background - sudo can only prompt from a TTY.
+                            $sudoNonInteractive = (& sudo -n true 2>$null)
+                            if ($LASTEXITCODE -eq 0) {
+                                Start-Process -FilePath 'sudo' -ArgumentList (@('-b', $pwsh.Source) + $args) -WindowStyle Hidden
+                            } else {
+                                Write-Log 'This menu cannot start the watcher in the background because it needs root and sudo must prompt for a password.' 'WARN'
+                                Write-Log 'Open a terminal and run:  sudo pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch' 'WARN'
+                                Write-Log '(or use the Start-Watcher-Hidden.sh launcher from a terminal.)' 'WARN'
+                                Wait-MenuKey
+                                continue
+                            }
                         }
                     }
                     # Wait for the watcher to announce itself (instance mutex /
@@ -413,6 +453,20 @@ function Wait-MenuKey {
         }
         '7' { try { Undo-GameNetworkProfile -RemoveKnownDefaults } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '8' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '9' {
+            try {
+                $m = Resolve-ColorMode
+                if ($m -eq 'Off') {
+                    Write-Log 'Color correction is disabled in Config.ps1 (ColorCorrection.Enabled).' 'WARN'
+                } else {
+                    if (-not (Enable-ColorCorrection -Mode $m)) {
+                        Write-Log 'Could not apply color correction (see above / logs).' 'ERROR'
+                    }
+                }
+            } catch { Write-Log $_.Exception.Message 'ERROR' }
+            Wait-MenuKey
+        }
+        '0' { try { Disable-ColorCorrection } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         { $_ -in 'Q','q' } { break menu }
         default { }
     }

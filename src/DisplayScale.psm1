@@ -216,10 +216,9 @@ function Test-SameAspectRatio {
 
 function Select-ScaledMode {
     <#
-        Chooses the best lower-resolution mode:
-          1. exactly half of native (perfect integer upscale) if allowed
-          2. otherwise the same-aspect mode whose width is closest
-             to ScalePercent% of native width
+        Chooses the best lower-resolution mode: the same-aspect mode whose
+        width is closest to ScalePercent% of native width, preferring exact
+        integer-ratio modes (crisp upscale) when one is near the target.
         Refresh rate is kept at the native value whenever offered.
     #>
     param(
@@ -239,28 +238,33 @@ function Select-ScaledMode {
     })
     if ($candidates.Count -eq 0) { return $null }
 
-    # ---- integer path: exact 1/2 dimensions -> flawless upscale ----
-    if ($PreferInteger) {
-        $halfW = [int]($Native.Width  / 2)
-        $halfH = [int]($Native.Height / 2)
-        if (($halfW * 2) -eq $Native.Width -and ($halfH * 2) -eq $Native.Height) {
-            $integers = @($candidates | Where-Object {
-                $_.Width -eq $halfW -and $_.Height -eq $halfH
-            })
-            if ($integers.Count -gt 0) {
-                $best = $integers | Sort-Object { [math]::Abs($_.Frequency - $Native.Frequency) } |
-                        Select-Object -First 1
-                return $best
-            }
+    # Choose the ACTUAL mode that is closest to the requested ScalePercent
+    # target, while preferring exact integer-ratio modes (whose dimensions
+    # evenly divide native -> crisp GPU upscale, no blur, less upscale cost)
+    # whenever one exists near the target. This REMOVES the old behaviour of
+    # always snapping straight to exactly half (e.g. 1280x720 -> 640x360 =
+    # 50%) regardless of the per-profile tier, which ignored tiers and was
+    # needlessly blurry/aggressive on low-spec 720p panels for Medium/High
+    # games. Now a Medium game on 720p lands on 960x540 (75%), Competitive on
+    # 640x360 (50%), etc. - a real, crisp, tier-correct drop.
+    $targetW = [math]::Round($Native.Width * ($ScalePercent / 100.0))
+
+    $scored = foreach ($c in $candidates) {
+        $factor    = $Native.Width / [double]$c.Width
+        $isInteger = ($factor -ge 1.9999 -and [math]::Abs($factor - [math]::Round($factor)) -lt 0.0001)
+        [pscustomobject]@{
+            Mode    = $c
+            Dist    = [math]::Abs($c.Width - $targetW)          # closeness to tier target
+            Integer = [int]$isInteger                            # 1 = crisp integer upscale
+            Freq    = [math]::Abs($c.Frequency - $Native.Frequency)
         }
     }
 
-    # ---- percentage path: closest width to the requested scale ----
-    $targetW = [math]::Round($Native.Width * ($ScalePercent / 100.0))
-    $best = $candidates | Sort-Object {
-        [math]::Abs($_.Width - $targetW) * 10000 + [math]::Abs($_.Frequency - $Native.Frequency)
-    } | Select-Object -First 1
-    $best
+    $best = $scored | Sort-Object @{Expression='Dist';Ascending=$true},
+                                    @{Expression='Integer';Ascending=$false},
+                                    @{Expression='Freq';Ascending=$true} |
+              Select-Object -First 1
+    $best.Mode
 }
 
 function Enable-LowResolutionMode {

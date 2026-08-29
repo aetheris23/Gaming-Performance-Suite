@@ -177,7 +177,16 @@ function Enable-GameNetworkProfile {
         [AllowNull()][hashtable]$JournalState
     )
 
-    Assert-AdminOrThrow
+    # Windows registry writes need an elevated token; Unix sysctl/iw writes
+    # need root. We never hard-throw here - the Windows path keeps its hard
+    # admin requirement (the .bat self-elevates), while Unix just attempts
+    # the writes and skips any it cannot make, so a non-root session still
+    # learns its connection type and never crashes the menu or watcher.
+    if (Test-SuitePlatformWindows) {
+        Assert-AdminOrThrow
+    } elseif (-not (Test-Administrator)) {
+        Write-Log 'Network tuning: not elevated (needs root on this platform) - will attempt what it can and skip the rest.' 'WARN'
+    }
 
     $applied = @()
     $rec = @{
@@ -222,14 +231,19 @@ function Enable-GameNetworkProfile {
                         }
                         'TCPNoDelay' { 1 }    # always on: disable Nagle
                         'TcpDelAckTicks' {
-                            # WiFi: delay ACK slightly to batch them (reduces overhead)
-                            # Ethernet: 0 for immediate ACKs
-                            if ($connType -eq 'WiFi') { 100 } else { 0 }
+                            # Delayed-ACK batching. WiFi: a *modest* batch reduces
+                            # ACK-count overhead without adding retransmission-trigger
+                            # latency. IMPORTANT: a large value (e.g. 100) delays ACKs
+                            # by ~100ms+, which the WiFi radio + TCP stacks read as a
+                            # stalled receiver - that itself LOOKS like packet loss.
+                            # Ethernet: 0 = immediate ACKs for minimum latency.
+                            if ($connType -eq 'WiFi') { 2 } else { 0 }
                         }
                         'GlobalMaxTcpWindowSize' {
-                            # Larger receive window for better throughput
-                            # WiFi benefits more from larger windows
-                            if ($connType -eq 'WiFi') { 65535 } else { 65535 }
+                            # Keep TCP auto-tune healthy: force a large receive window
+                            # on both link types. A tiny 65535 window chokes throughput
+                            # on high-bandwidth WiFi and can surface as drops.
+                            if ($connType -eq 'WiFi') { 0xFFFF0 } else { 0xFFFF0 }
                         }
                         default { 0 }
                     }

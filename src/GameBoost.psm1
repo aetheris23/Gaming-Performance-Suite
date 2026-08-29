@@ -41,6 +41,9 @@ if (-not (Get-Module -Name 'GpuDetect')) {
 if (-not (Get-Module -Name 'NetTune')) {
     Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
 }
+if (-not (Get-Module -Name 'ColorCorrect')) {
+    Import-Module (Join-Path $PSScriptRoot 'ColorCorrect.psm1') -Force
+}
 
 function Write-GpuInventory {
     <# Logs every detected adapter once (integrated AND discrete),
@@ -414,12 +417,31 @@ $script:AndroidEmulatorNames = @(
     'memu', 'memuheadless'
 )
 
-# Voice/chat apps that must NEVER be silenced while gaming - they carry
-# your microphone and team audio. Extended via Config.ps1
-# VoiceClarity.ExtraProtectedProcessNames.
+# Voice/comms/party apps that must NEVER be silenced while gaming - they carry
+# your microphone and team audio (and their voice/audio runs in child
+# processes too, covered by Update-VoiceChatSupport). A party of 3+ means
+# several of these are encoding/decoding continuously on a weak CPU, so if any
+# of them slips through the guard and gets BelowNormal, party audio stutters or
+# drops. Extended via Config.ps1 VoiceClarity.ExtraProtectedProcessNames.
 $script:VoiceAppPatterns = @(
-    'discord*', 'voicemeter*', 'ts3client*', 'teamspeak*',
-    'zoom*', 'skype*', 'webex*'
+    # Discord family (main + subprocesses: voice/RPC/updater/PTB/Canary)
+    'discord*', 'discordptb', 'discordcanary', 'discordvoice',
+    'discord_rpc', 'discordupdater', 'discordcrash',
+    # Virtual audio cable / mixers
+    'voicemeter*', 'vb-audio*', 'vb_cable*',
+    # TeamSpeak
+    'ts3client*', 'ts3*', 'teamspeak*', '2017speak*',
+    # Steam / Blizzard / console-party voice
+    'steamvoice', 'steamwebhelper', 'blizzardvoice', 'battlenet*',
+    'xboxapp*', 'gamebar*', 'gamebarpresencewriter',
+# General purpose comms
+    'mumble*', 'curses*', 'curseforge', 'overwolf*', 'galaxyclient',
+    'teams*', 'ms-teams*', 'googlemeet', 'meet', 'webexmta', 'ciscowebex*',
+    'zoom*', 'skype*', 'skypeapp', 'whatsapp*', 'telegram*', 'slack*',
+    'microsoftteams', 'teamspeak3_win32',
+    # Game-specific party/community voice
+    'vrchat*', 'eslt*', 'discord-rpc', 'party', 'gamechat',
+    'oculusclient*', 'vrc*', 'spatial*'
 )
 
 # Recording/capture software that must NEVER be deprioritized or
@@ -430,7 +452,14 @@ $script:RecordingPatterns = @(
     'obs64', 'obs32',                   # OBS Studio
     'streamlabs',                        # Streamlabs Desktop
     'streamelements',                    # StreamElements
-    'twitchstudio'                       # Twitch Studio
+    'twitchstudio',                      # Twitch Studio
+    'bandicam', 'bdcam', 'bandicam64',   # Bandicam
+    'fraps', 'gamesvr32',               # Fraps
+    'action', 'recbox',                 # Mirillis Action!
+    'xsplit.core', 'xsplit.gamecaster', # XSplit
+    'gamebar', 'gamebarpresencewriter', # Xbox Game Bar
+    'sharex',                          # ShareX
+    'nvspcaps64', 'nvsphelper64'        # NVIDIA GeForce overlay capture
 )
 
 function Test-MatchAny {
@@ -680,7 +709,8 @@ function Update-VoiceChatSupport {
         foreach ($procId in @($State.Keys)) {
             try {
                 $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-                if ($p -and $p.PriorityClass -eq 'AboveNormal') {
+                $want = if (Test-SuitePlatformWindows) { 'AboveNormal' } else { 'High' }
+                if ($p -and ($p.PriorityClass -eq $want -or $p.PriorityClass -eq 'AboveNormal')) {
                     $prev = $State[$procId]['Prev']
                     $p.PriorityClass = $(if ($prev) { $prev } else { 'Normal' })
                 }
@@ -694,19 +724,70 @@ function Update-VoiceChatSupport {
     }
 
     $targets = @(Get-Process -Name @($Patterns) -ErrorAction SilentlyContinue)
+    # Plain hashtable, NOT [ordered]@{}: OrderedDictionary treats an INT key as
+    # a positional index and throws "index out of range", which was silently
+    # swallowed here and made voice boosting never apply.
+    $candidatePids = @{}
     foreach ($t in $targets) {
         try {
             if ($t.Id -eq $ExceptPid -or $t.Id -eq $PID) { continue }
+            $candidatePids[$t.Id] = $t.ProcessName
+            # Voice apps (Discord, TeamSpeak, etc.) run their actual audio/voice
+            # threads in CHILD processes. Boosting only the parent leaves the
+            # real encoder starved -> party audio still stutters on weak CPUs.
+            # Walk the whole descendant tree so every voice subprocess is lifted.
+            # (Win32_Process is Windows-only; elsewhere we boost just the parent.)
+            if (Test-SuitePlatformWindows) {
+                $childById = @{}
+                foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
+                    $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
+                }
+                $toCheck = [System.Collections.Generic.Queue[int]]::new()
+                $toCheck.Enqueue([int]$t.Id)
+                while ($toCheck.Count -gt 0) {
+                    $cur = $toCheck.Dequeue()
+                    foreach ($other in $childById.GetEnumerator()) {
+                        if ($other.Value -eq $cur) {
+                            $cid = [int]$other.Key
+                            $cp = Get-Process -Id $cid -ErrorAction SilentlyContinue
+                            if ($cp -and $cp.Id -ne $ExceptPid -and $cp.Id -ne $PID -and -not $candidatePids.Contains($cp.Id)) {
+                                $candidatePids[$cp.Id] = $cp.ProcessName
+                            }
+                            $toCheck.Enqueue($cid)
+                        }
+                    }
+                }
+            }
+        } catch { }
+    }
+
+    foreach ($pid in @($candidatePids.Keys)) {
+        try {
+            $t = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            if (-not $t) { continue }
             if ($State.ContainsKey($t.Id)) { continue }
             $prev = [string]$t.PriorityClass
             if ($prev -eq 'RealTime') { continue }
-            if ($prev -ne 'AboveNormal') { $t.PriorityClass = 'AboveNormal' }
+
+            # Voice apps get a modest above-normal bump so their encode/audio
+            # threads outrank everything except the game. AboveNormal is valid
+            # on Windows; on Unix fall back to the highest implementable class
+            # so party audio still wins over background apps on weak CPUs.
+            $want = 'AboveNormal'
+            if (-not (Test-SuitePlatformWindows)) { $want = 'High' }
+            if ($prev -ne $want) {
+                try { $t.PriorityClass = $want } catch { }
+            }
+
+            # Track state in the journal regardless of whether the OS accepted
+            # the write, so the watcher's cleanup always restores/clears it
+            # (never leaves a stale journal entry on an unclean stop).
             $State[$t.Id] = @{ Name = $t.ProcessName; Prev = $prev }
             if ($Journal) {
                 $Journal['voiceBoosted'][$t.Id] = @{ Name = $t.ProcessName; Prev = $prev }
                 Save-WatcherJournal -State $Journal
             }
-            Write-Log ("Voice app '{0}' (PID {1}) -> AboveNormal for stutter-free mic" -f $t.ProcessName, $t.Id) 'INFO'
+            Write-Log ("Voice app '{0}' (PID {1}) -> {2} for stutter-free mic" -f $t.ProcessName, $t.Id, $want) 'INFO'
         } catch { }
     }
 }
@@ -900,13 +981,25 @@ function Start-GameWatcher {
         [hashtable]$VoiceSettings      = @{},
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$RecordingSettings  = @{ Enabled = $true },
+        [hashtable]$ColorSettings     = @{ Enabled = $false; Mode = 'Off' },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [bool]$ExitWhenGameSessionEnds = $true,
         [System.Threading.EventWaitHandle]$StopEvent = $null
     )
 
-    Assert-AdminOrThrow
+    # Windows must be elevated for the registry/driver tweaks - the .bat
+    # launcher self-elevates, so a hard requirement there is correct.
+    # On Unix we degrade GRACEFULLY instead of throwing: a non-root watcher
+    # can still detect games, apply display scaling + color correction via
+    # xrandr, and log; the root-only operations (priority/power/network/
+    # purge) are simply skipped with a single warning. This is what lets
+    # option 3 "just run" without crashing on any platform.
+    if (Test-SuitePlatformWindows) {
+        Assert-AdminOrThrow
+    } elseif (-not (Test-Administrator)) {
+        Write-Log 'Watcher running WITHOUT root: process-priority/power/network-tuning are skipped; display scaling + color correction (xrandr) still work.' 'WARN'
+    }
 
     # ---- recover anything a previous unclean session left behind ----
     try { Repair-OrphanedWatcherState | Out-Null } catch { }
@@ -962,6 +1055,23 @@ function Start-GameWatcher {
         }
     }
 
+    # ---- resolve color-correction settings ---------------------
+    $colorOn     = $false
+    $colorMode   = 'Off'
+    $colorProfiles = @('Competitive', 'Default')
+    if ($ColorSettings) {
+        if ($ColorSettings.ContainsKey('Enabled')) { $colorOn = [bool]$ColorSettings['Enabled'] }
+        if ($ColorSettings.ContainsKey('Mode'))    { $colorMode = [string]$ColorSettings['Mode'] }
+        if ($ColorSettings.ContainsKey('OnlyProfiles')) {
+            $op = @($ColorSettings['OnlyProfiles'])
+            if ($op.Count -gt 0) { $colorProfiles = @($op | ForEach-Object { [string]$_ }) }
+        }
+    }
+    $colorActiveThis = $false   # filter currently applied by us
+    if ($colorOn -and $colorMode -and $colorMode -ne 'Off') {
+        Write-Log ("Automatic color correction ENABLED (mode '{0}') for profiles: {1}." -f $colorMode, ($colorProfiles -join ', ')) 'INFO'
+    }
+
     Write-GpuInventory
 
     $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
@@ -983,7 +1093,12 @@ function Start-GameWatcher {
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('ExtraProtectedProcessNames')) {
         $protectedExtra = @($VoiceSettings['ExtraProtectedProcessNames']) | ForEach-Object { "$_*" }
     }
+    # For background SILENCING we protect voice apps + recorders + user extras,
+    # so none of them are ever deprioritized.
     $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra + $recExtraProtected
+    # For VOICE BOOSTING we only ever touch real voice/chat apps - never
+    # recorders/capture tools, which must be left untouched while gaming.
+    $voiceOnlyProtected = @($script:VoiceAppPatterns) + $protectedExtra
 
     $boostVoice = $true
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('BoostVoiceAppsDuringGame')) { $boostVoice = [bool]$VoiceSettings['BoostVoiceAppsDuringGame'] }
@@ -1062,7 +1177,10 @@ function Start-GameWatcher {
 
     # ---- idle tracking: ultra-low resource mode ---------------------------
     $idleSinceUtc     = [datetime]::UtcNow   # when we last transitioned to idle
-    $lastHeartbeatUtc = [datetime]::MinValue  # last time we logged "watcher alive"
+    # Start at NOW so the first idle-heartbeat math is small; a sentinel
+    # [datetime]::MinValue here made [int](now - sentinel).TotalMilliseconds
+    # overflow Int32 (~6.4e13 ms) and crash the watcher on its first idle poll.
+    $lastHeartbeatUtc = [datetime]::UtcNow  # last time we logged "watcher alive"
     $wasIdle           = $true                # start idle (no games yet)
     $idleHeartbeatMs   = $IdleHeartbeatMinutes * 60 * 1000
 
@@ -1183,7 +1301,12 @@ function Start-GameWatcher {
                         }
                         $recSkipResNow = $isRecording -and $recSkipRes
                         if (-not $skipScale -and -not $recSkipResNow -and -not $scaledApplied -and -not (Test-RampPending 'resscale') -and $scalePctForGame -gt 0) {
-                            Add-Ramp 'resscale' 12 0 $scalePctForGame   # display switch after game stabilizes
+                            # Apply the drop while the game is likely still on its loading
+                            # screen so the mode-flash is hidden and the GPU is already at
+                            # the lower load when gameplay begins. Low-spec machines feel
+                            # this far more, so they get it slightly earlier.
+                            $resDelay = if ($isLowSpec) { 6 } else { 10 }
+                            Add-Ramp 'resscale' $resDelay 0 $scalePctForGame
                         }
                         if (-not $extrasQueued.ContainsKey($game.Id)) {
                             $extrasQueued[$game.Id] = $true
@@ -1201,8 +1324,17 @@ function Start-GameWatcher {
                         }
 
                         if ($boostVoice) {
-                            Update-VoiceChatSupport -Patterns $protectedNames `
+                            Update-VoiceChatSupport -Patterns $voiceOnlyProtected `
                                 -ExceptPid $game.Id -State $voiceBoosted -Journal $journal -Activate
+                        }
+
+                        # ---- automatic color correction for FPS clarity ----
+                        # Apply once per game session when a matching profile starts,
+                        # and keep it until NO qualifying game is left running.
+                        if ($colorOn -and -not $colorActiveThis -and ($colorProfiles -contains $profName)) {
+                            if (Enable-ColorCorrection -Mode $colorMode) {
+                                $colorActiveThis = $true
+                            }
                         }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
@@ -1244,7 +1376,7 @@ function Start-GameWatcher {
                     Write-Log 'Background app priorities restored.' 'OK'
                 }
                 if ($voiceBoosted.Count -gt 0) {
-                    Update-VoiceChatSupport -Patterns $protectedNames -State $voiceBoosted -Journal $journal
+                    Update-VoiceChatSupport -Patterns $voiceOnlyProtected -State $voiceBoosted -Journal $journal
                     Write-Log 'Voice chat priorities restored.' 'OK'
                 }
                 if ($removedAny) {
@@ -1254,6 +1386,11 @@ function Start-GameWatcher {
                         $journal['scaledActive'] = $false
                         $journal['nativeMode']   = $null
                         Save-Journal
+                    }
+                    if ($colorActiveThis) {
+                        try { Disable-ColorCorrection } catch { }
+                        $colorActiveThis = $false
+                        Write-Log 'Color correction removed (game session ended).' 'INFO'
                     }
                     Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
                     if ($fgByUs) { $journal['fgToolPid'] = 0; Save-Journal }
@@ -1415,7 +1552,11 @@ function Start-GameWatcher {
 
             # Log heartbeat while idle so the user knows the watcher is alive
             if ($isCurrentlyIdle -and $IdleHeartbeatMinutes -gt 0) {
-                $hbDueMs = $idleHeartbeatMs - [int]([datetime]::UtcNow - $lastHeartbeatUtc).TotalMilliseconds
+                # Guard the ms math against overflow: with an unset/far-past
+                # timestamp the interval exceeds Int32 and crashes the watcher.
+                $hbSinceMs = (([datetime]::UtcNow - $lastHeartbeatUtc).TotalMilliseconds)
+                if ($hbSinceMs -gt [int]::MaxValue) { $hbSinceMs = [int]::MaxValue }
+                $hbDueMs = $idleHeartbeatMs - [int]$hbSinceMs
                 if ($hbDueMs -le 0) {
                     $idleMin = [int]([datetime]::UtcNow - $idleSinceUtc).TotalMinutes
                     Write-Log ("Watcher idle for {0} min - monitoring for games (poll every {1}s)..." -f `
@@ -1451,10 +1592,11 @@ function Start-GameWatcher {
         }
     } finally {
         Update-BackgroundSilence -State $silenced -Journal $journal
-        Update-VoiceChatSupport -Patterns $protectedNames -State $voiceBoosted -Journal $journal
+        Update-VoiceChatSupport -Patterns $voiceOnlyProtected -State $voiceBoosted -Journal $journal
         Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
         $journal['fgToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
+        if ($colorActiveThis) { try { Disable-ColorCorrection } catch { } }   # never leave the color filter on
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
         if ($netOn) {

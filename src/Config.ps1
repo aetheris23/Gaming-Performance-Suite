@@ -201,6 +201,23 @@
         )
     }
 
+    # ---- Automatic color correction --------------------------
+    # Display-level contrast / RGB balance to make enemies stand
+    # out in FPS and competitive games (works fullscreen + borderless;
+    # applied only while such a game runs, removed on exit).
+    #   Mode:
+    #     'Off'      - disabled (default)
+    #     'Vibrant'  - moderate boost (safe default)
+    #     'FPS'      - stronger contrast + balance for dark enemies
+    #     'Max'      - aggressive contrast + vivid colors
+    #   OnlyProfiles : apply only while games of these profiles run.
+    #   (See src/ColorCorrect.psm1 for the per-mode curves.)
+    ColorCorrection = @{
+        Enabled        = $false   # master switch
+        Mode           = 'FPS'    # 'Vibrant' | 'FPS' | 'Max' | 'Off'
+        OnlyProfiles   = @('Competitive', 'Default')   # watch profiles that get the filter
+    }
+
     # ---- Per-game classification -----------------------------
     # The watcher auto-detects: Emulator / Steam / Competitive / Default
     # (by install path, then process name). Force a classification here:
