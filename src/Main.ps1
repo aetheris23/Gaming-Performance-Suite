@@ -22,6 +22,7 @@ Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')   -Force
 Import-Module (Join-Path $root 'ColorCorrect.psm1') -Force
+Import-Module (Join-Path $root 'VoiceDSP.psm1')  -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -58,8 +59,8 @@ $fgSettings = if ($cfg['FrameGeneration']) { $cfg['FrameGeneration'] } else { @{
 $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { @{ Mode = 'Auto' } }
 $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
+$nsCfg      = if ($cfg['NoiseSuppression'])     { $cfg['NoiseSuppression'] }     else { @{ Enabled = $false } }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Enabled = $false } }
-$recCfg     = if ($cfg['RecordingSoftware'])   { $cfg['RecordingSoftware'] }   else { @{ Enabled = $true } }
 $colorCfg   = if ($cfg['ColorCorrection'])     { $cfg['ColorCorrection'] }     else { @{ Enabled = $false; Mode = 'Off' } }
 
 # Apply LowSpec polling overrides early
@@ -156,8 +157,9 @@ function Invoke-Watcher {
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
-            -LowSpecSettings $lowSpecCfg -RecordingSettings $recCfg `
+            -LowSpecSettings $lowSpecCfg `
             -ColorSettings $colorCfg `
+            -NoiseSuppressionSettings $nsCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
             -ExitWhenGameSessionEnds:([bool]$exitWhenGameEnds) `
@@ -188,9 +190,9 @@ if ($BackgroundWatch) {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.4'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.5'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
-    Write-Host '  Cross-platform | Low-spec optimized | OBS-aware'      -ForegroundColor Cyan
+    Write-Host '  Cross-platform | Low-spec optimized | Noise-free voice' -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
@@ -241,8 +243,8 @@ function Show-Menu {
     Write-Host '  4) Start watcher in THIS window (Ctrl+C to stop)'
     Write-Host '  5) STOP background watcher'
     Write-Host ' --- NETWORK & MICROPHONE ------------------------------' -ForegroundColor Yellow
-    Write-Host '  6) Apply network + mic optimizations NOW'
-    Write-Host '  7) Revert network optimizations (restore originals)'
+    Write-Host '  6) Apply network + mic optimizations NOW (incl. noise suppression)'
+    Write-Host '  7) Revert network + mic optimizations (restore originals)'
     Write-Host ' --- COLOR & VISIBILITY (FPS enemy clarity) -------------' -ForegroundColor Yellow
     Write-Host '  9) Apply color correction NOW (contrast/RGB)'
     Write-Host '  0) Remove color correction (restore normal color)'
@@ -342,6 +344,16 @@ function Show-Status {
     if ($voiceCfg['ExtraProtectedProcessNames']) { $extraProt = @($voiceCfg['ExtraProtectedProcessNames']) }
     Write-Log ("Voice clarity: MMCSS mic priority {0}; voice apps protected from silencing{1}" -f `
         $(if ($micMmcss) { 'on' } else { 'off' }), $(if ($extraProt.Count -gt 0) { ' (+ your extras)' } else { '' })) 'INFO'
+    # ---- noise suppression status ----
+    $nsEnabled = if ($null -ne $nsCfg['Enabled']) { [bool]$nsCfg['Enabled'] } else { $false }
+    $nsActive = if ((Get-Command Test-VoiceDspActive -ErrorAction SilentlyContinue) -and (Test-VoiceDspActive)) { 'ACTIVE' } else { 'inactive' }
+    if ($nsEnabled -and $nsCfg['ExternalEngine']) {
+        Write-Log ("Mic noise suppression: external engine configured ({0}) - {1}" -f $nsCfg['ExternalEngine'], $nsActive) 'INFO'
+    } elseif ($nsEnabled) {
+        Write-Log ("Mic noise suppression (deep NS + echo cancellation): {0} (Windows 11 DSP)" -f $nsActive) 'INFO'
+    } else {
+        Write-Log 'Mic noise suppression: DISABLED in Config.ps1' 'INFO'
+    }
 
     try {
         $leg = Resolve-LegacySettings
@@ -359,16 +371,6 @@ function Show-Status {
         Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
     }
     Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
-
-    # ---- recording software summary ------------------------------------
-    $recOnCfg = if ($null -ne $recCfg['Enabled']) { [bool]$recCfg['Enabled'] } else { $true }
-    if ($recOnCfg) {
-        $recSkipResInfo = if ($recCfg.ContainsKey('SkipResolutionSwitch')) { [bool]$recCfg['SkipResolutionSwitch'] } else { $true }
-        $recSkipPurgeInfo = if ($recCfg.ContainsKey('SkipStandbyPurge'))   { [bool]$recCfg['SkipStandbyPurge'] }   else { $true }
-        Write-Log ("Recording software detection: ACTIVE (res switch deferred: {0}, purge deferred: {1})" -f $recSkipResInfo, $recSkipPurgeInfo) 'INFO'
-    } else {
-        Write-Log 'Recording software detection: DISABLED' 'INFO'
-    }
 
     # ---- color correction status ----------------------------------
     try {
@@ -448,10 +450,27 @@ function Wait-MenuKey {
             try {
                 Set-MicClarityTweaks
                 Enable-GameNetworkProfile -Settings $netCfg -JournalState $null
+                $nsEnabledNow = if ($null -ne $nsCfg['Enabled']) { [bool]$nsCfg['Enabled'] } else { $false }
+                if ($nsEnabledNow) {
+                    if ($nsCfg['ExternalEngine']) {
+                        Start-NoiseSuppressionExternal -Engine $nsCfg['ExternalEngine'] -Args $nsCfg['ExternalArgs']
+                    } elseif (Test-VoiceDspPlatform) {
+                        Enable-VoiceNoiseSuppression
+                    } else {
+                        Write-Log 'Mic DSP unavailable on this platform (needs Windows 11).' 'WARN'
+                    }
+                }
             } catch { Write-Log $_.Exception.Message 'ERROR' }
             Wait-MenuKey
         }
-        '7' { try { Undo-GameNetworkProfile -RemoveKnownDefaults } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '7' {
+            try {
+                Undo-GameNetworkProfile -RemoveKnownDefaults
+                Disable-VoiceNoiseSuppression
+                Stop-NoiseSuppressionExternal
+            } catch { Write-Log $_.Exception.Message 'ERROR' }
+            Wait-MenuKey
+        }
         '8' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '9' {
             try {

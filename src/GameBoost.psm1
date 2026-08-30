@@ -444,24 +444,6 @@ $script:VoiceAppPatterns = @(
     'oculusclient*', 'vrc*', 'spatial*'
 )
 
-# Recording/capture software that must NEVER be deprioritized or
-# disrupted. These processes compete with the game for GPU/CPU and
-# any hitch in their scheduling causes visible stutter in recordings.
-# Extended via Config.ps1 RecordingSoftware.ProtectedProcesses.
-$script:RecordingPatterns = @(
-    'obs64', 'obs32',                   # OBS Studio
-    'streamlabs',                        # Streamlabs Desktop
-    'streamelements',                    # StreamElements
-    'twitchstudio',                      # Twitch Studio
-    'bandicam', 'bdcam', 'bandicam64',   # Bandicam
-    'fraps', 'gamesvr32',               # Fraps
-    'action', 'recbox',                 # Mirillis Action!
-    'xsplit.core', 'xsplit.gamecaster', # XSplit
-    'gamebar', 'gamebarpresencewriter', # Xbox Game Bar
-    'sharex',                          # ShareX
-    'nvspcaps64', 'nvsphelper64'        # NVIDIA GeForce overlay capture
-)
-
 function Test-MatchAny {
     <# Wildcard matcher over many patterns (all lowercase). Returns $true
        when $Name matches any pattern. Case-insensitive on every platform. #>
@@ -637,7 +619,6 @@ function Update-BackgroundSilence {
         [hashtable]$State,           # pid -> info of processes currently silenced
         [hashtable]$Journal,         # recovery journal (optional)
         [string[]]$ProtectedPatterns = @(),
-        [string[]]$RecordingPatterns = @(),
         [switch]$Activate            # off = restore everything in $State to Normal
     )
 
@@ -669,12 +650,6 @@ function Update-BackgroundSilence {
                 if ($t.ProcessName -like $pat) { $isVoice = $true; break }
             }
             if ($isVoice) { continue }
-            # Never touch recording/capture software - causes frame drops in recordings
-            $isRecorder = $false
-            foreach ($pat in $RecordingPatterns) {
-                if ($t.ProcessName -like $pat) { $isRecorder = $true; break }
-            }
-            if ($isRecorder) { continue }
             if (-not $State.ContainsKey($t.Id)) {
                 $t.PriorityClass = 'BelowNormal'
                 $State[$t.Id] = @{ Name = $t.ProcessName; Priority = 'BelowNormal' }
@@ -790,37 +765,6 @@ function Update-VoiceChatSupport {
             Write-Log ("Voice app '{0}' (PID {1}) -> {2} for stutter-free mic" -f $t.ProcessName, $t.Id, $want) 'INFO'
         } catch { }
     }
-}
-
-# ------------------------------------------------------------
-# Recording-software detection: lightweight one-shot check
-# ------------------------------------------------------------
-function Test-RecordingSoftwareActive {
-    <#
-        Returns $true if any known recording/capture software is running.
-        Uses a focused Get-Process -Name call (kernel-level, no WMI/CIM).
-        The result is cached for the duration of one poll cycle so multiple
-        checks within the same iteration don't repeat the syscall.
-    #>
-    param(
-        [string[]]$ExtraPatterns = @(),
-        [ref]$CacheVar
-    )
-
-    $all = @($script:RecordingPatterns) + @($ExtraPatterns)
-    if ($all.Count -eq 0) { return $false }
-
-    # Return cached result if still valid this poll cycle
-    if ($CacheVar -and $CacheVar.Value -ne $null) { return [bool]$CacheVar.Value }
-
-    $found = $false
-    try {
-        $procs = Get-Process -Name @($all) -ErrorAction SilentlyContinue
-        if ($procs -and $procs.Count -gt 0) { $found = $true }
-    } catch { }
-
-    if ($CacheVar) { $CacheVar.Value = $found }
-    return $found
 }
 
 # ------------------------------------------------------------
@@ -979,8 +923,8 @@ function Start-GameWatcher {
         [hashtable]$LegacySettings     = @{},
         [hashtable]$NetworkSettings    = @{ Enabled = $true },
         [hashtable]$VoiceSettings      = @{},
+        [hashtable]$NoiseSuppressionSettings = @{ Enabled = $false },
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
-        [hashtable]$RecordingSettings  = @{ Enabled = $true },
         [hashtable]$ColorSettings     = @{ Enabled = $false; Mode = 'Off' },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
@@ -1036,25 +980,6 @@ function Start-GameWatcher {
         }
     }
 
-    # ---- resolve recording software settings --------------------
-    $recOn = $true
-    if ($RecordingSettings -and $RecordingSettings.ContainsKey('Enabled')) { $recOn = [bool]$RecordingSettings['Enabled'] }
-    $recSkipRes  = $false
-    $recSkipPurge = $false
-    $recExtraProtected = @()
-    if ($recOn) {
-        if ($RecordingSettings.ContainsKey('SkipResolutionSwitch')) { $recSkipRes = [bool]$RecordingSettings['SkipResolutionSwitch'] }
-        if ($RecordingSettings.ContainsKey('SkipStandbyPurge'))    { $recSkipPurge = [bool]$RecordingSettings['SkipStandbyPurge'] }
-        if ($RecordingSettings.ContainsKey('ProtectedProcesses')) {
-            $recExtraProtected = @($RecordingSettings['ProtectedProcesses']) | ForEach-Object { "$_*" }
-        }
-        if ($recSkipRes -or $recSkipPurge) {
-            Write-Log 'Recording software detection ACTIVE: capture-safe paths enabled.' 'INFO'
-            if ($recSkipRes)  { Write-Log '  - Resolution switch: DEFERRED while recorder running' 'INFO' }
-            if ($recSkipPurge) { Write-Log '  - Standby purge: DEFERRED while recorder running' 'INFO' }
-        }
-    }
-
     # ---- resolve color-correction settings ---------------------
     $colorOn     = $false
     $colorMode   = 'Off'
@@ -1093,15 +1018,33 @@ function Start-GameWatcher {
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('ExtraProtectedProcessNames')) {
         $protectedExtra = @($VoiceSettings['ExtraProtectedProcessNames']) | ForEach-Object { "$_*" }
     }
-    # For background SILENCING we protect voice apps + recorders + user extras,
-    # so none of them are ever deprioritized.
-    $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra + $recExtraProtected
-    # For VOICE BOOSTING we only ever touch real voice/chat apps - never
-    # recorders/capture tools, which must be left untouched while gaming.
+    # For background SILENCING we protect voice apps + user extras, so none
+    # of them are ever deprioritized.
+    $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra
+    # For VOICE BOOSTING we only ever touch real voice/chat apps.
     $voiceOnlyProtected = @($script:VoiceAppPatterns) + $protectedExtra
 
     $boostVoice = $true
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('BoostVoiceAppsDuringGame')) { $boostVoice = [bool]$VoiceSettings['BoostVoiceAppsDuringGame'] }
+
+    # ---- resolve noise-suppression settings --------------------------
+    $nsOn = $false
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('Enabled')) {
+        $nsOn = [bool]$NoiseSuppressionSettings['Enabled']
+    }
+    $nsElevateMic = $true
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ElevateMicBoost')) {
+        $nsElevateMic = [bool]$NoiseSuppressionSettings['ElevateMicBoost']
+    }
+    $nsExternal = ''
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ExternalEngine')) {
+        $nsExternal = [string]$NoiseSuppressionSettings['ExternalEngine']
+    }
+    $nsExternalArgs = ''
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ExternalArgs')) {
+        $nsExternalArgs = [string]$NoiseSuppressionSettings['ExternalArgs']
+    }
+    $nsEngaged = $false   # $true once the DSP / external engine is running this session
 
     # Recovery journal - written through at EVERY state change so any
     # kind of death (kill, console close, crash, power loss) is fully
@@ -1218,42 +1161,26 @@ function Start-GameWatcher {
     # wildcard matches in-process - cheaper on every platform, and on a
     # low-spec machine this is the difference between 1% and 0.05% CPU.
     $gameWatchPatterns = @($GameNames | ForEach-Object { ([string]$_).ToLowerInvariant() })
-    $recWatchPatterns  = @($script:RecordingPatterns + $recExtraProtected | ForEach-Object { ([string]$_).ToLowerInvariant() })
-    $recWatchPatterns  = @($recWatchPatterns | Where-Object { $_ })
 
     try {
         while ($true) {
-            # One native process snapshot serves both the game lookup and
-            # the recording-detection check for this poll cycle.
+            # One native process snapshot serves the whole game lookup for
+            # this poll cycle.
             try {
                 $allProc = [Diagnostics.Process]::GetProcesses()
             } catch {
                 Write-Log ("Process snapshot failed: {0}" -f $_.Exception.Message) 'WARN'
                 $allProc = @()
             }
-            $processes = @($allProc | ForEach-Object {
+            $running = @($allProc | ForEach-Object {
                 $n = ''
                 try { $n = $_.ProcessName } catch { }
                 if (-not $n) { return }
                 $nl = $n.ToLowerInvariant()
-                $isGameMatch = Test-MatchAny -Name $nl -Patterns $gameWatchPatterns
-                $isRecMatch  = $recOn -and (Test-MatchAny -Name $nl -Patterns $recWatchPatterns)
-                if ($isGameMatch -or $isRecMatch) {
-                    $_                     # game OR recorder - keep the Process object
+                if (Test-MatchAny -Name $nl -Patterns $gameWatchPatterns) {
+                    $_                     # game - keep the Process object
                 }
             })
-
-            $running = @($processes | Where-Object {
-                try { $nl = $_.ProcessName.ToLowerInvariant() } catch { return $false }
-                Test-MatchAny -Name $nl -Patterns $gameWatchPatterns
-            })
-            $isRecording = $false
-            if ($recOn) {
-                $isRecording = @($processes | Where-Object {
-                    try { $nl = $_.ProcessName.ToLowerInvariant() } catch { return $false }
-                    Test-MatchAny -Name $nl -Patterns $recWatchPatterns
-                }).Count -gt 0
-            }
 
             foreach ($game in $running) {
                 try {
@@ -1286,21 +1213,17 @@ function Start-GameWatcher {
                         # ---- PRE-LAUNCH PURGE: run BEFORE game fully loads ----
                         #     to prevent launch stutter. The game's own loading
                         #     screen will mask any remaining memory pressure.
-                        #     DEFERRED while recording software is active to
-                        #     prevent hitch in the captured output.
-                        $recSkipPurgeNow = $isRecording -and $recSkipPurge
-                        if ($PrePurgeBeforeLaunch -and -not $preGamePurged -and -not $lowSpecSkipPurge -and -not $recSkipPurgeNow -and -not (Test-RampPending 'purge')) {
+                        if ($PrePurgeBeforeLaunch -and -not $preGamePurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge')) {
                             Add-Ramp 'purge' 0.5 0   # 0.5s delay - fast enough to run before game loads
                         }
                         $preGamePurged = $true
 
                         # ---- HEAVY steps go onto the staged ramp so the loading
                         #      screen absorbs them one at a time (no launch hitch) ----
-                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not $lowSpecSkipPurge -and -not $recSkipPurgeNow -and -not (Test-RampPending 'purge2')) {
+                        if ($PurgeOnGameLaunch -and -not $sessionPurged -and -not $lowSpecSkipPurge -and -not (Test-RampPending 'purge2')) {
                             Add-Ramp 'purge2' 8 0   # secondary purge during loading
                         }
-                        $recSkipResNow = $isRecording -and $recSkipRes
-                        if (-not $skipScale -and -not $recSkipResNow -and -not $scaledApplied -and -not (Test-RampPending 'resscale') -and $scalePctForGame -gt 0) {
+                        if (-not $skipScale -and -not $scaledApplied -and -not (Test-RampPending 'resscale') -and $scalePctForGame -gt 0) {
                             # Apply the drop while the game is likely still on its loading
                             # screen so the mode-flash is hidden and the GPU is already at
                             # the lower load when gameplay begins. Low-spec machines feel
@@ -1319,13 +1242,37 @@ function Start-GameWatcher {
                         if (-not $lowSpecSkipSilence) {
                             Update-BackgroundSilence -Names @($prof.Deprioritize) `
                                 -ExceptPid $game.Id -State $silenced -Journal $journal `
-                                -ProtectedPatterns $protectedNames -RecordingPatterns $script:RecordingPatterns -Activate
+                                -ProtectedPatterns $protectedNames -Activate
                             $lastSilenceUtc = [datetime]::UtcNow
                         }
 
                         if ($boostVoice) {
                             Update-VoiceChatSupport -Patterns $voiceOnlyProtected `
                                 -ExceptPid $game.Id -State $voiceBoosted -Journal $journal -Activate
+                        }
+
+                        # ---- microphone noise suppression + echo kill ----
+                        # Engage the voice DSP once per session so background
+                        # speech and game echo never reach the party. The
+                        # external engine (if configured) is preferred; otherwise
+                        # the built-in Windows 11 DSP drives the mic.
+                        if ($nsOn -and -not $nsEngaged) {
+                            try {
+                                $engagedExternal = $false
+                                if ($nsExternal) {
+                                    $engagedExternal = Start-NoiseSuppressionExternal -Engine $nsExternal -Args $nsExternalArgs
+                                }
+                                $engagedDsp = $false
+                                if (-not $engagedExternal -and (Get-Command Enable-VoiceNoiseSuppression -ErrorAction SilentlyContinue)) {
+                                    $engagedDsp = Enable-VoiceNoiseSuppression
+                                }
+                                if ($engagedExternal -or $engagedDsp) {
+                                    $nsEngaged = $true
+                                    if ($nsElevateMic) { try { Set-MicClarityTweaks -IncludeMmcss $true } catch { } }
+                                }
+                            } catch {
+                                Write-Log ("Mic noise suppression failed: {0}" -f $_.Exception.Message) 'WARN'
+                            }
                         }
 
                         # ---- automatic color correction for FPS clarity ----
@@ -1399,6 +1346,13 @@ function Start-GameWatcher {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
                     }
+                    # Release the mic DSP / external noise suppressor when the
+                    # last game closes (re-engaged automatically on next game).
+                    if ($nsEngaged) {
+                        try { Disable-VoiceNoiseSuppression } catch { }
+                        try { Stop-NoiseSuppressionExternal } catch { }
+                        $nsEngaged = $false
+                    }
                     if ($ExitWhenGameSessionEnds) {
                         Write-Log 'Game session ended. Watcher shutting down completely - nothing keeps polling for another game.' 'ACTION'
                     } else {
@@ -1419,7 +1373,10 @@ function Start-GameWatcher {
                 # already restored the system; break out so the finally block
                 # reverts the network profile, clears the recovery journal and
                 # removes the pid file, then this watcher process exits.
-                if ($ExitWhenGameSessionEnds -and $hadSession -and $removedAny) {
+                # We rely on $hadSession (a game was actually boosted this run),
+                # not on $removedAny, so a session that closes while the exit
+                # scan is throttled still triggers a clean auto-shutdown.
+                if ($ExitWhenGameSessionEnds -and $hadSession -and $boosted.Count -eq 0) {
                     break
                 }
             }
@@ -1435,52 +1392,33 @@ function Start-GameWatcher {
                     'purge' {
                         # Pre-launch purge: eliminates launch stutter by
                         # clearing standby memory before game loads.
-                        # RE-CHECK for recording at execution time: a capture
-                        # app might have started since the ramp was queued,
-                        # and a purge mid-recording hammers the captured FPS.
-                        if ($recOn -and $recSkipPurge -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
-                            Write-Log 'Standby purge deferred: recording software active.' 'INFO'
-                        } else {
-                            try   { Clear-StandbyMemory } catch { }
-                            $sessionPurged = $true
-                            $lastPurgeUtc  = [datetime]::UtcNow
-                        }
+                        try   { Clear-StandbyMemory } catch { }
+                        $sessionPurged = $true
+                        $lastPurgeUtc  = [datetime]::UtcNow
                     }
                     'purge2' {
                         # Secondary purge during loading screen
-                        if ($recOn -and $recSkipPurge -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
-                            Write-Log 'Secondary standby purge deferred: recording software active.' 'INFO'
-                        } else {
-                            try   { Clear-StandbyMemory } catch { }
-                            $lastPurgeUtc  = [datetime]::UtcNow
-                        }
+                        try   { Clear-StandbyMemory } catch { }
+                        $lastPurgeUtc  = [datetime]::UtcNow
                     }
                     'resscale' {
                         try {
                             if (-not $scaledApplied) {
-                                # A resolution flip while OBS/Bandicam is
-                                # capturing causes black frames + 1fps drops,
-                                # so if a recorder appeared since we queued the
-                                # switch, hold native until it exits.
-                                if ($recOn -and $recSkipRes -and (Test-RecordingSoftwareActive -ExtraPatterns $recExtraProtected)) {
-                                    Write-Log 'Display switch deferred: recording software active (keeps captured output clean).' 'INFO'
-                                } else {
-                                    # Remember native FIRST so even a crash between the
-                                    # two calls below is recoverable via the journal.
-                                    # The target comes from the game's resolution tier
-                                    # (set when it was detected); 0 falls back to the
-                                    # legacy global percent.
-                                    $targetPct = $item.Value
-                                    if ($targetPct -le 0) { $targetPct = $scalePct }
-                                    $nativeNow = Get-CurrentDisplayMode
-                                    $ok = Enable-LowResolutionMode -ScalePercent $targetPct -PreferInteger:([bool]$prefInt)
-                                    if ($ok) {
-                                        $scaledApplied = $true
-                                        $journal['scaledActive'] = $true
-                                        $journal['nativeMode']   = $nativeNow
-                                        Save-Journal
-                                        Write-Log ("Display switched to {0}% of native (tier {1}%)." -f $targetPct, $targetPct) 'OK'
-                                    }
+                                # Remember native FIRST so even a crash between the
+                                # two calls below is recoverable via the journal.
+                                # The target comes from the game's resolution tier
+                                # (set when it was detected); 0 falls back to the
+                                # legacy global percent.
+                                $targetPct = $item.Value
+                                if ($targetPct -le 0) { $targetPct = $scalePct }
+                                $nativeNow = Get-CurrentDisplayMode
+                                $ok = Enable-LowResolutionMode -ScalePercent $targetPct -PreferInteger:([bool]$prefInt)
+                                if ($ok) {
+                                    $scaledApplied = $true
+                                    $journal['scaledActive'] = $true
+                                    $journal['nativeMode']   = $nativeNow
+                                    Save-Journal
+                                    Write-Log ("Display switched to {0}% of native (tier {1}%)." -f $targetPct, $targetPct) 'OK'
                                 }
                             }
                         } catch {
@@ -1517,8 +1455,8 @@ function Start-GameWatcher {
             # stalls the whole memory manager (a visible hitch if it lands
             # mid-frame), so during play it happens ONLY below the critical
             # floor AND at most once per cooldown window. Skipped entirely
-            # in low-spec mode or while recording software is active.
-            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge -and -not ($isRecording -and $recSkipPurge)) {
+            # in low-spec mode.
+            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
                 if (([datetime]::UtcNow - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
                     $freeMB = Get-FreeRamMB
                     if ($freeMB -lt $CriticalRamFloorMB) {
@@ -1597,6 +1535,7 @@ function Start-GameWatcher {
         $journal['fgToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
         if ($colorActiveThis) { try { Disable-ColorCorrection } catch { } }   # never leave the color filter on
+        if ($nsEngaged) { try { Disable-VoiceNoiseSuppression; Stop-NoiseSuppressionExternal } catch { } }  # never leave mic DSP on
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
         if ($netOn) {

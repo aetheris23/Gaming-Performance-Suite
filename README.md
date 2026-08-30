@@ -1,11 +1,27 @@
-# Gaming Performance Suite v2.4
+# Gaming Performance Suite v2.5
 
 Zero-install performance toolkit for gaming across **Windows, Linux, and macOS**
 (PowerShell 5.1+ / PowerShell Core 7+), with foundational Android support via
 Termux. Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in your
 system, tunes your network for lower latency (with WiFi vs LAN awareness to
-prevent packet loss), keeps your microphone clear, adapts to older hardware,
-eliminates launch stutter, and **works smoothly alongside OBS/capture software**.
+prevent packet loss), keeps your microphone clear and noise-free, adapts to
+older hardware, and eliminates launch stutter.
+
+## What's new in v2.5
+
+- **Microphone noise suppression + echo cancellation (Windows 11).** The suite
+  now drives the OS capture-stream DSP - Deep Noise Suppression + classic Noise
+  Suppression + Acoustic Echo Cancellation - so distant background speech (a call
+  to prayer, people talking nearby, room/street noise) and the game's own audio
+  leaking into your mic are removed automatically while you game. It engages when
+  a game starts and is released the moment the last game closes.
+- **Watcher auto-stops on game close.** The background watcher now exits
+  completely when your game session ends instead of idling resident in memory, so
+  there is no lingering overhead, priority/timer/network/color state is fully
+  restored, and nothing keeps polling for another game.
+- **Removed recording / OBS support entirely.** The obsolete recording-software
+  detection, config, menu entries and dependencies have been stripped out - fully
+  focused on frame time over the capture stack.
 
 ## What's new in v2.4
 
@@ -18,18 +34,12 @@ eliminates launch stutter, and **works smoothly alongside OBS/capture software**
   `EventWaitHandle` sync objects are Windows-only; non-Windows now uses a
   journaled stop marker + polling instead, so watcher start/stop work on all
   platforms without exceptions.
-- **Recording-aware ramp steps** (display switch, standby purge): each deferred
-  step now *re-checks* whether OBS/Bandicam/other capture software is still live
-  right before it runs, preventing the 1 FPS recording slideshow and black-frame
-  flashes that occurred when a recorder was detected later than the game.
-- **Added Bandicam, Fraps, Mirillis Action!, XSplit, Xbox Game Bar and ShareX**
-  to the protected recorder list (never deprioritized, capture-safe paths).
 - **Real network tuning on Linux/macOS** (journaled `sysctl` changes + WiFi
   power-save off on Linux) instead of only Windows registry tweaks - fixes
   wireless packet loss outside Windows too.
-- **Lower idle resource use:** one native process snapshot per poll serves both
-  game detection and recorder detection (no repeated `Get-Process` scans), plus
-  cross-process watchdog coordination that clears hardware even after kills.
+- **Lower idle resource use:** one native process snapshot per poll serves the
+  whole game lookup (no repeated `Get-Process` scans), plus cross-process
+  watchdog coordination that clears hardware even after kills.
 - Graceful no-op display scaling everywhere (Linux `xrandr` / macOS
   `displayplacer` / none elsewhere) - resolution switching can never throw.
 - **Per-game resolution tiers (Low / Medium / High / Native).** Instead of one
@@ -254,12 +264,6 @@ overrides in `src/Config.ps1` (`ResolutionTiers`, `ProfileTiers`,
 > start it again. (For the old always-on behavior set `ExitWhenGameSessionEnds = $false`
 > in `src/Config.ps1`.)
 
-> **Recording software detected?** When OBS, Bandicam, Streamlabs, or another capture tool
-> is running, the suite automatically takes **capture-safe paths**: display resolution
-> switches and standby purges are deferred to prevent black frames or hitches in
-> your recording, and each deferred step re-checks the recorder just before it runs.
-> Game priority/CPU/network boosts still apply normally.
-
 ## Network optimization - WiFi and LAN aware
 
 The suite now **auto-detects your connection type** and adjusts TCP settings
@@ -297,6 +301,47 @@ v2.4 applies the same journaled, exactly-reverted tuning on non-Windows hosts:
 Every value is read *before* it is written, stored in the recovery journal, and
 restored exactly when the watcher stops. Writes need root (`sudo`); a key that is
 missing or unwritable is logged as a warning and skipped - it never stops the watcher.
+
+## Microphone noise suppression & echo cancellation
+
+Turns your mic into a clean, party-ready source while you game. The suite drives
+the **Windows 11 native audio DSP** on your capture device so distant background
+speech and game echo never reach the party:
+
+- **Distant background speech removed** (a call to prayer, people talking nearby,
+  room/street noise) regardless of how loud it is - only your voice gets through.
+- **Echo/kill**: the game's own audio leaking into your mic is cancelled, so the
+  party doesn't hear their own voices echo back.
+- **Deep Noise Suppression** + classic **Noise Suppression** + **Acoustic Echo
+  Cancellation** are engaged at the OS level (native DSP, no downloads).
+
+The DSP engages **automatically while a game runs** (per-game-session) and is
+released the moment the last game closes - it never lingers on the desktop and the
+host process exits completely.
+
+> **Windows only.** Deep echo/NS requires Windows 11 (effect GUIDs are present on
+> Windows 11 22H2+). On other platforms this feature is skipped gracefully and the
+> existing MMCSS mic-priority tweak (`Set-MicClarityTweaks`) still applies.
+
+Configured in `src/Config.ps1`:
+
+```powershell
+NoiseSuppression = @{
+    Enabled         = $true      # auto-engages while a game runs
+    ElevateMicBoost = $true      # also raise the mic thread scheduling priority
+    ExternalEngine  = ''         # optional path to your own NS host (RNNoise / APO)
+    ExternalArgs    = ''
+}
+```
+
+If you already use an external noise-suppression host (an RNNoise filter app,
+EqualizerAPO session, etc.), set `ExternalEngine` to its path - the suite will
+launch it during a session and stop it when the session ends, instead of using the
+built-in Windows DSP. Leave it empty to use the built-in effect.
+
+**Menu:** Option **6** engages mic noise suppression (plus network + MMCSS tweaks)
+right now; option **7** reverts. During a game session the watcher handles engage/
+release automatically.
 
 ## Cross-platform support
 
@@ -338,62 +383,6 @@ What low-spec mode does:
 - **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
 - **Gentler standby purges**: only when RAM critically low, with cooldown gates
 - **Throttled exit checks**: process exit scans every other cycle during gaming
-
-## Recording software support (OBS, Streamlabs, etc.)
-
-The suite **auto-detects** when capture/recording software is running alongside a
-game and automatically takes **capture-safe paths** to prevent frame drops, black
-frames, or hitches in your recording:
-
-| When recorder is active | Behavior |
-|---|---|
-| Display resolution switch | **Deferred** - prevents black-frame flashes in the recording |
-| Standby memory purge | **Deferred** - prevents visible hitch mid-recording |
-| Game priority boost | **Still applied** - game stays smooth |
-| CPU/affinity steering | **Still applied** - game gets clean cores |
-| Network optimization | **Still applied** - low latency for streaming |
-| Background silencing | **Still applied** - but recorder process is never touched |
-
-### Protected recording processes
-
-These processes are **never deprioritized** by background silencing:
-
-- OBS Studio (`obs64`, `obs32`)
-- Streamlabs Desktop
-- StreamElements OBS Live
-- Twitch Studio
-- Bandicam (`Bandicam`, `bdcam`, `BANDICAM64`)
-- Fraps (`Fraps`)
-- Mirillis Action! (`Action`, `RecBox`)
-- XSplit (`XSplit.Core`, `XSplit.Gamecaster`)
-- Xbox Game Bar (`GameBar`, `GameBarPresenceWriter`)
-- ShareX
-- x264 / NVENC encoder helpers
-
-Additional processes can be added in `Config.ps1`:
-
-```powershell
-RecordingSoftware = @{
-    Enabled                 = $true
-    SkipResolutionSwitch    = $true   # Prevents black frames in recording
-    SkipStandbyPurge        = $true   # Prevents hitch in recording
-    ProtectedProcesses      = @(
-        'obs64', 'obs32',
-        'Streamlabs',
-        'MyCustomRecorder'            # Add your own
-    )
-}
-```
-
-> **Tip:** If you record with OBS, leave both `Skip` options at `$true` for the
-> smoothest recording. The game still gets all priority/CPU/network boosts - only
-> the capture-disruptive operations are deferred.
-
-The legacy GPU auto-detection (`src/GpuDetect.psm1`) identifies hardware like:
-- Intel HD Graphics 620 (Kaby Lake iGPU) -> Legacy mode
-- Intel UHD 620+ / Iris -> Modern mode
-- NVIDIA GeForce GTX 9xx and older -> Legacy mode
-- AMD Radeon HD 7xxx-9xxx / R-series -> Legacy mode
 
 ## Color correction - FPS enemy clarity
 
@@ -441,6 +430,10 @@ are flagged too):
 | AMD | Radeon(TM) Graphics, Vega 8, 680M/780M/890M | RX 460->RX 9070, R5-R9, Fury/VII |
 | NVIDIA | *(no consumer iGPUs)* | GeForce GTX/RTX all series, Quadro, TITAN |
 
+Older / integrated chips are additionally flagged as **legacy** (pre-Pascal
+GeForce, pre-RX Radeon, Intel HD 620 and earlier, all GMA chips) so the suite
+relaxes aggressive tweaks that can misbehave on that hardware.
+
 ## Supported games and platforms
 
 The suite detects and optimizes for **100+ game processes** across all major platforms:
@@ -487,9 +480,8 @@ Override any classification in `Config.ps1` `ProfileOverrides`.
 
 Previous versions caused stutter when launching games because heavy operations
 (standby purge, display switch, network tweaks) ran AFTER the game was detected.
-v2.2 introduced pre-game optimization; v2.3 adds recording-aware capture-safe paths;
-v2.4 re-checks the recorder right before each deferred step so a recorder detected
-after the game can never stall the recording loop:
+v2.2 introduced pre-game optimization; v2.4 re-checks that no deferred step can
+ever stall a game's launch loop:
 
 1. **Pre-game phase** (before any game detected):
    - Power plan switched to High Performance
@@ -526,12 +518,11 @@ Start-Watcher-Hidden.sh       (generated by build) background watcher (Linux/mac
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
   Config.ps1                  game list, thresholds, scale %, low-spec mode,
-                              network tuning, voice clarity, recording detection,
-                              color correction
+                              network tuning, voice clarity, color correction
   Common.psm1                 logging, privileges, cross-platform detection,
                               stop-signal / single-instance + recovery journal
   GameBoost.psm1              FPS stability engine + watcher loop (stutter-free,
-                              recording-aware, low-spec optimized)
+                              low-spec optimized)
   DisplayScale.psm1           dynamic display-mode switching + native restore
                               (user32 / xrandr / displayplacer; no-op elsewhere)
   GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
@@ -541,6 +532,10 @@ src/
   ColorCorrect.psm1           automatic display filter: contrast/RGB/gamma
                               (SetDeviceGammaRamp on Windows, xrandr --gamma
                               on Linux, no-op elsewhere) for FPS enemy clarity
+  VoiceDSP.psm1               microphone noise suppression + echo cancellation
+                              (Windows 11 native DSP engine + external engine)
+  VoiceDSP-Host.ps1           hidden capture-stream host that holds/engages the
+                              mic DSP effects during a game session
   Build-Suite.ps1             generates .bat/.sh launchers + repacks ZIP
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)
@@ -566,8 +561,8 @@ completely gone.
 - All actions use standard OS APIs/registry values; no installs, no downloads.
 - Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched.
 - Voice apps (Discord, TeamSpeak, etc.) are never silenced - your mic stays clean.
-- Recording software (OBS, Streamlabs, etc.) is never deprioritized or disrupted.
-- Capture-safe paths prevent black frames and hitches while recording.
+- Mic noise suppression/echo cancellation uses the Windows 11 native DSP - still
+  no installs, no downloads, and it only engages while a game runs.
 - Network/voice tweaks are journaled and reverted exactly on stop.
 - If an action fails, check `logs/` - most failures mean the script wasn't elevated
   (Windows: run as Administrator; Linux/macOS: run with `sudo`).

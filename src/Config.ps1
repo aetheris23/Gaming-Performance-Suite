@@ -173,34 +173,6 @@
         AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
     }
 
-    # ---- Recording software awareness ---------------------------
-    # Detects OBS Studio / other capture tools running alongside
-    # games. When a recorder is active, the suite avoids operations
-    # that cause frame drops or black-frame flashes in the recording
-    # (e.g. display resolution switches). The game still gets
-    # priority/CPU/Network boosts, but capture-safe paths are taken.
-    RecordingSoftware = @{
-        Enabled                 = $true   # master switch for recording detection
-        SkipResolutionSwitch    = $true   # never switch display while recording (prevents black frames)
-        SkipStandbyPurge        = $true   # defer mid-game purge while recording (prevents hitch)
-        ProtectedProcesses      = @(      # process names (without .exe) to NEVER deprioritize
-            'obs64', 'obs32',           # OBS Studio
-            'Streamlabs',               # Streamlabs Desktop
-            'StreamElements',           # StreamElements OBS Live
-            'x264',                     # x264 encoder process
-            'NVENC',                    # NVIDIA encoder helper
-            'AMDUSBWakeupService',      # AMD capture helper
-            'TwitchStudio',             # Twitch Studio
-            'Bandicam', 'bdcam',        # Bandicam recorder
-            'BANDICAM64',               # Bandicam (x64)
-            'Fraps', 'gamesvr32',       # Fraps
-            'Action', 'RecBox',         # Mirillis Action!
-            'XSplit.Core', 'XSplit.Gamecaster',   # XSplit
-            'GameBar', 'GameBarPresenceWriter',   # Xbox Game Bar
-            'ShareX'                    # ShareX
-        )
-    }
-
     # ---- Automatic color correction --------------------------
     # Display-level contrast / RGB balance to make enemies stand
     # out in FPS and competitive games (works fullscreen + borderless;
@@ -336,5 +308,24 @@
         BoostVoiceAppsDuringGame   = $true
         MmcssAudioPriority         = $true
         ExtraProtectedProcessNames = @()
+    }
+
+    # ---- Microphone noise suppression & echo cancellation --------
+    # Turns the OS microphone into a clean, party-ready source while you
+    # game. On Windows 11 the suite drives the platform DSP (Deep Noise
+    # Suppression + classic Noise Suppression + Acoustic Echo Cancellation)
+    # so distant background speech (a call to prayer, people talking nearby,
+    # room/street noise) and the game's own audio leaking into your mic are
+    # removed regardless of volume - only your voice reaches the party.
+    #   Enabled          : master switch (auto-engages while a game runs)
+    #   ElevateMicBoost  : also raise the mic thread scheduling priority
+    #   ExternalEngine   : optional path to your own noise-suppression host
+    #                      (e.g. an RNNoise filter app / EqualizerAPO session).
+    #                      Leave '' to use the built-in Windows DSP.
+    NoiseSuppression = @{
+        Enabled         = $true
+        ElevateMicBoost = $true
+        ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
+        ExternalArgs    = ''
     }
 }
