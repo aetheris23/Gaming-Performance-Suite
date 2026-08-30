@@ -9,10 +9,12 @@ older hardware, and eliminates launch stutter.
 
 ## What's new in v2.5
 
-- **Microphone noise suppression + echo cancellation (Windows 11).** The suite
-  now drives the OS capture-stream DSP - Deep Noise Suppression + classic Noise
-  Suppression + Acoustic Echo Cancellation - so distant background speech (a call
-  to prayer, people talking nearby, room/street noise) and the game's own audio
+- **Microphone noise suppression + echo cancellation (all Windows 10 1809+ / 11).**
+  The suite drives the OS capture-stream DSP - Deep Noise Suppression + classic
+  Noise Suppression + Acoustic Echo Cancellation - and, where Windows lacks Deep
+  NS (the common Windows 10 case), layers in an embedded real-time software
+  suppressor so distant background speech (a call to prayer, people talking
+  nearby, room/street noise), fans, traffic and the game's own audio
   leaking into your mic are removed automatically while you game. It engages when
   a game starts and is released the moment the last game closes.
 - **Watcher auto-stops on game close.** The background watcher now exits
@@ -304,9 +306,9 @@ missing or unwritable is logged as a warning and skipped - it never stops the wa
 
 ## Microphone noise suppression & echo cancellation
 
-Turns your mic into a clean, party-ready source while you game. The suite drives
-the **Windows 11 native audio DSP** on your capture device so distant background
-speech and game echo never reach the party:
+Turns your mic into a clean, party-ready source while you game. The suite cleans
+the capture stream so distant background speech, traffic, fans and game echo
+never reach the party:
 
 - **Distant background speech removed** (a call to prayer, people talking nearby,
   room/street noise) regardless of how loud it is - only your voice gets through.
@@ -315,13 +317,31 @@ speech and game echo never reach the party:
 - **Deep Noise Suppression** + classic **Noise Suppression** + **Acoustic Echo
   Cancellation** are engaged at the OS level (native DSP, no downloads).
 
+The suite supports **every modern Windows edition** (10 1809+ and 11), not just
+Windows 11:
+
+- **Windows 11 (and any Windows that exposes Deep NS):** the OS AI Deep Noise
+  Suppression pipeline is driven directly - automatic and instant.
+- **Windows 10 (or where deep NS is absent):** Windows 10's classic NS alone
+  leaves loud/intermittent background noise (fans, traffic, broadcasts) audible,
+  so the suite layers in its **own embedded real-time spectral noise suppressor**
+  - a self-contained, allocation-light DSP (no installs) that strips that
+  background noise in real time and also renders the cleaned stream to the
+  default audio output.
+
+> **Windows only.** The OS DSP and the real-time filter run on Windows. On other
+> platforms this feature is skipped gracefully and the existing MMCSS mic-priority
+> tweak (`Set-MicClarityTweaks`) still applies.
+
 The DSP engages **automatically while a game runs** (per-game-session) and is
 released the moment the last game closes - it never lingers on the desktop and the
 host process exits completely.
 
-> **Windows only.** Deep echo/NS requires Windows 11 (effect GUIDs are present on
-> Windows 11 22H2+). On other platforms this feature is skipped gracefully and the
-> existing MMCSS mic-priority tweak (`Set-MicClarityTweaks`) still applies.
+> **Note on routing.** The OS effects apply to every app using the mic. Because
+> Windows 10 has no universal deep-NS driver, the real-time software filter's
+> cleaned output is streamed to the default audio output; to feed it to a specific
+> chat app, enable that app to use loopback / "Listen to this device" (or install a
+> virtual-cable mic and point `ExternalEngine` at it) for the strongest result.
 
 Configured in `src/Config.ps1`:
 
@@ -590,7 +610,8 @@ src/
                               (SetDeviceGammaRamp on Windows, xrandr --gamma
                               on Linux, no-op elsewhere) for FPS enemy clarity
   VoiceDSP.psm1               microphone noise suppression + echo cancellation
-                              (Windows 11 native DSP engine + external engine)
+                              (Windows 10 1809+/11 native DSP + embedded real-time
+                              spectral suppressor + external engine)
   VoiceDSP-Host.ps1           hidden capture-stream host that holds/engages the
                               mic DSP effects during a game session
   Build-Suite.ps1             generates .bat/.sh launchers + repacks ZIP
@@ -618,7 +639,8 @@ completely gone.
 - All actions use standard OS APIs/registry values; no installs, no downloads.
 - Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched.
 - Voice apps (Discord, TeamSpeak, etc.) are never silenced - your mic stays clean.
-- Mic noise suppression/echo cancellation uses the Windows 11 native DSP - still
+- Mic noise suppression/echo cancellation uses the OS DSP (plus a self-contained
+  real-time spectral suppressor on Windows 10) - still
   no installs, no downloads, and it only engages while a game runs.
 - Network/voice tweaks are journaled and reverted exactly on stop.
 - If an action fails, check `logs/` - most failures mean the script wasn't elevated

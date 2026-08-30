@@ -421,7 +421,7 @@ function Show-Status {
     if ($nsEnabled -and $nsCfg['ExternalEngine']) {
         Write-Log ("Mic noise suppression: external engine configured ({0}) - {1}" -f $nsCfg['ExternalEngine'], $nsActive) 'INFO'
     } elseif ($nsEnabled) {
-        Write-Log ("Mic noise suppression (deep NS + echo cancellation): {0} (Windows 11 DSP)" -f $nsActive) 'INFO'
+        Write-Log ("Mic noise suppression (deep NS + echo cancellation): {0} (Windows DSP)" -f $nsActive) 'INFO'
     } else {
         Write-Log 'Mic noise suppression: DISABLED in Config.ps1' 'INFO'
     }
@@ -540,7 +540,7 @@ function Wait-MenuKey {
                     } elseif (Test-VoiceDspPlatform) {
                         Enable-VoiceNoiseSuppression
                     } else {
-                        Write-Log 'Mic DSP unavailable on this platform (needs Windows 11).' 'WARN'
+                        Write-Log 'Mic DSP unavailable on this platform (needs Windows 10 1809 or later).' 'WARN'
                     }
                 }
             } catch { Write-Log $_.Exception.Message 'ERROR' }

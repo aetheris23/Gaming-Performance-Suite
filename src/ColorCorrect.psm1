@@ -81,9 +81,9 @@ public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 # ------------------------------------------------------------
 function New-LinearRamp {
     $ramp = New-Object Suite.Color.Native+RAMPDIRECTORY16
-    $ramp.Red   = New-Object 'ushort[]' 256
-    $ramp.Green = New-Object 'ushort[]' 256
-    $ramp.Blue  = New-Object 'ushort[]' 256
+    $ramp.Red   = [ushort[]]::new(256)
+    $ramp.Green = [ushort[]]::new(256)
+    $ramp.Blue  = [ushort[]]::new(256)
     for ($i = 0; $i -lt 256; $i++) {
         $v = [ushort]([int]($i * 65535 / 255))
         $ramp.Red[$i] = $v; $ramp.Green[$i] = $v; $ramp.Blue[$i] = $v
@@ -110,9 +110,9 @@ function New-ColorRamp {
     if ($contrast -le 0) { $contrast = 1.0 }
 
     $ramp = New-Object Suite.Color.Native+RAMPDIRECTORY16
-    $ramp.Red   = New-Object 'ushort[]' 256
-    $ramp.Green = New-Object 'ushort[]' 256
-    $ramp.Blue  = New-Object 'ushort[]' 256
+    $ramp.Red   = [ushort[]]::new(256)
+    $ramp.Green = [ushort[]]::new(256)
+    $ramp.Blue  = [ushort[]]::new(256)
 
     for ($i = 0; $i -lt 256; $i++) {
         $x = $i / 255.0

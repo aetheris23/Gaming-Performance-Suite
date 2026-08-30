@@ -304,16 +304,34 @@ function Clear-StandbyMemory {
 
         Add-NativeBoostType
         if (-not ('Suite.NativeBoost' -as [type])) { return }
-        [void](Enable-Privilege 'SeProfileSingleProcessPrivilege')
 
-        # SystemMemoryListInformation(80): command 4 = PurgeStandbyList
-        $cmd = 4
-        $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
+        # The standby-list purge (SystemMemoryListInformation = 80, command
+        # PurgeStandbyList = 4) requires SeProfileSingleProcessPrivilege to be
+        # ENABLED in THIS process token at the instant of the call. Enable it
+        # first (and verify), then retry a few times - on some builds the first
+        # NtSetSystemInformation after enabling can still race with the token
+        # refresh, so we re-enable and re-attempt.
+        $status = -1
+        for ($attempt = 1; $attempt -le 3 -and $status -ne 0; $attempt++) {
+            $priv = Enable-Privilege 'SeProfileSingleProcessPrivilege'
+            if (-not $priv) {
+                Write-Log 'Standby purge: could not enable SeProfileSingleProcessPrivilege (run as Administrator).' 'WARN'
+                return
+            }
+            # Small yield so the token adjust is fully committed inside ntdll.
+            Start-Sleep -Milliseconds 25
+            $cmd = 4
+            $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
+            if ($status -ne 0 -and $attempt -lt 3) {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+
         if ($status -eq 0) {
             $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
             Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
         } else {
-            Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8} (privilege not held?)" -f $status) 'ERROR'
+            Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8}. This needs Administrator privileges and the SeProfileSingleProcessPrivilege, which could not be asserted." -f $status) 'ERROR'
         }
         return
     }
@@ -1393,7 +1411,8 @@ function Start-GameWatcher {
                         # Engage the voice DSP once per session so background
                         # speech and game echo never reach the party. The
                         # external engine (if configured) is preferred; otherwise
-                        # the built-in Windows 11 DSP drives the mic.
+                        # the built-in OS DSP (plus, on Windows 10, the embedded
+                        # real-time suppressor) drives the mic.
                         if ($nsOn -and -not $nsEngaged) {
                             try {
                                 $engagedExternal = $false

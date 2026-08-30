@@ -345,11 +345,13 @@
 
     # ---- Microphone noise suppression & echo cancellation --------
     # Turns the OS microphone into a clean, party-ready source while you
-    # game. On Windows 11 the suite drives the platform DSP (Deep Noise
-    # Suppression + classic Noise Suppression + Acoustic Echo Cancellation)
-    # so distant background speech (a call to prayer, people talking nearby,
-    # room/street noise) and the game's own audio leaking into your mic are
-    # removed regardless of volume - only your voice reaches the party.
+    # game. On Windows 10 1809+/11 the suite drives the platform DSP (Deep
+    # Noise Suppression + classic Noise Suppression + Acoustic Echo
+    # Cancellation), and where Windows lacks Deep NS (Windows 10) it also
+    # layers in an embedded real-time spectral suppressor, so distant
+    # background speech (a call to prayer, people talking nearby, room/street
+    # noise), fans, traffic and the game's own audio leaking into your mic
+    # are removed regardless of volume - only your voice reaches the party.
     #   Enabled          : master switch (auto-engages while a game runs)
     #   ElevateMicBoost  : also raise the mic thread scheduling priority
     #   ExternalEngine   : optional path to your own noise-suppression host
