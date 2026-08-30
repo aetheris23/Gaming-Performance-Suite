@@ -23,6 +23,9 @@
 #
 #  Presets (Config.ps1 -> ColorCorrection.Mode):
 #    'Off'          : no change (default)
+#    'Auto'         : AUTO visibility - picks the strongest, most balanced
+#                     contrast/RGB preset per game profile so enemies stay
+#                     visible no matter which color mode is configured
 #    'Vibrant'      : moderate RGB boost + contrast (safe default)
 #    'FPS'          : stronger contrast + balance that lifts reds/darks so
 #                     dark enemies separate from bright scenes
@@ -147,6 +150,38 @@ function Get-ColorPreset {
 }
 
 # ------------------------------------------------------------
+# AUTO preset resolution for 'Auto' mode.
+#
+# The whole point of 'Auto' is that enemy visibility is GUARANTEED
+# regardless of the color setting currently active: instead of relying
+# on one hand-picked mode, Auto picks the strongest, most balanced
+# contrast/RGB preset for the detected game's profile, so outlines stay
+# sharp whether the scene is bright, washed-out, dark, or tinted.
+#
+# The pick is profile-aware (competitive/FPS gets the most aggressive
+# curve) and never depends on the user's "chosen color" - whichever
+# mode was configured is irrelevant once Auto is on, because the
+# filter is re-derived from the running game every launch.
+# ------------------------------------------------------------
+function Get-ColorPresetAuto {
+    param([string]$ProfileName = 'Default')
+    $p = if ($ProfileName) { $ProfileName.ToLowerInvariant() } else { 'default' }
+    switch -Regex ($p) {
+        # Competitive / online FPS: maximum separation + tint-neutral balance
+        # so enemies and crosshairs pop while retaining neutral flesh/sky tones.
+        'competitive|online|fps|valorant|cs|dota|overwatch|apex|fortnite|warzone'
+            { return @{ Gamma=1.08; Contrast=1.35; Brightness=0.0; RedGain=1.18; GreenGain=1.05; BlueGain=0.88 } }
+        # Emulators: lift dark scenes without crushing highlights (bright CRT
+        # and 3D-era games both benefit from a moderate, faithful boost).
+        'emulator|retro|pcsx|dolphin|yuzu|ryujinx|ppsspp|citra|mame'
+            { return @{ Gamma=1.05; Contrast=1.20; Brightness=0.0; RedGain=1.10; GreenGain=1.03; BlueGain=0.92 } }
+        # AAA / Steam & everything else: a strong but neutral visibility lift.
+        default
+            { return @{ Gamma=1.06; Contrast=1.28; Brightness=0.0; RedGain=1.14; GreenGain=1.04; BlueGain=0.90 } }
+    }
+}
+
+# ------------------------------------------------------------
 # Linux: list connected xrandr outputs
 # ------------------------------------------------------------
 function Get-LinuxColorOutputs {
@@ -191,13 +226,28 @@ function Enable-ColorCorrection {
         Applies the chosen color preset to the primary display(s),
         recording the original ramp/gamma so Disable can restore it.
         $Preset -> a preset hashtable; when $null, resolved from $Mode.
+        $Mode   -> a named preset, or 'Auto' to auto-derive the strongest
+                   visibility preset for $ProfileName (enemy clarity is
+                   guaranteed no matter which color setting is configured).
+        $ProfileName -> game profile used to resolve 'Auto' mode.
     #>
     param(
         [AllowNull()][hashtable]$Preset,
-        [string]$Mode = 'Off'
+        [string]$Mode = 'Off',
+        [string]$ProfileName = 'Default'
     )
 
-    if (-not $Preset) { $Preset = Get-ColorPreset -Name $Mode }
+    if (-not $Preset) {
+        if ([string]::Equals($Mode, 'Auto', [StringComparison]::OrdinalIgnoreCase)) {
+            $Preset = Get-ColorPresetAuto -ProfileName $ProfileName
+            $resolved = 'Auto'
+        } else {
+            $Preset = Get-ColorPreset -Name $Mode
+            $resolved = $Mode
+        }
+    } else {
+        $resolved = $Mode
+    }
     if (-not $Preset) {
         Write-Log 'Color correction: no preset selected (mode Off or unknown).' 'INFO'
         return $false
@@ -214,7 +264,7 @@ function Enable-ColorCorrection {
             if ($ok) {
                 $script:ColorOriginal = Get-WindowsGammaOriginal
                 $script:ColorActive = $true
-                Write-Log ("Color correction applied (mode '{0}') - contrast + RGB balance for enemy clarity." -f $Mode) 'OK'
+                Write-Log ("Color correction applied (mode '{0}') - contrast + RGB balance for enemy clarity." -f $resolved) 'OK'
                 return $true
             }
             Write-Log 'Color correction: SetDeviceGammaRamp rejected the ramp.' 'WARN'
@@ -241,7 +291,7 @@ function Enable-ColorCorrection {
             else { Write-Log ("Color: xrandr gamma for '{0}' failed ({1})." -f $o, ($rc -join '; ')) 'WARN' }
         }
         $script:ColorActive = $any
-        if ($any) { Write-Log ("Color correction applied (mode '{0}') via xrandr gamma {1}." -f $Mode, $target) 'OK' }
+        if ($any) { Write-Log ("Color correction applied (mode '{0}') via xrandr gamma {1}." -f $resolved, $target) 'OK' }
         return $any
     }
 
@@ -292,4 +342,4 @@ function Get-ColorCorrectionStatus {
 }
 
 Export-ModuleMember -Function Enable-ColorCorrection, Disable-ColorCorrection,
-    Get-ColorPreset, Get-ColorCorrectionStatus
+    Get-ColorPreset, Get-ColorPresetAuto, Get-ColorCorrectionStatus

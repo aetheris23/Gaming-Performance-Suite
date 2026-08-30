@@ -60,12 +60,82 @@ $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { 
 $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
 $nsCfg      = if ($cfg['NoiseSuppression'])     { $cfg['NoiseSuppression'] }     else { @{ Enabled = $false } }
-$lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Enabled = $false } }
+$lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Mode = 'Auto' } }
 $colorCfg   = if ($cfg['ColorCorrection'])     { $cfg['ColorCorrection'] }     else { @{ Enabled = $false; Mode = 'Off' } }
+$adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      else { @{ Enabled = $false } }
+
+# ---------------- low-spec auto-detection + resolution ----------------
+function Resolve-LowSpecSettings {
+    <#
+        Returns the EFFECTIVE low-spec configuration, honoring the user's
+        explicit choice first, else auto-detecting weak hardware. The trusted
+        'Enabled' key in the returned hashtable is the final resolved value so
+        every downstream reader (watcher, status, legacy resolution) behaves
+        consistently. Never throws.
+    #>
+    $mode = 'Auto'
+    if ($null -ne $lowSpecCfg['Mode'] -and "$($lowSpecCfg['Mode'])" -ne '') {
+        $mode = [string]$lowSpecCfg['Mode']
+    }
+
+    # Explicit manual override (legacy 'Enabled' key) wins over auto-detect.
+    $enabled = $null
+    if ($lowSpecCfg.ContainsKey('Enabled') -and $null -ne $lowSpecCfg['Enabled']) {
+        $enabled = [bool]$lowSpecCfg['Enabled']
+    }
+
+    $isLowSpec = $false
+    if ($null -ne $enabled) {
+        $isLowSpec = [bool]$enabled
+        Write-Log ("LowSpecMode: manual override Enabled={0} (Mode '{1}')." -f $isLowSpec, $mode) 'INFO'
+    } else {
+        switch ($mode.ToLowerInvariant()) {
+            'on'  { $isLowSpec = $true;  Write-Log 'LowSpecMode forced ON by config (Mode=On).' 'INFO' }
+            'off' { $isLowSpec = $false; Write-Log 'LowSpecMode forced OFF by config (Mode=Off).' 'INFO' }
+            default {
+                try {
+                    $sig = Test-LowSpecHardware
+                    $isLowSpec = [bool]$sig.IsLowSpec
+                    if ($isLowSpec) {
+                        Write-Log ("LowSpecMode AUTO-DETECTED: {0} logical CPUs @ ~{1} MHz, RAM {2} MB, legacy GPU present -> enabling low-spec mode automatically." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB) 'WARN'
+                    } else {
+                        Write-Log ("Hardware check: not low-spec ({0} logical CPUs, {1} MHz, RAM {2} MB) - LowSpecMode stays off." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB) 'INFO'
+                    }
+                } catch {
+                    Write-Log ("Low-spec auto-detection failed ({0}); LowSpecMode off." -f $_.Exception.Message) 'WARN'
+                    $isLowSpec = $false
+                }
+            }
+        }
+    }
+
+    # Build the effective table: resolved Enabled + user's sub-settings.
+    $eff = @{
+        Enabled                = $isLowSpec
+        SkipResolutionSwitch   = $false
+        SkipStandbyPurge       = $false
+        SkipBackgroundSilence  = $false
+        SkipFrameGenBridge     = $true
+        ReducedPolling         = $true
+        MinimalNetworkTweaks   = $false
+        SkipHags               = $true
+        MaxCpuCores            = 0
+        AggressiveTimer        = $false
+    }
+    foreach ($k in @('SkipResolutionSwitch','SkipStandbyPurge','SkipBackgroundSilence',
+                     'SkipFrameGenBridge','ReducedPolling','MinimalNetworkTweaks',
+                     'SkipHags','AggressiveTimer')) {
+        if ($null -ne $lowSpecCfg[$k]) { $eff[$k] = [bool]$lowSpecCfg[$k] }
+    }
+    if ($null -ne $lowSpecCfg['MaxCpuCores']) { $eff['MaxCpuCores'] = [int]$lowSpecCfg['MaxCpuCores'] }
+    return $eff
+}
+
+$lowSpecEff = Resolve-LowSpecSettings
 
 # Apply LowSpec polling overrides early
-if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
-    if ($lowSpecCfg['ReducedPolling']) {
+if ($lowSpecEff['Enabled']) {
+    if ($lowSpecEff['ReducedPolling']) {
         $pollSecs = [Math]::Max($pollSecs, 15)
         $idleSecs = [Math]::Max($idleSecs, 35)
     }
@@ -90,7 +160,7 @@ function Resolve-LegacySettings {
 
     # Also treat LowSpecMode's SkipHags as legacy signal
     $lowSpecHags = $false
-    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled'] -and $lowSpecCfg['SkipHags']) {
+    if ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipHags']) {
         $lowSpecHags = $true
     }
 
@@ -157,8 +227,9 @@ function Invoke-Watcher {
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
-            -LowSpecSettings $lowSpecCfg `
+            -LowSpecSettings $lowSpecEff `
             -ColorSettings $colorCfg `
+            -AdaptiveTuningSettings $adaptiveCfg `
             -NoiseSuppressionSettings $nsCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
@@ -206,8 +277,8 @@ function Show-Banner {
     } catch { }
 
     # Show low-spec mode
-    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
-        Write-Host (' Low-spec mode: ACTIVE - minimal resource usage') -ForegroundColor Yellow
+    if ($lowSpecEff['Enabled']) {
+        Write-Host (' Low-spec mode: ACTIVE - minimal resource usage (auto-detected)') -ForegroundColor Yellow
     }
 
     # Show color correction mode
@@ -262,7 +333,7 @@ function Invoke-FullOptimization {
     Disable-GameDVR
     Set-MultimediaTweaks -EnableHags:([bool]$leg.EnableHags)
     Set-TimerResolution
-    if (-not ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled'] -and $lowSpecCfg['SkipStandbyPurge'])) {
+    if (-not ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipStandbyPurge'])) {
         Clear-StandbyMemory
     }
     try { Set-MicClarityTweaks } catch { Write-Log $_.Exception.Message 'ERROR' }
@@ -362,12 +433,13 @@ function Show-Status {
     } catch { }
 
     # ---- low-spec mode summary ------------------------------------------
-    if ($null -ne $lowSpecCfg -and $lowSpecCfg['Enabled']) {
-        Write-Log 'Low-spec mode: ACTIVE' 'WARN'
+    if ($lowSpecEff['Enabled']) {
+        Write-Log 'Low-spec mode: ACTIVE (auto-detected or forced in Config.ps1)' 'WARN'
         Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
         Write-Log ("  Pre-game optimization: {0}" -f $(if ($preGameOpt) { 'enabled' } else { 'disabled' })) 'INFO'
         Write-Log ("  Pre-launch purge: {0}" -f $(if ($prePurge) { 'enabled' } else { 'disabled' })) 'INFO'
     } else {
+        Write-Log 'Low-spec mode: off (hardware not detected as low-spec)' 'INFO'
         Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
     }
     Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
@@ -377,6 +449,17 @@ function Show-Status {
         $cm = Resolve-ColorMode
         Write-Log ("Color correction: {0}" -f (Get-ColorCorrectionStatus -Mode $cm)) 'INFO'
     } catch { Write-Log 'Color correction: n/a' 'INFO' }
+
+    # ---- adaptive mid-game tuning status ---------------------------
+    $adaptiveOn = if ($adaptiveCfg -and $adaptiveCfg['Enabled']) { [bool]$adaptiveCfg['Enabled'] } else { $false }
+    if ($adaptiveOn) {
+        $aFloor = if ($adaptiveCfg['AdaptivePurgeFloor']) { [int]$adaptiveCfg['AdaptivePurgeFloor'] } else { 10 }
+        $aCool  = if ($adaptiveCfg['PressureCooldownSec']) { [int]$adaptiveCfg['PressureCooldownSec'] } else { 60 }
+        $aRe    = if ($adaptiveCfg['ReassertPriorities']) { [bool]$adaptiveCfg['ReassertPriorities'] } else { $true }
+        Write-Log ("Adaptive mid-game tuning: ACTIVE (purge floor {0}% RAM, cooldown {1}s, priority re-assert {2})" -f $aFloor, $aCool, $(if ($aRe) { 'on' } else { 'off' })) 'INFO'
+    } else {
+        Write-Log 'Adaptive mid-game tuning: disabled in Config.ps1' 'INFO'
+    }
 
     # ---- platform info ------------------------------------------
     Write-Log ("Platform: {0} | PowerShell {1}" -f $PSVersionTable.Platform, $PSVersionTable.PSVersion) 'INFO'

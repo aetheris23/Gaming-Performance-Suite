@@ -160,8 +160,17 @@
     # 8-16GB RAM, Intel HD/UHD Graphics). Reduces overhead and
     # skips heavy optimizations that cause stutter on weak hardware.
     # Recommended for any PC that struggles with modern games.
+    #
+    #   Mode = 'Auto'   AUTO-DETECT weak hardware (legacy GPU + low CPU
+    #                   cores/clock) and enable low-spec mode for you -
+    #                   no config edit needed on a low-spec laptop.
+    #          'On'     always force low-spec mode on.
+    #          'Off'    always force it off (strong desktop).
+    #   Enabled is a legacy manual override: $null = follow Mode,
+    #                   $true/$false = force on/off regardless of Mode.
     LowSpecMode = @{
-        Enabled                 = $true   # set $false for high-end PCs
+        Mode                    = 'Auto'   # 'Auto' | 'On' | 'Off'
+        Enabled                 = $null    # manual override ($null = follow Mode)
         SkipResolutionSwitch    = $false  # skip display resolution changes
         SkipStandbyPurge        = $false  # skip standby memory purging
         SkipBackgroundSilence   = $false  # skip background app deprioritization
@@ -178,6 +187,10 @@
     # out in FPS and competitive games (works fullscreen + borderless;
     # applied only while such a game runs, removed on exit).
     #   Mode:
+    #     'Auto'         - (RECOMMENDED) AUTO enemy visibility: picks the
+    #                      strongest, most balanced contrast/RGB preset per
+    #                      game profile automatically, so enemies stay visible
+    #                      regardless of which color you choose
     #     'Vibrant'      - moderate boost (safe default)
     #     'FPS'          - stronger contrast + balance for dark enemies
     #     'Max'          - aggressive contrast + vivid colors
@@ -190,8 +203,28 @@
     #   (See src/ColorCorrect.psm1 for the per-mode curves.)
     ColorCorrection = @{
         Enabled        = $true    # master switch
-        Mode           = 'Deuteranopia'   # 'Vibrant' | 'FPS' | 'Max' | 'Red' | 'Tritanopia' | 'Protanopia' | 'Deuteranopia' | 'Off'
+        Mode           = 'Auto'   # 'Auto' | 'Vibrant' | 'FPS' | 'Max' | 'Red' | 'Tritanopia' | 'Protanopia' | 'Deuteranopia' | 'Off'
         OnlyProfiles   = @('Competitive', 'Default')   # watch profiles that get the filter
+    }
+
+    # ---- Adaptive mid-game tuning ---------------------------------
+    # Smooth FPS during heavy moments (skill/effect bursts, large maps).
+    # When a game runs, the watcher monitors memory pressure and re-asserts
+    # the game's priority/affinity so drops don't cause visible hitches.
+    #   Enabled              : master switch
+    #   AdaptivePurgeFloor   : % of total RAM treated as "under pressure".
+    #                          Scales with the machine (small/large maps).
+    #   PressureCooldownSec  : min seconds between adaptive purges (tightens
+    #                          automatically while pressure persists).
+    #   ReassertPriorities   : periodically re-apply the game's priority/
+    #                          affinity if the OS or heavy load knocked it back
+    #   ReassertEveryCycles  : re-check every N poll cycles during play
+    AdaptiveTuning = @{
+        Enabled              = $true
+        AdaptivePurgeFloor   = 10
+        PressureCooldownSec  = 60
+        ReassertPriorities   = $true
+        ReassertEveryCycles  = 3
     }
 
     # ---- Per-game classification -----------------------------

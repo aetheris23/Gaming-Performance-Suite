@@ -360,25 +360,34 @@ are gracefully skipped on other platforms.
 
 For older or low-spec hardware (e.g. **Intel i3 7th Gen, 8-16GB RAM, Intel HD/UHD Graphics**).
 
-Low-spec mode is **enabled by default** in v2.4 for minimal resource usage.
-If you have a high-end PC, set `Enabled = $false` in `src/Config.ps1`:
+> **New: low-spec mode is AUTO-DETECTED by default.** At startup the suite
+> checks your actual hardware - legacy iGPU/dGPU, low CPU core/thread count
+> and low CPU clock - and **enables low-spec mode automatically** on weak
+> machines (like an i3-7020U 2-core/4-thread + HD Graphics 620 + 16GB
+> laptop). No `Config.ps1` edit is needed; it also stays **light on strong
+> machines** because the reduced polling/throttled scans only tighten the
+> suite's own footprint further.
+
+Configure with `Mode` in `src/Config.ps1`:
 
 ```powershell
 LowSpecMode = @{
-    Enabled = $true        # Master switch (ON by default in v2.4)
-    SkipResolutionSwitch = $false  # Keep display scaling (helps FPS on weak GPUs)
-    SkipStandbyPurge = $false      # Keep memory purging (helps with 8-16GB)
-    SkipBackgroundSilence = $false # Keep background silencing
-    SkipFrameGenBridge = $true     # Skip frame-gen (no compatible GPU)
-    ReducedPolling = $true         # Use 15s/35s intervals (less CPU overhead)
-    SkipHags = $true               # Skip HAGS (unsupported on Intel HD)
-    AggressiveTimer = $false       # Use 2ms timer (1ms causes too many interrupts)
+    Mode                  = 'Auto'   # 'Auto' auto-detect | 'On' force | 'Off' force off
+    Enabled               = $null    # manual override ($null = follow Mode; $true/$false force)
+    SkipResolutionSwitch  = $false   # Keep display scaling (helps FPS on weak GPUs)
+    SkipStandbyPurge      = $false   # Keep memory purging (helps with 8-16GB)
+    SkipBackgroundSilence = $false   # Keep background silencing
+    SkipFrameGenBridge    = $true    # Skip frame-gen (no compatible GPU)
+    ReducedPolling        = $true    # Use 15s/35s intervals (less CPU overhead)
+    SkipHags              = $true    # Skip HAGS (unsupported on Intel HD)
+    AggressiveTimer       = $false   # Use 2ms timer (1ms causes too many interrupts)
 }
 ```
 
 What low-spec mode does:
+- **Auto-detection**: weak CPU (≤4 threads or low clock) + legacy GPU → enabled
+  for you automatically; strong machines stay at full strength
 - **Polling intervals**: 15s gaming / 35s idle (vs 10s/25s) - less CPU overhead
-- **Lazy native interop**: C# types compile on first use, not at module import
 - **BelowNormal watcher priority**: yields to everything else on the system
 - **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
 - **Gentler standby purges**: only when RAM critically low, with cooldown gates
@@ -405,10 +414,18 @@ Configure in `src/Config.ps1` under `ColorCorrection`:
 ```powershell
 ColorCorrection = @{
     Enabled     = $true      # $false = feature off (never auto-applied)
-    Mode        = 'Deuteranopia'   # Off | Vibrant | FPS | Max | Red | Tritanopia | Protanopia | Deuteranopia
+    Mode        = 'Auto'     # Auto | Off | Vibrant | FPS | Max | Red | Tritanopia | Protanopia | Deuteranopia
     OnlyProfiles= @('Competitive', 'Default')   # game profiles that trigger it
 }
 ```
+
+> **New in this build: `Auto` mode.** Instead of relying on one hand-picked
+> color, `Auto` derives the **strongest, most balanced** contrast/RGB preset
+> from the running game's profile every launch - so enemies stay clearly
+> visible **no matter which color is configured** (Red, Purple/Tritanopia,
+> Yellow/Protanopia or Yellow/Deuteranopia). Competitive/esports titles get
+> the most aggressive separation curve; emulators and AAA titles get a
+> strong-but-faithful boost. Pick `Auto` and visibility is handled for you.
 
 The preset table (`Get-ColorPreset`) tunes
 red/green/blue gain, gamma and contrast per mode; `Max` is the strongest
@@ -499,6 +516,46 @@ ever stall a game's launch loop:
    - Display switch at ~12s
 
 The result: **zero visible stutter** when launching games, even on weak hardware.
+
+## Adaptive mid-game tuning - no FPS drops on skill effects or large maps
+
+This build adds an in-game adaptation layer that keeps FPS smooth during the
+exact moments that used to cause drops - **skill/effect bursts** (particle
+storms, ability spam) and **maps of every scale** (small arenas to huge open
+worlds), which spike memory and CPU load.
+
+- **RAM-relative pressure floor.** Instead of one fixed value, the watcher
+  treats a percentage of your **total** RAM as the "under pressure" threshold
+  (default 10%), so it scales correctly whether you have 8 GB or 64 GB and
+  whether the current map is tiny or enormous. When free RAM drops under the
+  floor, a cooldown-gated standby purge reclaims memory without ever stalling
+  a frame in the middle of a render.
+- **Tightening cooldown under stress.** While memory pressure *persists* (a
+  long skill fight or a huge map still loading), the purge cooldown shortens
+  automatically (down to half) so recurring bursts are caught sooner - and it
+  relaxes back to normal the moment memory is healthy, so it never over-purges.
+- **Priority re-assertion.** Skill effects and big map loads can let the OS or
+  a background hog steal CPU from the game. The watcher periodically re-applies
+  the game's priority/affinity during play (cheap, throttled) so heavy moments
+  don't translate into hitches.
+- These sit **on top** of the existing per-game resolution tiers, so the GPU
+  load is already low before adaptive tuning kicks in.
+
+Configure in `src/Config.ps1` under `AdaptiveTuning`:
+
+```powershell
+AdaptiveTuning = @{
+    Enabled              = $true
+    AdaptivePurgeFloor   = 10      # % of total RAM treated as "under pressure"
+    PressureCooldownSec  = 60      # min seconds between adaptive purges
+    ReassertPriorities   = $true   # periodically re-apply game priority/affinity
+    ReassertEveryCycles  = 3       # re-check every N poll cycles during play
+}
+```
+
+Standby purges remain session-safe: still never repeated mid-frame on a timer,
+still gated by a cooldown, and any change is journaled so an unclean stop is
+fully restored.
 
 ## Background reliability & crash recovery
 

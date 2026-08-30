@@ -553,6 +553,105 @@ function Get-GameScalePercent {
 }
 
 # ------------------------------------------------------------
+# Low-spec hardware auto-detection.
+#
+# Determines at startup whether the detected hardware is weak enough
+# that the suite should run in low-spec mode AUTOMATICALLY - so users
+# on old laptops / low-spec PCs never have to edit Config.ps1 to get a
+# safe, lightweight experience. The program also stays light on strong
+# machines because LowSpecMode's reduced polling, throttled silence and
+# skipped HAGS/timer are internal and only tighten the watcher's own
+# footprint further.
+#
+# Signals (cross-platform, all cheap):
+#   - legacy iGPU/dGPU  (Test-LegacyGpuPresent - the weakest GPU class)
+#   - low CPU core/thread count (<= 4 logical processors)
+#   - low CPU clock (base/max < ~2.6 GHz, when the OS exposes it)
+#   - low total RAM (< ~6 GB - only a tiebreaker, never a hard gate)
+#
+# A machine is considered low-spec when it has a legacy GPU AND is
+# CPU-weaker (few cores OR low clocks). This captures the classic weak
+# laptop (e.g. i3-7020U 2C/4T + HD Graphics 620) while letting modern
+# multi-core iGPU systems run at full strength.
+#
+# Never throws; returns a hashtable with an IsLowSpec verdict plus the
+# individual signals so callers can log exactly WHY.
+# ------------------------------------------------------------
+function Test-LowSpecHardware {
+    [CmdletBinding()] param()
+
+    $signals = @{
+        LegacyGpu = $false
+        LowCores  = $false
+        LowClock  = $false
+        LowRam    = $false
+        Threads   = [Environment]::ProcessorCount
+        ClockMHz  = 0
+        RamMB     = 0
+    }
+
+    # GPU: reuse the legacy-era detector (already cached after first call)
+    try { $signals.LegacyGpu = [bool](Test-LegacyGpuPresent) } catch { }
+
+    # RAM: lightweight probe (matches Get-FreeRamMB's platform split)
+    try {
+        if (Test-SuitePlatformWindows) {
+            Add-NativeBoostType   # ensure Suite.NativeBoost is compiled
+            if ('Suite.NativeBoost' -as [type]) {
+                $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
+                $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
+                [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
+                $signals.RamMB = [int]($ms.ullTotalPhys / 1MB)
+            }
+        } elseif ($IsLinux) {
+            foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) {
+                if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $signals.RamMB = [int](([int64]$Matches[1] * 1024) / 1MB); break }
+            }
+        } elseif ($IsMacOS) {
+            $hd = & sysctl -n hw.memsize 2>$null
+            if ($hd) { $signals.RamMB = [int](([int64]$hd) / 1MB) }
+        }
+    } catch { }
+
+    $signals.LowCores = ($signals.Threads -le 4)
+
+    # CPU clock: best-effort; different on each platform. Never fatal.
+    try {
+        if (Test-SuitePlatformWindows) {
+            $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Measure-Object -Property MaxClockSpeed -Maximum
+            if ($cpu -and $cpu.Maximum) { $signals.ClockMHz = [int]$cpu.Maximum }
+        } elseif ($IsLinux) {
+            # Prefer the CPU's MAX frequency (from sysfs) so a fast chip
+            # idling down its current clock isn't mistaken for a weak one.
+            # Fall back to the first "cpu MHz" line in /proc/cpuinfo.
+            $maxFreq = Get-Content /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq -ErrorAction SilentlyContinue
+            if ($maxFreq) {
+                # Get-Content returns a scalar string for a 1-line file; index
+                # with a whole-string convert instead of [0] (which would grab
+                # a single character).
+                $maxFreqStr = ([string]$maxFreq).Trim()
+                if ($maxFreqStr -match '^\d+$') { $signals.ClockMHz = [int]([System.Convert]::ToInt64($maxFreqStr) / 1000) }
+            }
+            if (-not $signals.ClockMHz) {
+                foreach ($ln in (Get-Content /proc/cpuinfo -ErrorAction Stop)) {
+                    if ($ln -match '^cpu MHz\s*:\s*([\d.]+)') { $signals.ClockMHz = [int][double]$Matches[1]; break }
+                }
+            }
+        } elseif ($IsMacOS) {
+            $hz = & sysctl -n hw.cpufrequency 2>$null
+            if ($hz) { $signals.ClockMHz = [int](([int64]$hz) / 1MB) }
+        }
+    } catch { }
+    if ($signals.ClockMHz -gt 0 -and $signals.ClockMHz -lt 2600) { $signals.LowClock = $true }
+
+    $signals.LowRam = ($signals.RamMB -gt 0 -and $signals.RamMB -lt 6144)
+
+    # Verdict: legacy GPU AND (few cores OR low clock). RAM is informational.
+    $signals.IsLowSpec = ($signals.LegacyGpu -and ($signals.LowCores -or $signals.LowClock))
+    return $signals
+}
+
+# ------------------------------------------------------------
 # 6. Per-process boost driven by the game's profile
 # ------------------------------------------------------------
 $script:PriorityCapable = $true
@@ -926,6 +1025,7 @@ function Start-GameWatcher {
         [hashtable]$NoiseSuppressionSettings = @{ Enabled = $false },
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$ColorSettings     = @{ Enabled = $false; Mode = 'Off' },
+        [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [bool]$ExitWhenGameSessionEnds = $true,
@@ -995,6 +1095,27 @@ function Start-GameWatcher {
     $colorActiveThis = $false   # filter currently applied by us
     if ($colorOn -and $colorMode -and $colorMode -ne 'Off') {
         Write-Log ("Automatic color correction ENABLED (mode '{0}') for profiles: {1}." -f $colorMode, ($colorProfiles -join ', ')) 'INFO'
+    }
+
+    # ---- resolve adaptive mid-game tuning -------------------------------
+    # Reacts to heavy-load moments (skill/effect bursts, large maps) where
+    # memory pressure spikes and frame drops show up. Standby purges are
+    # still gated by a cooldown (never stall the middle of a frame) but the
+    # floor adapts to total RAM and the cooldown tightens under pressure.
+    $adaptiveOn           = $false
+    $adaptiveFloorPct     = 10
+    $adaptiveCoolSec      = 60
+    $reassertPriorities   = $true
+    $reassertEveryCycles  = 3
+    if ($AdaptiveTuningSettings) {
+        if ($AdaptiveTuningSettings.ContainsKey('Enabled'))            { $adaptiveOn          = [bool]$AdaptiveTuningSettings['Enabled'] }
+        if ($AdaptiveTuningSettings.ContainsKey('AdaptivePurgeFloor')) { $adaptiveFloorPct   = [int]$AdaptiveTuningSettings['AdaptivePurgeFloor'] }
+        if ($AdaptiveTuningSettings.ContainsKey('PressureCooldownSec')){ $adaptiveCoolSec    = [int]$AdaptiveTuningSettings['PressureCooldownSec'] }
+        if ($AdaptiveTuningSettings.ContainsKey('ReassertPriorities')) { $reassertPriorities = [bool]$AdaptiveTuningSettings['ReassertPriorities'] }
+        if ($AdaptiveTuningSettings.ContainsKey('ReassertEveryCycles')){ $reassertEveryCycles= [Math]::Max(1, [int]$AdaptiveTuningSettings['ReassertEveryCycles']) }
+    }
+    if ($adaptiveOn) {
+        Write-Log 'Adaptive mid-game tuning ENABLED - reacts to skill-effect / large-map load spikes for smooth FPS.' 'INFO'
     }
 
     Write-GpuInventory
@@ -1117,6 +1238,23 @@ function Start-GameWatcher {
     $sessionPurged = $false                  # launch-time purge done for this game session
     $scaledApplied = $false                  # display currently scaled by us
     $preGamePurged = $false                  # pre-launch purge has run (stutter prevention)
+
+    # ---- adaptive mid-game tuning state ----
+    # Tracks sustained memory pressure (skill/effect bursts, large maps load
+    # lots of assets) so an adaptive purge can react without ever stalling a
+    # frame - always cooldown-gated and only under real pressure.
+    $adaptiveLastUtc     = [datetime]::MinValue  # last adaptive purge
+    $adaptiveCoolMs      = [int]$adaptiveCoolSec * 1000
+    $adaptiveConsecutive = 0                      # consecutive pressure readings (tightens cooldown)
+    $adaptiveTotalMB     = 0                      # total physical RAM, resolved once
+    if (Test-SuitePlatformWindows) {
+        try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
+    } elseif ($IsLinux) {
+        try { foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) { if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $adaptiveTotalMB = [int](([int64]$Matches[1] * 1024) / 1MB); break } } } catch { }
+    } elseif ($IsMacOS) {
+        try { $hd = & sysctl -n hw.memsize 2>$null; if ($hd) { $adaptiveTotalMB = [int](([int64]$hd) / 1MB) } } catch { }
+    }
+    $reassertCounter     = 0                      # throttles per-game priority re-assertion
 
     # ---- idle tracking: ultra-low resource mode ---------------------------
     $idleSinceUtc     = [datetime]::UtcNow   # when we last transitioned to idle
@@ -1278,8 +1416,10 @@ function Start-GameWatcher {
                         # ---- automatic color correction for FPS clarity ----
                         # Apply once per game session when a matching profile starts,
                         # and keep it until NO qualifying game is left running.
+                        # In 'Auto' mode the profile name drives the preset so enemy
+                        # visibility is guaranteed regardless of the configured color.
                         if ($colorOn -and -not $colorActiveThis -and ($colorProfiles -contains $profName)) {
-                            if (Enable-ColorCorrection -Mode $colorMode) {
+                            if (Enable-ColorCorrection -Mode $colorMode -ProfileName $profName) {
                                 $colorActiveThis = $true
                             }
                         }
@@ -1457,12 +1597,78 @@ function Start-GameWatcher {
             # floor AND at most once per cooldown window. Skipped entirely
             # in low-spec mode.
             if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
+                $freeMB = Get-FreeRamMB
+                $pressure = $false
+                $pressureNote = ''
+
+                # 1) Classic fixed-floor purge (behaves exactly as before).
                 if (([datetime]::UtcNow - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
-                    $freeMB = Get-FreeRamMB
                     if ($freeMB -lt $CriticalRamFloorMB) {
                         Write-Log ("Free RAM critical ({0} MB) - cooldown-gated standby purge..." -f $freeMB) 'WARN'
                         Clear-StandbyMemory
                         $lastPurgeUtc = [datetime]::UtcNow
+                        $pressure = $true
+                    }
+                }
+
+                # 2) ADAPTIVE purge for skill-effect / large-map load spikes.
+                #    Uses a RAM-relative floor (so it scales with the machine,
+                #    big or small) and tightens its cooldown while pressure
+                #    persists, reacting to bursts without stalling a frame.
+                if ($adaptiveOn) {
+                    # Resolve total RAM once if the probe failed earlier
+                    if ($adaptiveTotalMB -le 0) {
+                        if (Test-SuitePlatformWindows) {
+                            try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
+                        } elseif ($IsLinux) {
+                            try { foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) { if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $adaptiveTotalMB = [int](([int64]$Matches[1] * 1024) / 1MB); break } } } catch { }
+                        } elseif ($IsMacOS) {
+                            try { $hd = & sysctl -n hw.memsize 2>$null; if ($hd) { $adaptiveTotalMB = [int](([int64]$hd) / 1MB) } } catch { }
+                        }
+                    }
+                    $adaptiveFloorMB = if ($adaptiveTotalMB -gt 0) { [int]($adaptiveTotalMB * $adaptiveFloorPct / 100.0) } else { $CriticalRamFloorMB }
+
+                    # Under pressure the cooldown tightens (down to half the
+                    # configured value) so recurring bursts are caught sooner;
+                    # it relaxes back out as soon as memory is healthy again.
+                    if ($freeMB -lt $adaptiveFloorMB) {
+                        $adaptiveConsecutive++
+                        $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, $adaptiveConsecutive - 1))))
+                        $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; spike burst detected"
+                        if (( [datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs) {
+                            Write-Log ("Adaptive purge: free RAM {0} MB under {1} ({2})." -f $freeMB, $adaptiveFloorMB, $pressureNote) 'WARN'
+                            Clear-StandbyMemory
+                            $adaptiveLastUtc = [datetime]::UtcNow
+                            $pressure = $true
+                        }
+                    } else {
+                        $adaptiveConsecutive = 0
+                    }
+                }
+            }
+
+            # Re-assert per-game priority/affinity during play. Skill-effect
+            # bursts and big-map loads can re-prioritize other processes or the
+            # OS can knock players back; re-asserting keeps the game ahead of
+            # hogs so heavy effects don't cause visible hitches. Cheap (only
+            # touches processes that already exist in our table) and throttled
+            # to every N cycles.
+            if ($reassertPriorities -and $running.Count -gt 0) {
+                $reassertCounter++
+                if (($reassertCounter % $reassertEveryCycles) -eq 0) {
+                    foreach ($bid in @($boosted.Keys)) {
+                        if (-not $boosted.ContainsKey($bid)) { continue }
+                        $bprof = $script:GameProfiles[$boosted[$bid]]
+                        try {
+                            $bproc = Get-Process -Id $bid -ErrorAction SilentlyContinue
+                            if ($bproc -and -not $bproc.HasExited) {
+                                $needBoost = $false
+                                try { $needBoost = ($bproc.PriorityClass -ne [string]$bprof.Priority) } catch { $needBoost = $true }
+                                if ($needBoost -and $script:PriorityCapable) {
+                                    Invoke-ProcessBoost -Process $bproc -Profile $bprof -MaxCores $lowSpecMaxCores
+                                }
+                            }
+                        } catch { }
                     }
                 }
             }
@@ -1550,5 +1756,5 @@ function Start-GameWatcher {
 
 Export-ModuleMember -Function Enable-GamingPowerPlan, Disable-GameDVR, Set-MultimediaTweaks,
     Set-TimerResolution, Clear-StandbyMemory, Invoke-ProcessBoost,
-    Start-GameWatcher, Get-FreeRamMB, Get-GameProfile,
+    Start-GameWatcher, Get-FreeRamMB, Get-GameProfile, Test-LowSpecHardware,
     Invoke-FrameGenerationTool, Stop-FrameGenerationTool
