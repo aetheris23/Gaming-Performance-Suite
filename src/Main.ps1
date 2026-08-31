@@ -21,7 +21,6 @@ Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')   -Force
-Import-Module (Join-Path $root 'ColorCorrect.psm1') -Force
 Import-Module (Join-Path $root 'VoiceDSP.psm1')  -Force
 
 # Load user config with safe fallbacks
@@ -61,7 +60,6 @@ $netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } e
 $voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
 $nsCfg      = if ($cfg['NoiseSuppression'])     { $cfg['NoiseSuppression'] }     else { @{ Enabled = $false } }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Mode = 'Auto' } }
-$colorCfg   = if ($cfg['ColorCorrection'])     { $cfg['ColorCorrection'] }     else { @{ Enabled = $false; Mode = 'Off' } }
 $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      else { @{ Enabled = $false } }
 
 # ---------------- low-spec auto-detection + resolution ----------------
@@ -180,15 +178,6 @@ function Resolve-LegacySettings {
     return $eff
 }
 
-# ---------------- color correction settings ----------------
-function Resolve-ColorMode {
-    <# Returns the configured color mode name ('Off' if disabled). #>
-    if (-not $colorCfg -or -not $colorCfg['Enabled']) { return 'Off' }
-    $m = 'Off'
-    if ($colorCfg['Mode']) { $m = [string]$colorCfg['Mode'] }
-    return $m
-}
-
 # ---------------- shared watcher invocation ----------------
 function Invoke-Watcher {
     param(
@@ -228,7 +217,6 @@ function Invoke-Watcher {
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
             -LowSpecSettings $lowSpecEff `
-            -ColorSettings $colorCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
             -NoiseSuppressionSettings $nsCfg `
             -PreGameOptimization:([bool]$preGameOpt) `
@@ -281,14 +269,6 @@ function Show-Banner {
         Write-Host (' Low-spec mode: ACTIVE - minimal resource usage (auto-detected)') -ForegroundColor Yellow
     }
 
-    # Show color correction mode
-    try {
-        $cm = Resolve-ColorMode
-        if ($cm -ne 'Off') {
-            Write-Host (" Color correction: {0}" -f (Get-ColorCorrectionStatus -Mode $cm)) -ForegroundColor Green
-        }
-    } catch { }
-
     # ---- WATCHER STATUS: prominent warning when not running ----
     $watcherAlive = $false
     try { $watcherAlive = Test-WatcherAlive } catch { }
@@ -316,9 +296,6 @@ function Show-Menu {
     Write-Host ' --- NETWORK & MICROPHONE ------------------------------' -ForegroundColor Yellow
     Write-Host '  6) Apply network + mic optimizations NOW (incl. noise suppression)'
     Write-Host '  7) Revert network + mic optimizations (restore originals)'
-    Write-Host ' --- COLOR & VISIBILITY (FPS enemy clarity) -------------' -ForegroundColor Yellow
-    Write-Host '  9) Apply color correction NOW (contrast/RGB)'
-    Write-Host '  0) Remove color correction (restore normal color)'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
     Write-Host '  8) Show watcher / display / network / GPU status'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
@@ -444,12 +421,6 @@ function Show-Status {
     }
     Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
 
-    # ---- color correction status ----------------------------------
-    try {
-        $cm = Resolve-ColorMode
-        Write-Log ("Color correction: {0}" -f (Get-ColorCorrectionStatus -Mode $cm)) 'INFO'
-    } catch { Write-Log 'Color correction: n/a' 'INFO' }
-
     # ---- adaptive mid-game tuning status ---------------------------
     $adaptiveOn = if ($adaptiveCfg -and $adaptiveCfg['Enabled']) { [bool]$adaptiveCfg['Enabled'] } else { $false }
     if ($adaptiveOn) {
@@ -555,20 +526,6 @@ function Wait-MenuKey {
             Wait-MenuKey
         }
         '8' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
-        '9' {
-            try {
-                $m = Resolve-ColorMode
-                if ($m -eq 'Off') {
-                    Write-Log 'Color correction is disabled in Config.ps1 (ColorCorrection.Enabled).' 'WARN'
-                } else {
-                    if (-not (Enable-ColorCorrection -Mode $m)) {
-                        Write-Log 'Could not apply color correction (see above / logs).' 'ERROR'
-                    }
-                }
-            } catch { Write-Log $_.Exception.Message 'ERROR' }
-            Wait-MenuKey
-        }
-        '0' { try { Disable-ColorCorrection } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         { $_ -in 'Q','q' } { break menu }
         default { }
     }

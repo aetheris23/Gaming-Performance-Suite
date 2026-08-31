@@ -19,11 +19,20 @@ older hardware, and eliminates launch stutter.
   a game starts and is released the moment the last game closes.
 - **Watcher auto-stops on game close.** The background watcher now exits
   completely when your game session ends instead of idling resident in memory, so
-  there is no lingering overhead, priority/timer/network/color state is fully
+  there is no lingering overhead, priority/timer/network state is fully
   restored, and nothing keeps polling for another game.
 - **Removed recording / OBS support entirely.** The obsolete recording-software
   detection, config, menu entries and dependencies have been stripped out - fully
   focused on frame time over the capture stack.
+- **Removed color correction entirely.** The display-level contrast/RGB/gamma
+  filter (SetDeviceGammaRamp / xrandr) has been deleted - module, config,
+  menu entries and watcher auto-apply/remove logic are all gone, so there is no
+  residual GPU scanout overhead and nothing extra to revert on game exit.
+- **Less watcher overhead during hot gameplay.** Standby-memory pressure is now
+  probed only when a purge could legally run (cooldown-gated), eliminating a
+  per-poll `/proc/meminfo` / `vm_stat` read every cycle; and process affinity is
+  only re-applied when it has actually drifted, so no redundant scheduler
+  re-balance can hitch a frame mid-render (effect bursts / shooting / big maps).
 
 ## What's new in v2.4
 
@@ -55,17 +64,10 @@ older hardware, and eliminates launch stutter.
   for a Medium game - it lands on ~960&times;540). Integer-ratio modes are still
   preferred for a crisp upscale, so low-spec PCs get a real, blur-free FPS gain
   without over-shrinking.
-- **Automatic color correction (FPS enemy clarity).** New display-level filter
-  that boosts contrast/RGB/gamma in real time for easier spotting: option **9**
-  applies it now, option **0** removes it, and the watcher can auto-apply it
-  (and remove it) around a game session. Presets (Off/Vibrant/FPS/Max) and
-  per-profile gating are in `src/Config.ps1` under `ColorCorrection`. Uses the
-  GPU display gamma ramp on Windows (`SetDeviceGammaRamp`), `xrandr --gamma` on
-  Linux, and is a graceful no-op elsewhere.
 - **Non-elevated graceful degradation.** On Linux/macOS the menu and watcher no
   longer abort when run without `sudo`. A standard-user session warns once and
-  still applies everything that works without root (display scaling, color
-  correction, game detection), skipping only priority/power/network writes.
+  still applies everything that works without root (display scaling,
+  game detection), skipping only priority/power/network writes.
 - **Fixed a watcher crash on the idle heartbeat.** A `[datetime]::MinValue`
   sentinel made the first idle-heartbeat math overflow `Int32` (~6.4e13 ms)
   and throw, silently killing a watcher that had been left running with no game
@@ -413,48 +415,6 @@ What low-spec mode does:
 - **Gentler standby purges**: only when RAM critically low, with cooldown gates
 - **Throttled exit checks**: process exit scans every other cycle during gaming
 
-## Color correction - FPS enemy clarity
-
-An in-place display filter that boosts contrast/RGB/gamma so enemies and
-crosshairs stand out in bright or washed-out scenes.
-
-- **Option 9** in the menu applies it immediately; **option 0** removes it and
-  restores the original color.
-- The **watcher** can also auto-apply it the moment a matching game launches
-  and remove it again when the session ends (no permanent change).
-- It is implemented as a live GPU display ramp/filter, so it does **not**
-  require capture/overlay injection and works while playing:
-  - **Windows** - `SetDeviceGammaRamp` / `GetDeviceGammaRamp` (GDI32); the
-    original ramp is captured and cleanly restored.
-  - **Linux** - `xrandr --gamma` (per-output RGB gamma), also restored on exit.
-  - **macOS / other** - logged as unsupported and skipped gracefully.
-
-Configure in `src/Config.ps1` under `ColorCorrection`:
-
-```powershell
-ColorCorrection = @{
-    Enabled     = $true      # $false = feature off (never auto-applied)
-    Mode        = 'Auto'     # Auto | Off | Vibrant | FPS | Max | Red | Tritanopia | Protanopia | Deuteranopia
-    OnlyProfiles= @('Competitive', 'Default')   # game profiles that trigger it
-}
-```
-
-> **New in this build: `Auto` mode.** Instead of relying on one hand-picked
-> color, `Auto` derives the **strongest, most balanced** contrast/RGB preset
-> from the running game's profile every launch - so enemies stay clearly
-> visible **no matter which color is configured** (Red, Purple/Tritanopia,
-> Yellow/Protanopia or Yellow/Deuteranopia). Competitive/esports titles get
-> the most aggressive separation curve; emulators and AAA titles get a
-> strong-but-faithful boost. Pick `Auto` and visibility is handled for you.
-
-The preset table (`Get-ColorPreset`) tunes
-red/green/blue gain, gamma and contrast per mode; `Max` is the strongest
-for dark competitive games. The color-blind presets mimic classic FPS
-filters: `Red` (strong red boost), `Tritanopia` (purple tint),
-`Protanopia` (yellow tint) and `Deuteranopia` (yellow/warm tint) - pick
-whichever makes enemy outlines pop clearest for you in Valorant and
-switch it any time (menu option 9 re-applies instantly).
-
 ## GPU detection - integrated AND discrete
 
 `src/GpuDetect.psm1` builds a full graphics-adapter inventory at startup and
@@ -595,7 +555,7 @@ Start-Watcher-Hidden.sh       (generated by build) background watcher (Linux/mac
 src/
   Main.ps1                    menu + hidden background mode (-BackgroundWatch)
   Config.ps1                  game list, thresholds, scale %, low-spec mode,
-                              network tuning, voice clarity, color correction
+                              network tuning, voice clarity
   Common.psm1                 logging, privileges, cross-platform detection,
                               stop-signal / single-instance + recovery journal
   GameBoost.psm1              FPS stability engine + watcher loop (stutter-free,
@@ -606,9 +566,6 @@ src/
                               (DXGI / sysfs+lspci / system_profiler)
   NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
                               (registry on Windows, sysctl on Linux/macOS)
-  ColorCorrect.psm1           automatic display filter: contrast/RGB/gamma
-                              (SetDeviceGammaRamp on Windows, xrandr --gamma
-                              on Linux, no-op elsewhere) for FPS enemy clarity
   VoiceDSP.psm1               microphone noise suppression + echo cancellation
                               (Windows 10 1809+/11 native DSP + embedded real-time
                               spectral suppressor + external engine)

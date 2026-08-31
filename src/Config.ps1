@@ -182,31 +182,6 @@
         AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
     }
 
-    # ---- Automatic color correction --------------------------
-    # Display-level contrast / RGB balance to make enemies stand
-    # out in FPS and competitive games (works fullscreen + borderless;
-    # applied only while such a game runs, removed on exit).
-    #   Mode:
-    #     'Auto'         - (RECOMMENDED) AUTO enemy visibility: picks the
-    #                      strongest, most balanced contrast/RGB preset per
-    #                      game profile automatically, so enemies stay visible
-    #                      regardless of which color you choose
-    #     'Vibrant'      - moderate boost (safe default)
-    #     'FPS'          - stronger contrast + balance for dark enemies
-    #     'Max'          - aggressive contrast + vivid colors
-    #     'Red'          - color-blind flag: strong red boost (enemy outlines pop)
-    #     'Tritanopia'   - color-blind flag: purple tint (blue/yellow deficient)
-    #     'Protanopia'   - color-blind flag: yellow tint (red-deficient)
-    #     'Deuteranopia' - color-blind flag: yellow/warm tint (green-deficient)
-    #     'Off'          - disabled
-    #   OnlyProfiles : apply only while games of these profiles run.
-    #   (See src/ColorCorrect.psm1 for the per-mode curves.)
-    ColorCorrection = @{
-        Enabled        = $true    # master switch
-        Mode           = 'Auto'   # 'Auto' | 'Vibrant' | 'FPS' | 'Max' | 'Red' | 'Tritanopia' | 'Protanopia' | 'Deuteranopia' | 'Off'
-        OnlyProfiles   = @('Competitive', 'Default')   # watch profiles that get the filter
-    }
-
     # ---- Adaptive mid-game tuning ---------------------------------
     # Smooth FPS during heavy moments (skill/effect bursts, large maps).
     # When a game runs, the watcher monitors memory pressure and re-asserts

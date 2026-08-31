@@ -41,9 +41,6 @@ if (-not (Get-Module -Name 'GpuDetect')) {
 if (-not (Get-Module -Name 'NetTune')) {
     Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
 }
-if (-not (Get-Module -Name 'ColorCorrect')) {
-    Import-Module (Join-Path $PSScriptRoot 'ColorCorrect.psm1') -Force
-}
 
 function Write-GpuInventory {
     <# Logs every detected adapter once (integrated AND discrete),
@@ -708,7 +705,11 @@ function Invoke-ProcessBoost {
             }
         }
 
-        # Spread the game off the interrupt core (USB/NIC DPCs land there)
+        # Spread the game off the interrupt core (USB/NIC DPCs land there).
+        # Only ever WRITE the affinity when it has actually drifted from the
+        # computed mask: a redundant affinity update on an already-pinned game
+        # forces a scheduler re-balance, which can cause a visible micro-stutter
+        # at the very moment it is applied mid-render (effect bursts, shooting).
         $avoid = @($Profile.AvoidCores)
         $total = [Environment]::ProcessorCount
         if ($MaxCores -gt 0 -and $MaxCores -lt $total) { $total = $MaxCores }
@@ -717,7 +718,12 @@ function Invoke-ProcessBoost {
             for ($i = 0; $i -lt $total; $i++) {
                 if ($avoid -notcontains $i) { $mask = $mask -bor ([long]1 -shl $i) }
             }
-            $Process.ProcessorAffinity = [IntPtr]$mask
+            try {
+                $cur = $Process.ProcessorAffinity.ToInt64()
+                if ($cur -ne $mask) { $Process.ProcessorAffinity = [IntPtr]$mask }
+            } catch {
+                $Process.ProcessorAffinity = [IntPtr]$mask
+            }
         }
     } catch {
         Write-Log "Could not fully boost PID $($Process.Id): $_" 'WARN'
@@ -1042,7 +1048,6 @@ function Start-GameWatcher {
         [hashtable]$VoiceSettings      = @{},
         [hashtable]$NoiseSuppressionSettings = @{ Enabled = $false },
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
-        [hashtable]$ColorSettings     = @{ Enabled = $false; Mode = 'Off' },
         [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
@@ -1053,14 +1058,14 @@ function Start-GameWatcher {
     # Windows must be elevated for the registry/driver tweaks - the .bat
     # launcher self-elevates, so a hard requirement there is correct.
     # On Unix we degrade GRACEFULLY instead of throwing: a non-root watcher
-    # can still detect games, apply display scaling + color correction via
-    # xrandr, and log; the root-only operations (priority/power/network/
-    # purge) are simply skipped with a single warning. This is what lets
-    # option 3 "just run" without crashing on any platform.
+    # can still detect games, apply display scaling via xrandr, and log; the
+    # root-only operations (priority/power/network/purge) are simply skipped
+    # with a single warning. This is what lets option 3 "just run" without
+    # crashing on any platform.
     if (Test-SuitePlatformWindows) {
         Assert-AdminOrThrow
     } elseif (-not (Test-Administrator)) {
-        Write-Log 'Watcher running WITHOUT root: process-priority/power/network-tuning are skipped; display scaling + color correction (xrandr) still work.' 'WARN'
+        Write-Log 'Watcher running WITHOUT root: process-priority/power/network-tuning are skipped; display scaling (xrandr) still works.' 'WARN'
     }
 
     # ---- recover anything a previous unclean session left behind ----
@@ -1096,23 +1101,6 @@ function Start-GameWatcher {
             $ExtendedIdlePollSeconds = [Math]::Max($ExtendedIdlePollSeconds, 90)
             Write-Log ("  - Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $PollSeconds, $IdlePollSeconds, $ExtendedIdlePollSeconds) 'INFO'
         }
-    }
-
-    # ---- resolve color-correction settings ---------------------
-    $colorOn     = $false
-    $colorMode   = 'Off'
-    $colorProfiles = @('Competitive', 'Default')
-    if ($ColorSettings) {
-        if ($ColorSettings.ContainsKey('Enabled')) { $colorOn = [bool]$ColorSettings['Enabled'] }
-        if ($ColorSettings.ContainsKey('Mode'))    { $colorMode = [string]$ColorSettings['Mode'] }
-        if ($ColorSettings.ContainsKey('OnlyProfiles')) {
-            $op = @($ColorSettings['OnlyProfiles'])
-            if ($op.Count -gt 0) { $colorProfiles = @($op | ForEach-Object { [string]$_ }) }
-        }
-    }
-    $colorActiveThis = $false   # filter currently applied by us
-    if ($colorOn -and $colorMode -and $colorMode -ne 'Off') {
-        Write-Log ("Automatic color correction ENABLED (mode '{0}') for profiles: {1}." -f $colorMode, ($colorProfiles -join ', ')) 'INFO'
     }
 
     # ---- resolve adaptive mid-game tuning -------------------------------
@@ -1431,17 +1419,6 @@ function Start-GameWatcher {
                                 Write-Log ("Mic noise suppression failed: {0}" -f $_.Exception.Message) 'WARN'
                             }
                         }
-
-                        # ---- automatic color correction for FPS clarity ----
-                        # Apply once per game session when a matching profile starts,
-                        # and keep it until NO qualifying game is left running.
-                        # In 'Auto' mode the profile name drives the preset so enemy
-                        # visibility is guaranteed regardless of the configured color.
-                        if ($colorOn -and -not $colorActiveThis -and ($colorProfiles -contains $profName)) {
-                            if (Enable-ColorCorrection -Mode $colorMode -ProfileName $profName) {
-                                $colorActiveThis = $true
-                            }
-                        }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
                         $needBoost = $true
@@ -1492,11 +1469,6 @@ function Start-GameWatcher {
                         $journal['scaledActive'] = $false
                         $journal['nativeMode']   = $null
                         Save-Journal
-                    }
-                    if ($colorActiveThis) {
-                        try { Disable-ColorCorrection } catch { }
-                        $colorActiveThis = $false
-                        Write-Log 'Color correction removed (game session ended).' 'INFO'
                     }
                     Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
                     if ($fgByUs) { $journal['fgToolPid'] = 0; Save-Journal }
@@ -1616,27 +1588,18 @@ function Start-GameWatcher {
             # floor AND at most once per cooldown window. Skipped entirely
             # in low-spec mode.
             if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
-                $freeMB = Get-FreeRamMB
-                $pressure = $false
-                $pressureNote = ''
-
-                # 1) Classic fixed-floor purge (behaves exactly as before).
-                if (([datetime]::UtcNow - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds) {
-                    if ($freeMB -lt $CriticalRamFloorMB) {
-                        Write-Log ("Free RAM critical ({0} MB) - cooldown-gated standby purge..." -f $freeMB) 'WARN'
-                        Clear-StandbyMemory
-                        $lastPurgeUtc = [datetime]::UtcNow
-                        $pressure = $true
-                    }
-                }
-
-                # 2) ADAPTIVE purge for skill-effect / large-map load spikes.
-                #    Uses a RAM-relative floor (so it scales with the machine,
-                #    big or small) and tightens its cooldown while pressure
-                #    persists, reacting to bursts without stalling a frame.
+                $nowMs = [datetime]::UtcNow
+                # Only probe free RAM when a purge could ACTUALLY run. Both
+                # purge paths are cooldown-gated, so probing memory on every
+                # poll right after a purge is pure waste - it reads /proc/meminfo
+                # / vm_stat each cycle for zero benefit. Skipping the probe until
+                # a path is eligible trims steady-state watcher CPU during the
+                # exact moments (map rendering, effect bursts) the game is busy.
+                $classicEligible = (($nowMs - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds)
+                $adaptiveEligible = $false
                 if ($adaptiveOn) {
-                    # Resolve total RAM once if the probe failed earlier
                     if ($adaptiveTotalMB -le 0) {
+                        # Resolve total RAM once if the probe failed earlier
                         if (Test-SuitePlatformWindows) {
                             try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
                         } elseif ($IsLinux) {
@@ -1646,22 +1609,44 @@ function Start-GameWatcher {
                         }
                     }
                     $adaptiveFloorMB = if ($adaptiveTotalMB -gt 0) { [int]($adaptiveTotalMB * $adaptiveFloorPct / 100.0) } else { $CriticalRamFloorMB }
-
                     # Under pressure the cooldown tightens (down to half the
                     # configured value) so recurring bursts are caught sooner;
                     # it relaxes back out as soon as memory is healthy again.
-                    if ($freeMB -lt $adaptiveFloorMB) {
-                        $adaptiveConsecutive++
-                        $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, $adaptiveConsecutive - 1))))
-                        $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; spike burst detected"
-                        if (( [datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs) {
-                            Write-Log ("Adaptive purge: free RAM {0} MB under {1} ({2})." -f $freeMB, $adaptiveFloorMB, $pressureNote) 'WARN'
+                    $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, $adaptiveConsecutive - 1))))
+                    $adaptiveEligible = (($nowMs - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs)
+                }
+
+                # No purge could legally run this cycle -> skip the RAM probe.
+                if (-not $classicEligible -and -not $adaptiveEligible) { }
+                else {
+                    $freeMB = Get-FreeRamMB
+                    $pressureNote = ''
+
+                    # 1) Classic fixed-floor purge (behaves exactly as before).
+                    if ($classicEligible) {
+                        if ($freeMB -lt $CriticalRamFloorMB) {
+                            Write-Log ("Free RAM critical ({0} MB) - cooldown-gated standby purge..." -f $freeMB) 'WARN'
                             Clear-StandbyMemory
-                            $adaptiveLastUtc = [datetime]::UtcNow
-                            $pressure = $true
+                            $lastPurgeUtc = [datetime]::UtcNow
                         }
-                    } else {
-                        $adaptiveConsecutive = 0
+                    }
+
+                    # 2) ADAPTIVE purge for skill-effect / large-map load spikes.
+                    #    Uses a RAM-relative floor (so it scales with the machine,
+                    #    big or small) and tightens its cooldown while pressure
+                    #    persists, reacting to bursts without stalling a frame.
+                    if ($adaptiveOn) {
+                        if ($freeMB -lt $adaptiveFloorMB) {
+                            $adaptiveConsecutive++
+                            $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; spike burst detected"
+                            if (( [datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs) {
+                                Write-Log ("Adaptive purge: free RAM {0} MB under {1} ({2})." -f $freeMB, $adaptiveFloorMB, $pressureNote) 'WARN'
+                                Clear-StandbyMemory
+                                $adaptiveLastUtc = [datetime]::UtcNow
+                            }
+                        } else {
+                            $adaptiveConsecutive = 0
+                        }
                     }
                 }
             }
@@ -1759,7 +1744,6 @@ function Start-GameWatcher {
         Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
         $journal['fgToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
-        if ($colorActiveThis) { try { Disable-ColorCorrection } catch { } }   # never leave the color filter on
         if ($nsEngaged) { try { Disable-VoiceNoiseSuppression; Stop-NoiseSuppressionExternal } catch { } }  # never leave mic DSP on
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore

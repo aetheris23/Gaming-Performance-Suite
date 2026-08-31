@@ -202,8 +202,7 @@ $srcFiles = @(
     'src\DisplayScale.psm1',
     'src\GameBoost.psm1',
     'src\GpuDetect.psm1',
-    'src\NetTune.psm1',
-    'src\ColorCorrect.psm1'
+    'src\NetTune.psm1'
 )
 
 $missing = @($srcFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })
