@@ -202,6 +202,16 @@
         ReassertEveryCycles  = 3
     }
 
+    # ---- Competitive enemy highlighting ----------------------
+    # These are the in-game Valorant enemy-highlight presets.  The suite
+    # deliberately does not install a system-wide gamma/color filter: that
+    # would tint the whole desktop, cost GPU scanout time, and can interfere
+    # with anti-cheat.  Set the matching preset in the game's settings.
+    EnemyHighlight = @{
+        Enabled = $true
+        Profile = 'Red'   # Red | PurpleTritanopia | YellowProtanopia | YellowDeuteranopia
+    }
+
     # ---- Per-game classification -----------------------------
     # The watcher auto-detects: Emulator / Steam / Competitive / Default
     # (by install path, then process name). Force a classification here:
@@ -337,5 +347,6 @@
         ElevateMicBoost = $true
         ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
         ExternalArgs    = ''
+        Aggressiveness  = 1.55   # 0.5-2.0; higher removes more background sound
     }
 }

@@ -24,10 +24,13 @@ older hardware, and eliminates launch stutter.
 - **Removed recording / OBS support entirely.** The obsolete recording-software
   detection, config, menu entries and dependencies have been stripped out - fully
   focused on frame time over the capture stack.
-- **Removed color correction entirely.** The display-level contrast/RGB/gamma
-  filter (SetDeviceGammaRamp / xrandr) has been deleted - module, config,
-  menu entries and watcher auto-apply/remove logic are all gone, so there is no
-  residual GPU scanout overhead and nothing extra to revert on game exit.
+- **Competitive enemy-highlight presets.** `src/Config.ps1` now exposes the
+  Valorant presets `Red`, `PurpleTritanopia`, `YellowProtanopia`, and
+  `YellowDeuteranopia` for a consistent setup. The suite intentionally does
+  not apply a whole-desktop gamma/color matrix: that would tint menus and
+  non-game content, add scanout work on low-spec hardware, and may conflict
+  with anti-cheat. Select the configured preset in Valorant's enemy-highlight
+  setting.
 - **Less watcher overhead during hot gameplay.** Standby-memory pressure is now
   probed only when a purge could legally run (cooldown-gated), eliminating a
   per-poll `/proc/meminfo` / `vm_stat` read every cycle; and process affinity is

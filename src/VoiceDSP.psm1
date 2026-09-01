@@ -434,10 +434,13 @@ namespace SuiteVoice
         public static string Start(double aggressiveness)
         {
             if (_running) { try { Stop(); } catch { } }
-            _aAggr = aggressiveness < 0.5 ? 0.5 : (aggressiveness > 1.6 ? 1.6 : aggressiveness);
+            // Keep the expensive FFT fixed at 512 samples, but allow a deeper
+            // spectral subtraction pass for loud, intermittent background
+            // speech and fans.  The soft floor preserves consonants.
+            _aAggr = aggressiveness < 0.5 ? 0.5 : (aggressiveness > 2.0 ? 2.0 : aggressiveness);
             // Spectral floor: higher aggressiveness -> deeper suppression of
             // residual musical noise, still keeps low-level voice harmonics.
-            _noiseFloor = _aAggr >= 1.3f ? 0.02f : 0.06f;
+            _noiseFloor = _aAggr >= 1.55f ? 0.008f : (_aAggr >= 1.3f ? 0.02f : 0.06f);
 
             try
             {
@@ -863,7 +866,7 @@ function Enable-VoiceNoiseSuppression {
         on the default communications microphone. Returns $true on success.
     #>
     [CmdletBinding()]
-    param()
+    param([double]$Aggressiveness = 1.55)
 
     if (-not (Test-VoiceDspPlatform)) {
         Write-Log 'Mic DSP: not supported on this Windows build (needs Windows 10 1809+). Falling back to MMCSS priority only.' 'WARN'
@@ -877,7 +880,7 @@ function Enable-VoiceNoiseSuppression {
         Ensure-VoiceDspEngine
         # The DSP stays engaged only while a capture stream is held open, so we
         # spawn a hidden host process that owns the stream until told to stop.
-        $launched = Start-VoiceDspHost
+        $launched = Start-VoiceDspHost -Aggressiveness $Aggressiveness
         if ($launched) {
             Write-Log 'Mic DSP engaged: deep noise suppression + echo cancellation active (background noise, distant voices & game/speaker echo removed).' 'OK'
             return $true
@@ -920,6 +923,7 @@ function Get-VoiceDspHostScript {
 }
 
 function Start-VoiceDspHost {
+    param([double]$Aggressiveness = 1.55)
     if (-not (Test-Path $script:VoiceDspTokensDir)) { New-Item -ItemType Directory -Path $script:VoiceDspTokensDir -Force | Out-Null }
     Remove-Item $script:VoiceDspStopFile -Force -ErrorAction SilentlyContinue
 
@@ -930,7 +934,9 @@ function Start-VoiceDspHost {
             else { (Get-Command pwsh -ErrorAction SilentlyContinue).Source }
     if (-not $pwsh) { return $false }
 
-    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $hostScript, "-Root", $mainsrc)
+    $safeAggressiveness = [Math]::Max(0.5, [Math]::Min(2.0, $Aggressiveness))
+    $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $hostScript,
+              "-Root", $mainsrc, '-Aggressiveness', "$safeAggressiveness")
     try {
         $p = Start-Process -FilePath $pwsh -ArgumentList $args -WindowStyle Hidden -PassThru
         Start-Sleep -Milliseconds 600
@@ -1051,11 +1057,11 @@ function Test-VoiceDeepNSPresent {
 function Start-VoiceRealTimeFilter {
     <#
         Starts the embedded real-time spectral noise suppressor. Returns a
-        status string; 'running:...' indicates success. Aggressive: higher
-        strips more background (0.5 low .. 1.5 max). Never throws.
+        status string; 'running:...' indicates success.         Aggressive: higher strips more background (0.5 low .. 2.0 max).
+        Never throws.
     #>
     [CmdletBinding()]
-    param([double]$Aggressive = 1.3)
+    param([double]$Aggressive = 1.55)
     try {
         Ensure-VoiceDspEngine
         return [SuiteVoice.RealTimeNoiseSuppressor]::Start($Aggressive)

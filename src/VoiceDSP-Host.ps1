@@ -15,7 +15,10 @@
 #    powershell -NoProfile -File VoiceDSP-Host.ps1 -Root <suite src dir>
 # ============================================================
 
-param([string]$Root = $PSScriptRoot)
+param(
+    [string]$Root = $PSScriptRoot,
+    [double]$Aggressiveness = 1.55
+)
 
 $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath($Root)
@@ -59,7 +62,7 @@ try {
         try { $deepNs = (Test-VoiceDeepNSPresent) } catch { $deepNs = $false }
     }
     if (-not $deepNs) {
-        $rtStatus = Start-VoiceRealTimeFilter -Aggressive 1.3
+        $rtStatus = Start-VoiceRealTimeFilter -Aggressive $Aggressiveness
         if ($rtStatus -like 'running:*') {
             $realTimeActive = $true
             Write-Log ("Mic DSP: Windows has no Deep Noise Suppression here - real-time software filter ENGAGED ({0}). Fans, traffic, broadcasts & distant speech are now stripped from the mic; only your voice passes through." -f $rtStatus) 'OK'

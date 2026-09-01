@@ -1171,6 +1171,11 @@ function Start-GameWatcher {
     if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ExternalArgs')) {
         $nsExternalArgs = [string]$NoiseSuppressionSettings['ExternalArgs']
     }
+    $nsAggressiveness = 1.55
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('Aggressiveness')) {
+        $nsAggressiveness = [double]$NoiseSuppressionSettings['Aggressiveness']
+    }
+    $nsAggressiveness = [Math]::Max(0.5, [Math]::Min(2.0, $nsAggressiveness))
     $nsEngaged = $false   # $true once the DSP / external engine is running this session
 
     # Recovery journal - written through at EVERY state change so any
@@ -1409,7 +1414,7 @@ function Start-GameWatcher {
                                 }
                                 $engagedDsp = $false
                                 if (-not $engagedExternal -and (Get-Command Enable-VoiceNoiseSuppression -ErrorAction SilentlyContinue)) {
-                                    $engagedDsp = Enable-VoiceNoiseSuppression
+                                    $engagedDsp = Enable-VoiceNoiseSuppression -Aggressiveness $nsAggressiveness
                                 }
                                 if ($engagedExternal -or $engagedDsp) {
                                     $nsEngaged = $true
@@ -1732,6 +1737,13 @@ function Start-GameWatcher {
 
             # Park on the stop signal (instant on Windows) or poll the stop
             # marker in 250ms slices elsewhere, then loop again.
+            # Process.GetProcesses returns live handles. Dispose the snapshot
+            # every cycle so long sessions do not accumulate kernel handles or
+            # trigger expensive full-process GC pauses.
+            foreach ($procSnapshot in @($allProc)) {
+                try { $procSnapshot.Dispose() } catch { }
+            }
+            $allProc = @()
             $stopping = Wait-StopOrTimeout -Milliseconds $waitMs -StopEvent $StopEvent
             if ($stopping) {
                 Write-Log 'Stop signal received.' 'ACTION'

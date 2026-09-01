@@ -403,6 +403,12 @@ function Show-Status {
         Write-Log 'Mic noise suppression: DISABLED in Config.ps1' 'INFO'
     }
 
+    $enemyCfg = if ($cfg['EnemyHighlight']) { $cfg['EnemyHighlight'] } else { @{} }
+    $enemyProfile = if ($enemyCfg['Profile']) { [string]$enemyCfg['Profile'] } else { 'Red' }
+    $validEnemyProfiles = @('Red','PurpleTritanopia','YellowProtanopia','YellowDeuteranopia')
+    if ($enemyProfile -notin $validEnemyProfiles) { $enemyProfile = 'Red' }
+    Write-Log ("Enemy highlight preset: {0} (set this preset in Valorant; no system-wide color filter is applied)" -f $enemyProfile) 'INFO'
+
     try {
         $leg = Resolve-LegacySettings
         $lgState = if ($leg.IsLegacy) { 'ACTIVE (legacy-safe tweaks)' } else { 'off (standard profile)' }
@@ -509,7 +515,8 @@ function Wait-MenuKey {
                     if ($nsCfg['ExternalEngine']) {
                         Start-NoiseSuppressionExternal -Engine $nsCfg['ExternalEngine'] -Args $nsCfg['ExternalArgs']
                     } elseif (Test-VoiceDspPlatform) {
-                        Enable-VoiceNoiseSuppression
+                        $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.55 }
+                        Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg
                     } else {
                         Write-Log 'Mic DSP unavailable on this platform (needs Windows 10 1809 or later).' 'WARN'
                     }
