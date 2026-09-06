@@ -1028,10 +1028,64 @@ function Undo-FsoCompatFlags {
 #    - Adaptive timing based on hardware capability
 #    All changes are mirrored to the crash-recovery journal.
 # ------------------------------------------------------------
+# Foreground game selection
+# ------------------------------------------------------------
+function Get-ActiveWindowProcessId {
+    <#
+        Returns the process owning the foreground window, or 0 when the
+        desktop cannot provide that information. A missing desktop backend
+        must not prevent headless game detection.
+    #>
+    if (Test-SuitePlatformWindows) {
+        try {
+            if (-not ('Suite.ForegroundWindow' -as [type])) {
+                Add-Type -Namespace Suite -Name ForegroundWindow -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+'@
+            }
+            $window = [Suite.ForegroundWindow]::GetForegroundWindow()
+            if ($window -eq [IntPtr]::Zero) { return 0 }
+            $pid = [uint32]0
+            [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$pid)
+            return [int]$pid
+        } catch { return 0 }
+    }
+
+    if ($IsLinux) {
+        try {
+            $active = (& xprop -root _NET_ACTIVE_WINDOW 2>$null) -join ' '
+            if ($active -match 'window id # (0x[0-9a-f]+)') {
+                $pidLine = (& xprop -id $Matches[1] _NET_WM_PID 2>$null) -join ' '
+                if ($pidLine -match '=\s*(\d+)') { return [int]$Matches[1] }
+            }
+        } catch { }
+    } elseif ($IsMacOS) {
+        try {
+            $pid = (& osascript -e 'tell application "System Events" to unix id of first process whose frontmost is true' 2>$null)
+            if ("$pid" -match '^\s*(\d+)\s*$') { return [int]$Matches[1] }
+        } catch { }
+    }
+    return 0
+}
+
+function Test-ActiveGameProcess {
+    param(
+        [Parameter(Mandatory)]$Process,
+        [bool]$ActiveOnly = $true
+    )
+    if (-not $ActiveOnly) { return $true }
+    $activePid = Get-ActiveWindowProcessId
+    if ($activePid -le 0) { return $true }
+    return ([int]$Process.Id -eq $activePid)
+}
+
+# ------------------------------------------------------------
 function Start-GameWatcher {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$GameNames,
+        [bool]$ActiveGameOnly = $true,
         [int]$PollSeconds = 10,              # scan cadence while a game is running
         [int]$IdlePollSeconds = 25,          # slower cadence while NO game runs (idle load)
         [int]$ExtendedIdlePollSeconds = 60,  # even slower when idle for a long time (ultra-low CPU)
@@ -1224,8 +1278,8 @@ function Start-GameWatcher {
         }
     }
 
-    Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching: {2}" -f `
-        $PollSeconds, [Math]::Max($PollSeconds, $IdlePollSeconds), ($GameNames -join ',')) 'ACTION'
+    Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching active games only: {2}" -f `
+        $PollSeconds, [Math]::Max($PollSeconds, $IdlePollSeconds), $ActiveGameOnly) 'ACTION'
     Write-Log 'Games are auto-classified (Emulator / Steam / Competitive / Android / Default) on launch.' 'INFO'
     if ($protectedNames.Count -gt 0) {
         Write-Log ("Voice apps protected from silencing: {0}" -f (($protectedNames | ForEach-Object { $_.TrimEnd('*') }) -join ', ')) 'INFO'
@@ -1309,7 +1363,9 @@ function Start-GameWatcher {
     # instead snapshot the table ONCE per poll and run cheap lowercase
     # wildcard matches in-process - cheaper on every platform, and on a
     # low-spec machine this is the difference between 1% and 0.05% CPU.
-    $gameWatchPatterns = @($GameNames | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $gameWatchPatterns = @($GameNames | ForEach-Object {
+        ([string]$_ -replace '\.exe$','').ToLowerInvariant()
+    } | Where-Object { $_ -and $_ -notmatch '^(steam|steamservice|steamwebhelper|riotclientservices|gamingservices)$' })
 
     try {
         while ($true) {
@@ -1326,7 +1382,8 @@ function Start-GameWatcher {
                 try { $n = $_.ProcessName } catch { }
                 if (-not $n) { return }
                 $nl = $n.ToLowerInvariant()
-                if (Test-MatchAny -Name $nl -Patterns $gameWatchPatterns) {
+                if ((Test-MatchAny -Name $nl -Patterns $gameWatchPatterns) -and
+                    (Test-ActiveGameProcess -Process $_ -ActiveOnly $ActiveGameOnly)) {
                     $_                     # game - keep the Process object
                 }
             })

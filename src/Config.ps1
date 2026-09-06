@@ -8,15 +8,12 @@
     # Process names (WITHOUT .exe) to auto-boost when detected.
     # Expanded to cover all major platforms and game sources.
     GameProcesses = @(
-        # === Riot Games ===
+        # === Riot Games (actual game processes, not launchers) ===
         'VALORANT-Win64'
-        'RiotClientServices'
-        'LeagueClient'
         'League of Legends'
         'lol_dragon'
 
         # === Steam ===
-        'steam', 'steamservice', 'steamwebhelper'
         'hl2', 'cs2', 'csgo', 'dota2'
         'GTA5', 'GTA5.exe', 'RDR2'
         'FortniteClient-Win64Shipping'
@@ -89,10 +86,11 @@
         '夜神模拟器', 'Nox'
         'bluestacks'
 
-        # === Xbox app / Microsoft Store ===
-        'gamingservices'
-        'Xbox.TCUI'
-        'ms-store'
+        # === Roblox / Android games ===
+        'RobloxPlayerBeta'
+        'com.mobile.legends'
+        'com.levelinfinite.haop'
+        'com.tencent.tmgp.sgame'
 
         # === EA ===
         'EADesktop'
@@ -121,10 +119,12 @@
         'oculus'
         'openvr'
 
-        # === General gaming patterns ===
-        'game', 'gamer', 'gaming'
     )
 
+    # Only boost the game owning the active window. If the desktop backend
+    # cannot report a foreground process, the watcher safely falls back to
+    # matching the configured game list.
+    ActiveGameOnly         = $true
     WatcherPollSeconds     = 10      # scan cadence while a game is running
     IdlePollSeconds        = 25      # slower cadence while NO game runs (lighter idle load)
     ExtendedIdlePollSeconds= 60      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
@@ -347,6 +347,6 @@
         ElevateMicBoost = $true
         ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
         ExternalArgs    = ''
-        Aggressiveness  = 1.55   # 0.5-2.0; higher removes more background sound
+        Aggressiveness  = 1.85   # 0.5-2.0; higher removes more background sound
     }
 }

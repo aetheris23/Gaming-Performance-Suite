@@ -36,6 +36,13 @@ older hardware, and eliminates launch stutter.
   per-poll `/proc/meminfo` / `vm_stat` read every cycle; and process affinity is
   only re-applied when it has actually drifted, so no redundant scheduler
   re-balance can hitch a frame mid-render (effect bursts / shooting / big maps).
+- **Active-game-only watching.** Launchers and generic helper processes are no
+  longer watched by default. On desktop systems the watcher selects the game
+  owning the foreground window, with a safe process-list fallback when the
+  desktop cannot report one. Add a title's process name to `GameProcesses` for
+  additional PC or Android/Termux games.
+- **Automatic log cleanup.** Diagnostic `suite_*.log` files are removed when a
+  session exits and stale files are cleared at the next startup.
 
 ## What's new in v2.4
 

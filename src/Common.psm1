@@ -10,6 +10,24 @@ $script:LogDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPat
 if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path $script:LogDir | Out-Null }
 $script:LogFile = Join-Path $script:LogDir ("suite_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
+function Remove-SuiteLogs {
+    <#
+        Logs are diagnostic-only session artifacts. Remove old files at
+        startup and the current file when PowerShell exits so repeated games
+        cannot slowly accumulate runtime data.
+    #>
+    try {
+        Get-ChildItem -Path $script:LogDir -Filter 'suite_*.log' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+Remove-SuiteLogs
+$logPathForExit = $script:LogFile
+Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+    Remove-Item -LiteralPath $logPathForExit -Force -ErrorAction SilentlyContinue
+} | Out-Null
+
 function Write-Log {
     param(
         [Parameter(Mandatory)][string]$Message,
@@ -615,7 +633,7 @@ function Get-PlatformInfo {
 }
 
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
-    Get-SuiteRoot, Get-LogPath, Test-SuitePlatformWindows,
+    Remove-SuiteLogs, Get-SuiteRoot, Get-LogPath, Test-SuitePlatformWindows,
     Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
     New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive, Test-WatcherRunning,
     New-WatcherInstanceGuard, Test-WatcherLockHeld, Test-StopRequested, Set-StopRequested,

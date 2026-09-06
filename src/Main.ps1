@@ -27,6 +27,7 @@ Import-Module (Join-Path $root 'VoiceDSP.psm1')  -Force
 $cfgPath = Join-Path $root 'Config.ps1'
 $cfg = if (Test-Path $cfgPath) { & $cfgPath } else { @{} }
 $gameNames  = if ($cfg['GameProcesses'])      { $cfg['GameProcesses'] }      else { @('VALORANT-Win64','pcsx2','cs2') }
+$activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGameOnly'] } else { $true }
 $pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 10 }
 $ramFloorMB = if ($cfg['FreeRamThresholdMB']) { [int]$cfg['FreeRamThresholdMB'] } else { 2048 }
 $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
@@ -209,6 +210,7 @@ function Invoke-Watcher {
         }
 
         Start-GameWatcher -GameNames $gameNames -PollSeconds $pollSecs `
+            -ActiveGameOnly:([bool]$activeGameOnly) `
             -IdlePollSeconds $idleSecs -ExtendedIdlePollSeconds $extIdleSecs `
             -IdleHeartbeatMinutes $heartbeatMin `
             -FreeRamThresholdMB $ramFloorMB `
@@ -241,6 +243,7 @@ if ($BackgroundWatch) {
         Write-Log $_.Exception.Message 'ERROR'
     } finally {
         if ($stopEvt) { $stopEvt.Dispose() }
+        Remove-SuiteLogs
     }
     exit 0
 }
@@ -448,10 +451,11 @@ function Wait-MenuKey {
 }
 
 # ---------------- main loop ----------------
-:menu while ($true) {
-    Show-Banner
-    Show-Menu
-    switch (Read-Host 'Select an option') {
+try {
+    :menu while ($true) {
+        Show-Banner
+        Show-Menu
+        switch (Read-Host 'Select an option') {
         '1' { try { Invoke-FullOptimization } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '2' { try { Clear-StandbyMemory } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '3' {
@@ -486,8 +490,8 @@ function Wait-MenuKey {
                                 Write-Log '(or use the Start-Watcher-Hidden.sh launcher from a terminal.)' 'WARN'
                                 Wait-MenuKey
                                 continue
+                                }
                             }
-                        }
                     }
                     # Wait for the watcher to announce itself (instance mutex /
                     # pid file) instead of a fixed 1s guess - module import and
@@ -515,12 +519,12 @@ function Wait-MenuKey {
                     if ($nsCfg['ExternalEngine']) {
                         Start-NoiseSuppressionExternal -Engine $nsCfg['ExternalEngine'] -Args $nsCfg['ExternalArgs']
                     } elseif (Test-VoiceDspPlatform) {
-                        $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.55 }
+                        $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.85 }
                         Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg
                     } else {
                         Write-Log 'Mic DSP unavailable on this platform (needs Windows 10 1809 or later).' 'WARN'
+                        }
                     }
-                }
             } catch { Write-Log $_.Exception.Message 'ERROR' }
             Wait-MenuKey
         }
@@ -536,4 +540,7 @@ function Wait-MenuKey {
         { $_ -in 'Q','q' } { break menu }
         default { }
     }
+}
+} finally {
+    Remove-SuiteLogs
 }
