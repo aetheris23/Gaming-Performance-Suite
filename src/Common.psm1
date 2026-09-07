@@ -454,6 +454,8 @@ function Repair-OrphanedWatcherState {
                 Height    = [int](Get-StateField $nm 'Height')
                 Bits      = [int](Get-StateField $nm 'Bits')
                 Frequency = [int](Get-StateField $nm 'Frequency')
+                Name      = (Get-StateField $nm 'Name')
+                Stretched = [bool](Get-StateField $nm 'Stretched')
             }
         }
     } catch { Write-Log "Recovery: display restore failed: $_" 'ERROR' }

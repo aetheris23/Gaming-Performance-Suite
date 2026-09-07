@@ -27,7 +27,12 @@ Import-Module (Join-Path $root 'Common.psm1')  -Force
 Import-Module (Join-Path $root 'VoiceDSP.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')  -Force
 
-$tokensDir = Join-Path (Join-Path (Split-Path -Parent (Split-Path -Parent $root)) 'logs') "runtime\voicedsp"
+# The suite root is the PARENT of $root (src/) - markers live under
+# <suite-root>/logs/runtime/voicedsp, exactly where VoiceDSP.psm1 writes
+# them. A single Split-Path -Parent from $root lands on the suite root
+# (a double parent walked one level too high and made the host watch a
+# marker nobody ever writes into a stray <suite-parent>/logs folder).
+$tokensDir = Join-Path (Join-Path (Split-Path -Parent $root) 'logs') 'runtime\voicedsp'
 if (-not (Test-Path $tokensDir)) { New-Item -ItemType Directory -Path $tokensDir -Force | Out-Null }
 $stopFile  = Join-Path $tokensDir 'stop.requested'
 

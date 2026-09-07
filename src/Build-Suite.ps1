@@ -202,7 +202,9 @@ $srcFiles = @(
     'src\DisplayScale.psm1',
     'src\GameBoost.psm1',
     'src\GpuDetect.psm1',
-    'src\NetTune.psm1'
+    'src\NetTune.psm1',
+    'src\VoiceDSP.psm1',
+    'src\VoiceDSP-Host.ps1'
 )
 
 $missing = @($srcFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })
@@ -220,7 +222,15 @@ $generatedLaunchers = @(
 )
 $allFiles = $generatedLaunchers + $srcFiles
 
-$outPath = Join-Path $root $OutputName
+$outPath = if ([System.IO.Path]::IsPathRooted($OutputName)) {
+    [System.IO.Path]::GetFullPath($OutputName)
+} else {
+    Join-Path $root $OutputName
+}
+$outParent = Split-Path -Parent $outPath
+if ($outParent -and -not (Test-Path -LiteralPath $outParent)) {
+    New-Item -ItemType Directory -Path $outParent -Force | Out-Null
+}
 if (Test-Path -LiteralPath $outPath) {
     Remove-Item -LiteralPath $outPath -Force
 }

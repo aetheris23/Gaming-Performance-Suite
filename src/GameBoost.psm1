@@ -104,6 +104,7 @@ public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 }
 
 $script:TimerActive = $false
+$script:TimerPeriod = 2   # period actually requested by timeBeginPeriod
 
 # ------------------------------------------------------------
 # Free RAM (per-platform, single call)
@@ -269,8 +270,12 @@ function Set-TimerResolution {
     Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
-            [void][Suite.NativeBoost]::timeEndPeriod(2)
-            $script:TimerActive = $false
+            # timeEndPeriod must pair with the SAME period timeBeginPeriod used,
+            # or an aggressive 1 ms timer request is never released and keeps
+            # firing interrupts after "restore".
+            [void][Suite.NativeBoost]::timeEndPeriod([uint32]$script:TimerPeriod)
+            $script:TimerActive  = $false
+            $script:TimerPeriod  = 2
             Write-Log 'Timer resolution restored to system default' 'INFO'
         }
         return
@@ -279,6 +284,7 @@ function Set-TimerResolution {
     $result = [Suite.NativeBoost]::timeBeginPeriod($period)
     if ($result -eq 0) {
         $script:TimerActive = $true
+        $script:TimerPeriod = $period
         Write-Log "Global timer resolution locked at $period ms" 'OK'
     } else {
         Write-Log "timeBeginPeriod returned $result" 'WARN'
@@ -1095,7 +1101,7 @@ function Start-GameWatcher {
         [int]$PurgeCooldownSeconds = 900,    # minimum seconds between two standby purges
         [switch]$PurgeOnGameLaunch,          # one purge shortly after a game is detected
         [hashtable]$ProfileOverrides = @{},
-        [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true },
+        [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
         [hashtable]$LegacySettings     = @{},
         [hashtable]$NetworkSettings    = @{ Enabled = $true },
@@ -1332,6 +1338,7 @@ function Start-GameWatcher {
 
     $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 66 }
     $prefInt  = if ($null -ne $ResolutionSettings['PreferIntegerScale']) { [bool]$ResolutionSettings['PreferIntegerScale'] } else { $true }
+    $stretch  = if ($null -ne $ResolutionSettings['Stretched']) { [bool]$ResolutionSettings['Stretched'] } else { $false }
 
     # ---- staged ramp-up queue -------------------------------------------
     # Detection enqueues; the loop executes each stage when due. While
@@ -1605,13 +1612,17 @@ function Start-GameWatcher {
                                 $targetPct = $item.Value
                                 if ($targetPct -le 0) { $targetPct = $scalePct }
                                 $nativeNow = Get-CurrentDisplayMode
-                                $ok = Enable-LowResolutionMode -ScalePercent $targetPct -PreferInteger:([bool]$prefInt)
+                                $ok = Enable-LowResolutionMode -ScalePercent $targetPct -PreferInteger:([bool]$prefInt) -Stretch:([bool]$stretch)
                                 if ($ok) {
                                     $scaledApplied = $true
                                     $journal['scaledActive'] = $true
+                                    # Record whether the mode was stretched so a
+                                    # crash-recovery restore can undo the xrandr
+                                    # transform (not just the mode switch).
+                                    $nativeNow['Stretched'] = [bool]$stretch
                                     $journal['nativeMode']   = $nativeNow
                                     Save-Journal
-                                    Write-Log ("Display switched to {0}% of native (tier {1}%)." -f $targetPct, $targetPct) 'OK'
+                                    Write-Log ("Display switched to {0}% of native (tier {1}%){2}." -f $targetPct, $targetPct, $(if ($stretch) { ' - STRETCHED to fill the panel' } else { '' })) 'OK'
                                 }
                             }
                         } catch {

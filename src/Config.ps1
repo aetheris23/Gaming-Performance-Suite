@@ -263,6 +263,14 @@
     PreferIntegerScale     = $true   # use exactly 1/2 native when available:
                                      # pixel-perfect upscale, no blur/pixelation
 
+    # FPS "stretched resolution" look: pick the scaled mode at the tier
+    # percent EVEN IF it has a different aspect ratio (e.g. a 4:3 mode on a
+    # 16:9 panel) and fill the WHOLE screen with it (no black bars).
+    # Classic for CS2 / Valorant / shooters. Requires a lower tier to be
+    # active (native tier never stretches). Linux/macOS fall back to
+    # best-effort scaling - see DisplayScale.psm1.
+    StretchedResolution = $false
+
     # ---- Legacy GPU support ----------------------------------
     # Relaxes aggressive tricks on older graphics hardware
     # (pre-Pascal GeForce, pre-RX Radeon/GCN, Intel HD 2000-4000,

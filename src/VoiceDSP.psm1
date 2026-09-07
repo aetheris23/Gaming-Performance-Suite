@@ -99,7 +99,7 @@ namespace SuiteVoice
         [PreserveSig] int GetAudioEffects(out IntPtr effects, out uint numEffects);
         [PreserveSig] int RegisterAudioEffectsChangedNotificationCallback(IntPtr client);
         [PreserveSig] int UnregisterAudioEffectsChangedNotificationCallback(IntPtr client);
-        [PreserveSig] int SetAudioEffectState(ref Guid effectId, int state);
+        [PreserveSig] int SetAudioEffectState(Guid effectId, int state);
     }
 
     [Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -255,7 +255,7 @@ namespace SuiteVoice
                         if (fx.canSetState && fx.state == 0)   // OFF
                         {
                             // 1 = ON
-                            eMgr.SetAudioEffectState(ref fx.id, 1);
+                            eMgr.SetAudioEffectState(fx.id, 1);
                         }
                     }
                     else
@@ -263,7 +263,7 @@ namespace SuiteVoice
                         int restore = _prior.ContainsKey(fx.id) ? _prior[fx.id] : -1;
                         if (fx.canSetState && restore >= 0)
                         {
-                            eMgr.SetAudioEffectState(ref fx.id, restore);
+                            eMgr.SetAudioEffectState(fx.id, restore);
                         }
                     }
                 }
@@ -630,11 +630,15 @@ namespace SuiteVoice
                 if (i > 0 && i < FFTSIZE / 2) { _re[FFTSIZE - i] *= gain; _im[FFTSIZE - i] *= gain; }
             }
             // 4) IFFT + overlap-add (50% overlap)
+            // With ADVANCE = FFTSIZE/2, output sample i of the current frame
+            // overlaps the PREVIOUS frame at index i + ADVANCE (its second
+            // half), not at index i. Two periodic Hann windows 50% apart sum
+            // to unity, so windowed frames add without amplitude modulation.
             Fft(_re, _im, true);
             for (int i = 0; i < FFTSIZE; i++)
             {
                 float v = _re[i] / FFTSIZE;
-                float merged = v + _tail[i];
+                float merged = v + (i < ADVANCE ? _tail[i + ADVANCE] : 0f);
                 _tail[i] = v;
                 if (i < ADVANCE) PushOut(merged);
             }
@@ -1081,5 +1085,6 @@ function Stop-VoiceRealTimeFilter {
 
 Export-ModuleMember -Function Enable-VoiceNoiseSuppression, Disable-VoiceNoiseSuppression,
     Test-VoiceDspActive, Test-VoiceDspPlatform,
+    Ensure-VoiceDspEngine,
     Start-NoiseSuppressionExternal, Stop-NoiseSuppressionExternal, Test-NoiseSuppressionExternalActive,
     Test-VoiceDeepNSPresent, Start-VoiceRealTimeFilter, Stop-VoiceRealTimeFilter

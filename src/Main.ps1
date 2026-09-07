@@ -47,6 +47,7 @@ $prePurge     = if ($null -ne $cfg['PrePurgeBeforeLaunch'])  { [bool]$cfg['PrePu
 $resSettings = @{
     ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
+    Stretched         = if ($null -ne $cfg['StretchedResolution']) { [bool]$cfg['StretchedResolution'] } else { $false }
     Tiers             = if ($cfg['ResolutionTiers'])      { $cfg['ResolutionTiers'] }      else { @{ Low = 55; Medium = 75; High = 88; Native = 0 } }
     ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Low'; Android = 'Medium'; Default = 'Medium' } }
     GameTierOverrides = if ($cfg['GameTierOverrides'])    { $cfg['GameTierOverrides'] }    else { @{} }
@@ -381,6 +382,7 @@ function Show-Status {
         $(if ($tierStr) { $tierStr } else { "$($resSettings.ScalePercent)% (single mode)" }), `
         $resSettings.ScalePercent, $(if ($profTierStr) { $profTierStr } else { 'default' })) 'INFO'
     Write-Log ("Integer scaling preferred: {0}" -f $resSettings.PreferIntegerScale) 'INFO'
+    Write-Log ("Stretched resolution: {0}" -f $(if ($resSettings.Stretched) { 'ON - fullscreen fill (FPS stretch) even across aspect ratios' } else { 'OFF - same-aspect only' })) 'INFO'
 
     # ---- network + voice summary ---------------------------------------
     $netOn  = if ($null -ne $netCfg['Enabled'])   { [bool]$netCfg['Enabled'] }   else { $true }
