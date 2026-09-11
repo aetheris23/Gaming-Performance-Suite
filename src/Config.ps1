@@ -6,7 +6,7 @@
 @{
     # ---- Game watcher ---------------------------------------
     # Process names (WITHOUT .exe) to auto-boost when detected.
-    # Expanded to cover all major platforms and game sources.
+    # Expanded to cover all major game sources and stores.
     GameProcesses = @(
         # === Riot Games (actual game processes, not launchers) ===
         'VALORANT-Win64'
@@ -267,8 +267,7 @@
     # percent EVEN IF it has a different aspect ratio (e.g. a 4:3 mode on a
     # 16:9 panel) and fill the WHOLE screen with it (no black bars).
     # Classic for CS2 / Valorant / shooters. Requires a lower tier to be
-    # active (native tier never stretches). Linux/macOS fall back to
-    # best-effort scaling - see DisplayScale.psm1.
+    # active (native tier never stretches). See DisplayScale.psm1.
     StretchedResolution = $false
 
     # ---- Legacy GPU support ----------------------------------

@@ -5,7 +5,6 @@
 ::  in git) and included in the output ZIP:
 ::    Windows : Start-GamingSuite.bat / Start-Watcher-Hidden.bat /
 ::              Stop-GamingSuite.bat
-::    Linux/macOS: Start-GamingSuite.sh / Start-Watcher-Hidden.sh
 ::
 ::  The ZIP is a RUNTIME-ONLY package: it ships the launchers
 ::  plus the suite. This builder (build.bat + src\Build-Suite.ps1)
@@ -27,6 +26,6 @@ echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "src\Build-Suite.ps1"
 
 echo.
-echo Done. The ZIP contains the .bat and .sh launchers plus the suite,
+echo Done. The ZIP contains the .bat launchers plus the suite,
 echo ready to use (build tooling not included).
 pause

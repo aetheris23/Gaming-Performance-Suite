@@ -843,16 +843,16 @@ function Test-VoiceDspPlatform {
         definitively (Enable returns 'no-effects-manager' when the endpoint has
         nothing to offer). This no longer hard-blocks Windows 10.
     #>
-    if (-not (Test-SuitePlatformWindows)) { return $false }
+    $supported = $false
     try {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-        if ([int]$os.BuildNumber -lt 17763) { return $false }   # pre-1809 (RS5): no effects manager
-        return $true
+        if ([int]$os.BuildNumber -ge 17763) { $supported = $true }   # 1809 (RS5)+ has the effects manager
     } catch {
-        # Windows PowerShell 5.1 only ever runs on Windows; treat a failed probe
+        # Windows PowerShell only ever runs on Windows; treat a failed probe
         # as "try it" so the positive path decides rather than a hard block.
-        return $true
+        $supported = $true
     }
+    return $supported
 }
 
 function Ensure-VoiceDspEngine {
@@ -934,8 +934,7 @@ function Start-VoiceDspHost {
     $hostScript = Get-VoiceDspHostScript
     $mainsrc    = (Split-Path -Parent $PSCommandPath)
 
-    $pwsh = if (Test-SuitePlatformWindows) { (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
-            else { (Get-Command pwsh -ErrorAction SilentlyContinue).Source }
+    $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source
     if (-not $pwsh) { return $false }
 
     $safeAggressiveness = [Math]::Max(0.5, [Math]::Min(2.0, $Aggressiveness))

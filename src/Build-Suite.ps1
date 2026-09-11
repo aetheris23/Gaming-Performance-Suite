@@ -9,15 +9,13 @@
     included in the output ZIP so end-users get a ready-to-run package:
       - Start-GamingSuite.bat / Start-Watcher-Hidden.bat / Stop-GamingSuite.bat
         (Windows, PowerShell 5.1+)
-      - Start-GamingSuite.sh / Start-Watcher-Hidden.sh (Linux / macOS,
-        PowerShell 7+)
 
     The output ZIP is a RUNTIME-ONLY distribution:
-      - includes: the 5 launchers, README.md, .gitignore and the src/ suite
+      - includes: the 3 launchers, README.md, .gitignore and the src/ suite
       - EXCLUDES the build tooling (build.bat and src\Build-Suite.ps1),
         so extracting the ZIP can never duplicate or overwrite the builder.
     Rebuild from the source repository, not from the ZIP.
-#>
+#> 
 [CmdletBinding()]
 param(
     [string]$OutputName = 'GamingPerformanceSuite.zip'
@@ -127,66 +125,6 @@ timeout /t 4 >nul
 '@
 Set-Content -Path (Join-Path $genDir 'Stop-GamingSuite.bat') -Value $batStop -Encoding ASCII
 
-# --- Start-GamingSuite.sh (Linux / macOS) ---
-$shStart = @'
-#!/usr/bin/env bash
-# ============================================================
-#  Gaming Performance Suite - Launcher (interactive menu)
-#  Linux / macOS entry point. Elevates to root when required
-#  (priority/power/network tweaks need root on Unix).
-#  Requires PowerShell 7+ (pwsh).
-# ============================================================
-set -e
-cd "$(dirname "$0")"
-
-command -v pwsh >/dev/null 2>&1 || { echo "PowerShell 7+ (pwsh) is required." >&2; exit 1; }
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Requesting root privileges (needed for priority/power tweaks)..."
-    exec sudo -E pwsh -NoProfile -File "src/Main.ps1"
-else
-    pwsh -NoProfile -File "src/Main.ps1"
-fi
-'@
-$shStartBytes = [Text.Encoding]::ASCII.GetBytes(($shStart -replace "`r`n", "`n"))
-[System.IO.File]::WriteAllBytes((Join-Path $genDir 'Start-GamingSuite.sh'), $shStartBytes)
-
-# --- Start-Watcher-Hidden.sh (Linux / macOS) ---
-$shWatcher = @'
-#!/usr/bin/env bash
-# ============================================================
-#  Starts the Game Watcher HIDDEN in the background (Linux/macOS).
-#  Auto-detects games: boosts them, drops render resolution,
-#  restores native on exit. Stop it with:
-#     pwsh -NoProfile -File src/Main.ps1  -> menu option 5, or
-#     sudo pwsh -NoProfile -Command "Import-Module ./src/Common.psm1 -Force; Stop-BackgroundWatcher"
-# ============================================================
-set -e
-cd "$(dirname "$0")"
-
-command -v pwsh >/dev/null 2>&1 || { echo "PowerShell 7+ (pwsh) is required." >&2; exit 1; }
-
-PIDFILE="logs/runtime/watcher.pid"
-if [ -f "$PIDFILE" ]; then
-    W=$(tr -d ' \n' < "$PIDFILE")
-    if [ -n "$W" ] && kill -0 "$W" 2>/dev/null; then
-        echo "Watcher is already running."
-        exit 0
-    fi
-fi
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "Starting background watcher via sudo..."
-    exec sudo -b pwsh -NoProfile -File "src/Main.ps1" -BackgroundWatch
-else
-    nohup pwsh -NoProfile -File "src/Main.ps1" -BackgroundWatch >/dev/null 2>&1 &
-    disown
-fi
-echo "Background watcher started. Stop it anytime with Stop-BackgroundWatcher."
-'@
-$shWatcherBytes = [Text.Encoding]::ASCII.GetBytes(($shWatcher -replace "`r`n", "`n"))
-[System.IO.File]::WriteAllBytes((Join-Path $genDir 'Start-Watcher-Hidden.sh'), $shWatcherBytes)
-
 Write-Host 'Generated launcher files in .build_generated/' -ForegroundColor Green
 
 # ---- Source files that live in the repo ----
@@ -216,9 +154,7 @@ if ($missing.Count -gt 0) {
 $generatedLaunchers = @(
     'Start-GamingSuite.bat',
     'Start-Watcher-Hidden.bat',
-    'Stop-GamingSuite.bat',
-    'Start-GamingSuite.sh',
-    'Start-Watcher-Hidden.sh'
+    'Stop-GamingSuite.bat'
 )
 $allFiles = $generatedLaunchers + $srcFiles
 

@@ -37,7 +37,6 @@ if (-not (Test-Path $tokensDir)) { New-Item -ItemType Directory -Path $tokensDir
 $stopFile  = Join-Path $tokensDir 'stop.requested'
 
 try {
-    if (-not (Test-SuitePlatformWindows)) { exit 0 }
     if (-not (Test-VoiceDspPlatform))     { exit 0 }
 
     Ensure-VoiceDspEngine

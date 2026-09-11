@@ -255,7 +255,7 @@ function Show-Banner {
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     Write-Host '        GAMING PERFORMANCE SUITE  v2.5'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
-    Write-Host '  Cross-platform | Low-spec optimized | Noise-free voice' -ForegroundColor Cyan
+    Write-Host '  Windows | Low-spec optimized | Noise-free voice'      -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
@@ -349,7 +349,7 @@ function Show-Status {
             $bppStr = if ($mode.ContainsKey('Bits')) { " ({0} bpp)" -f $mode.Bits } else { '' }
             Write-Log ("Display: {0}x{1} @ {2} Hz{3}" -f $mode.Width, $mode.Height, $mode.Frequency, $bppStr) 'INFO'
         } else {
-            Write-Log 'Display: no scaling backend available (xrandr / displayplacer missing).' 'INFO'
+            Write-Log 'Display: current mode could not be read (user32 reports none).' 'INFO'
         }
     } catch { }
     try {
@@ -466,35 +466,10 @@ try {
                     Write-Log 'Watcher already running in background.' 'WARN'
                 } else {
                     Write-Log 'Launching hidden background watcher...' 'ACTION'
-                    if (Test-SuitePlatformWindows) {
-                        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(
-                            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-                            '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
-                        )
-                    } else {
-                        $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
-                        if (-not $pwsh) { throw 'pwsh (PowerShell 7+) is required on this platform but was not found.' }
-                        $args = @('-NoProfile', '-File', $PSCommandPath, '-BackgroundWatch')
-                        if (Test-Administrator) {
-                            Start-Process -FilePath $pwsh.Source -ArgumentList $args -WindowStyle Hidden
-                        } else {
-                            # non-root: elevate through sudo. Try a non-interactive,
-                            # passwordless launch first (works with NOPASSWD sudoers
-                            # rules); if sudo needs a password, prompt the user in
-                            # THIS terminal instead of silently failing in the
-                            # background - sudo can only prompt from a TTY.
-                            $sudoNonInteractive = (& sudo -n true 2>$null)
-                            if ($LASTEXITCODE -eq 0) {
-                                Start-Process -FilePath 'sudo' -ArgumentList (@('-b', $pwsh.Source) + $args) -WindowStyle Hidden
-                            } else {
-                                Write-Log 'This menu cannot start the watcher in the background because it needs root and sudo must prompt for a password.' 'WARN'
-                                Write-Log 'Open a terminal and run:  sudo pwsh -NoProfile -File src/Main.ps1 -BackgroundWatch' 'WARN'
-                                Write-Log '(or use the Start-Watcher-Hidden.sh launcher from a terminal.)' 'WARN'
-                                Wait-MenuKey
-                                continue
-                                }
-                            }
-                    }
+                    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(
+                        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                        '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
+                    )
                     # Wait for the watcher to announce itself (instance mutex /
                     # pid file) instead of a fixed 1s guess - module import and
                     # GPU detection can take a moment on slower machines.

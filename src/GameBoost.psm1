@@ -2,6 +2,11 @@
 #  GameBoost.psm1 - FPS stability + dynamic game handling
 #  (Valorant, Steam titles, PCSX2 and other emulators).
 #
+#  Windows-only build (Linux/macOS/Android support removed -
+#  the cross-platform branches added per-poll scanning overhead
+#  that degraded long gaming sessions). Optimized for low-spec
+#  PCs and laptops.
+#
 #  On game detection the watcher:
 #    - classifies the title (Emulator / Steam / Competitive)
 #    - raises its scheduling priority + steers it off core 0
@@ -69,14 +74,8 @@ function Write-GpuInventory {
 # Native interop: timer resolution + standby memory purge
 # ------------------------------------------------------------
 function Add-NativeBoostType {
-    <#
-        Compiles the timer/memory interop lazily, on first real use.
-        Windows-only (winmm/ntdll P/Invokes); on Linux/macOS/Android
-        these native calls do not exist so we never compile them and
-        the helper functions transparently use platform equivalents.
-    #>
+    <# Compiles the timer/memory interop lazily, on first real use. #>
     if ('Suite.NativeBoost' -as [type]) { return }
-    if (-not (Test-SuitePlatformWindows)) { return }
     Add-Type -Namespace Suite -Name NativeBoost -MemberDefinition @'
 [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint uPeriod);
 [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint uPeriod);
@@ -107,35 +106,15 @@ $script:TimerActive = $false
 $script:TimerPeriod = 2   # period actually requested by timeBeginPeriod
 
 # ------------------------------------------------------------
-# Free RAM (per-platform, single call)
+# Free RAM (native Win32 call)
 # ------------------------------------------------------------
 function Get-FreeRamMB {
     Add-NativeBoostType
-    if (Test-SuitePlatformWindows) {
-        if (-not ('Suite.NativeBoost' -as [type])) { return 0 }
-        $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
-        $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
-        [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
-        [int]($ms.ullAvailPhys / 1MB)
-    } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $IsLinux) {
-        try {
-            $memo = Get-Content /proc/meminfo -ErrorAction Stop
-            foreach ($line in $memo) {
-                if ($line -match '^MemAvailable:\s+(\d+)\s*kB') {
-                    return [int](([int64]$Matches[1] * 1024) / 1MB)
-                }
-            }
-        } catch { }
-        0
-    } elseif ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS) {
-        try {
-            $out = & vm_stat 2>$null | Out-String
-            $free = 0L; $inactive = 0L
-            if ($out -match 'Pages free:\s+(\d+)')            { $free = [int64]$Matches[1] }
-            if ($out -match 'Pages inactive:\s+(\d+)')        { $inactive = [int64]$Matches[1] }
-            [int](($free + $inactive) * 4096 / 1MB)
-        } catch { 0 }
-    } else { 0 }
+    if (-not ('Suite.NativeBoost' -as [type])) { return 0 }
+    $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
+    $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
+    [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
+    [int]($ms.ullAvailPhys / 1MB)
 }
 
 # ------------------------------------------------------------
@@ -144,10 +123,6 @@ function Get-FreeRamMB {
 function Enable-GamingPowerPlan {
     [CmdletBinding()] param()
 
-    if (-not (Test-SuitePlatformWindows)) {
-        Write-Log 'Power-plan switching is Windows-only; skipped on this platform.' 'INFO'
-        return
-    }
     Assert-AdminOrThrow
 
     # Duplicate "High performance" into a dedicated gaming plan if missing
@@ -190,10 +165,6 @@ function Enable-GamingPowerPlan {
 # 2. Kill Game DVR / Game Bar capture (classic Valorant stutters)
 # ------------------------------------------------------------
 function Disable-GameDVR {
-    if (-not (Test-SuitePlatformWindows)) {
-        Write-Log 'Game DVR / Game Bar tuning is Windows-only; skipped on this platform.' 'INFO'
-        return
-    }
     Assert-AdminOrThrow
 
     $paths = @(
@@ -223,10 +194,6 @@ function Set-MultimediaTweaks {
     #>
     [CmdletBinding()] param([bool]$EnableHags = $true)
 
-    if (-not (Test-SuitePlatformWindows)) {
-        Write-Log 'MMCSS scheduling tweaks are Windows-only; skipped on this platform.' 'INFO'
-        return
-    }
     Assert-AdminOrThrow
 
     $sysProfile = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
@@ -263,10 +230,6 @@ function Set-TimerResolution {
         [switch]$Restore,
         [bool]$UseAggressive = $false
     )
-    if (-not (Test-SuitePlatformWindows)) {
-        if (-not $Restore) { Write-Log 'Windows timer-resolution locking is unavailable on this platform; skipping.' 'INFO' }
-        return
-    }
     Add-NativeBoostType
     if ($Restore) {
         if ($script:TimerActive) {
@@ -297,75 +260,42 @@ function Set-TimerResolution {
 # ------------------------------------------------------------
 function Clear-StandbyMemory {
     <#
-        Frees the OS standby/cleanable memory. Windows uses the classic
-        EmptyStandbyList system call; Linux drops page caches via
-        /proc/sys/vm/drop_caches; macOS uses the system 'purge' tool.
-        Elevation is required wherever a write is involved.
+        Frees the OS standby/cleanable memory via the classic
+        EmptyStandbyList system call. Elevation is required.
     #>
-    if (Test-SuitePlatformWindows) {
-        Assert-AdminOrThrow
+    Assert-AdminOrThrow
 
-        Add-NativeBoostType
-        if (-not ('Suite.NativeBoost' -as [type])) { return }
+    Add-NativeBoostType
+    if (-not ('Suite.NativeBoost' -as [type])) { return }
 
-        # The standby-list purge (SystemMemoryListInformation = 80, command
-        # PurgeStandbyList = 4) requires SeProfileSingleProcessPrivilege to be
-        # ENABLED in THIS process token at the instant of the call. Enable it
-        # first (and verify), then retry a few times - on some builds the first
-        # NtSetSystemInformation after enabling can still race with the token
-        # refresh, so we re-enable and re-attempt.
-        $status = -1
-        for ($attempt = 1; $attempt -le 3 -and $status -ne 0; $attempt++) {
-            $priv = Enable-Privilege 'SeProfileSingleProcessPrivilege'
-            if (-not $priv) {
-                Write-Log 'Standby purge: could not enable SeProfileSingleProcessPrivilege (run as Administrator).' 'WARN'
-                return
-            }
-            # Small yield so the token adjust is fully committed inside ntdll.
-            Start-Sleep -Milliseconds 25
-            $cmd = 4
-            $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
-            if ($status -ne 0 -and $attempt -lt 3) {
-                Start-Sleep -Milliseconds 50
-            }
+    # The standby-list purge (SystemMemoryListInformation = 80, command
+    # PurgeStandbyList = 4) requires SeProfileSingleProcessPrivilege to be
+    # ENABLED in THIS process token at the instant of the call. Enable it
+    # first (and verify), then retry a few times - on some builds the first
+    # NtSetSystemInformation after enabling can still race with the token
+    # refresh, so we re-enable and re-attempt.
+    $status = -1
+    for ($attempt = 1; $attempt -le 3 -and $status -ne 0; $attempt++) {
+        $priv = Enable-Privilege 'SeProfileSingleProcessPrivilege'
+        if (-not $priv) {
+            Write-Log 'Standby purge: could not enable SeProfileSingleProcessPrivilege (run as Administrator).' 'WARN'
+            return
         }
-
-        if ($status -eq 0) {
-            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
-            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
-        } else {
-            Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8}. This needs Administrator privileges and the SeProfileSingleProcessPrivilege, which could not be asserted." -f $status) 'ERROR'
+        # Small yield so the token adjust is fully committed inside ntdll.
+        Start-Sleep -Milliseconds 25
+        $cmd = 4
+        $status = [Suite.NativeBoost]::NtSetSystemInformation(80, [ref]$cmd, 4)
+        if ($status -ne 0 -and $attempt -lt 3) {
+            Start-Sleep -Milliseconds 50
         }
-        return
     }
 
-    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsLinux) {
-        try {
-            if (-not (Test-Path /proc/sys/vm/drop_caches)) {
-                Write-Log 'Standby purge unavailable (no /proc/sys/vm/drop_caches).' 'WARN'
-                return
-            }
-            Set-Content -Path /proc/sys/vm/drop_caches -Value '3' -NoNewline -ErrorAction Stop
-            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
-            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
-        } catch {
-            Write-Log ("Linux standby purge failed: {0}" -f $_.Exception.Message) 'ERROR'
-        }
-        return
+    if ($status -eq 0) {
+        $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
+        Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
+    } else {
+        Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8}. This needs Administrator privileges and the SeProfileSingleProcessPrivilege, which could not be asserted." -f $status) 'ERROR'
     }
-
-    if ($PSVersionTable.PSVersion.Major -ge 6 -and $IsMacOS) {
-        try {
-            & /usr/sbin/purge 2>$null | Out-Null
-            $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
-            Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
-        } catch {
-            Write-Log ("macOS purge failed: {0}" -f $_.Exception.Message) 'ERROR'
-        }
-        return
-    }
-
-    Write-Log 'Standby memory purge is unavailable on this platform.' 'WARN'
 }
 
 # ------------------------------------------------------------
@@ -467,7 +397,7 @@ $script:VoiceAppPatterns = @(
 
 function Test-MatchAny {
     <# Wildcard matcher over many patterns (all lowercase). Returns $true
-       when $Name matches any pattern. Case-insensitive on every platform. #>
+       when $Name matches any pattern. Case-insensitive. #>
     param([string]$Name, [string[]]$Patterns)
     foreach ($p in $Patterns) { if ($Name -like $p) { return $true } }
     return $false
@@ -584,7 +514,7 @@ function Get-GameScalePercent {
 # skipped HAGS/timer are internal and only tighten the watcher's own
 # footprint further.
 #
-# Signals (cross-platform, all cheap):
+# Signals (all cheap, gathered once at startup):
 #   - legacy iGPU/dGPU  (Test-LegacyGpuPresent - the weakest GPU class)
 #   - low CPU core/thread count (<= 4 logical processors)
 #   - low CPU clock (base/max < ~2.6 GHz, when the OS exposes it)
@@ -614,54 +544,23 @@ function Test-LowSpecHardware {
     # GPU: reuse the legacy-era detector (already cached after first call)
     try { $signals.LegacyGpu = [bool](Test-LegacyGpuPresent) } catch { }
 
-    # RAM: lightweight probe (matches Get-FreeRamMB's platform split)
+    # RAM: lightweight probe
     try {
-        if (Test-SuitePlatformWindows) {
-            Add-NativeBoostType   # ensure Suite.NativeBoost is compiled
-            if ('Suite.NativeBoost' -as [type]) {
-                $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
-                $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
-                [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
-                $signals.RamMB = [int]($ms.ullTotalPhys / 1MB)
-            }
-        } elseif ($IsLinux) {
-            foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) {
-                if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $signals.RamMB = [int](([int64]$Matches[1] * 1024) / 1MB); break }
-            }
-        } elseif ($IsMacOS) {
-            $hd = & sysctl -n hw.memsize 2>$null
-            if ($hd) { $signals.RamMB = [int](([int64]$hd) / 1MB) }
+        Add-NativeBoostType   # ensure Suite.NativeBoost is compiled
+        if ('Suite.NativeBoost' -as [type]) {
+            $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX
+            $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
+            [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
+            $signals.RamMB = [int]($ms.ullTotalPhys / 1MB)
         }
     } catch { }
 
     $signals.LowCores = ($signals.Threads -le 4)
 
-    # CPU clock: best-effort; different on each platform. Never fatal.
+    # CPU clock: best-effort; never fatal.
     try {
-        if (Test-SuitePlatformWindows) {
-            $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Measure-Object -Property MaxClockSpeed -Maximum
-            if ($cpu -and $cpu.Maximum) { $signals.ClockMHz = [int]$cpu.Maximum }
-        } elseif ($IsLinux) {
-            # Prefer the CPU's MAX frequency (from sysfs) so a fast chip
-            # idling down its current clock isn't mistaken for a weak one.
-            # Fall back to the first "cpu MHz" line in /proc/cpuinfo.
-            $maxFreq = Get-Content /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq -ErrorAction SilentlyContinue
-            if ($maxFreq) {
-                # Get-Content returns a scalar string for a 1-line file; index
-                # with a whole-string convert instead of [0] (which would grab
-                # a single character).
-                $maxFreqStr = ([string]$maxFreq).Trim()
-                if ($maxFreqStr -match '^\d+$') { $signals.ClockMHz = [int]([System.Convert]::ToInt64($maxFreqStr) / 1000) }
-            }
-            if (-not $signals.ClockMHz) {
-                foreach ($ln in (Get-Content /proc/cpuinfo -ErrorAction Stop)) {
-                    if ($ln -match '^cpu MHz\s*:\s*([\d.]+)') { $signals.ClockMHz = [int][double]$Matches[1]; break }
-                }
-            }
-        } elseif ($IsMacOS) {
-            $hz = & sysctl -n hw.cpufrequency 2>$null
-            if ($hz) { $signals.ClockMHz = [int](([int64]$hz) / 1MB) }
-        }
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Measure-Object -Property MaxClockSpeed -Maximum
+        if ($cpu -and $cpu.Maximum) { $signals.ClockMHz = [int]$cpu.Maximum }
     } catch { }
     if ($signals.ClockMHz -gt 0 -and $signals.ClockMHz -lt 2600) { $signals.LowClock = $true }
 
@@ -697,17 +596,8 @@ function Invoke-ProcessBoost {
                     Write-Log ("Priority -> {0} for '{1}' (PID {2})" -f $wantPri, $Process.ProcessName, $Process.Id) 'OK'
                 }
             } catch {
-                # Not elevated on Unix (or exotic process): drop PR permanently
-                # instead of hammering the watcher with a warning every poll.
-                if (-not (Test-SuitePlatformWindows)) {
-                    $script:PriorityCapable = $false
-                    if (-not $script:PriorityCapWarned) {
-                        $script:PriorityCapWarned = $true
-                        Write-Log 'Process-priority boosting unavailable (needs root on this platform); falling back to affinity steering only.' 'WARN'
-                    }
-                } else {
-                    throw
-                }
+                # Not elevated: throw so the caller can log the failure.
+                throw
             }
         }
 
@@ -813,8 +703,7 @@ function Update-VoiceChatSupport {
         foreach ($procId in @($State.Keys)) {
             try {
                 $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-                $want = if (Test-SuitePlatformWindows) { 'AboveNormal' } else { 'High' }
-                if ($p -and ($p.PriorityClass -eq $want -or $p.PriorityClass -eq 'AboveNormal')) {
+                if ($p -and ($p.PriorityClass -eq 'AboveNormal' -or $p.PriorityClass -eq 'High')) {
                     $prev = $State[$procId]['Prev']
                     $p.PriorityClass = $(if ($prev) { $prev } else { 'Normal' })
                 }
@@ -840,25 +729,22 @@ function Update-VoiceChatSupport {
             # threads in CHILD processes. Boosting only the parent leaves the
             # real encoder starved -> party audio still stutters on weak CPUs.
             # Walk the whole descendant tree so every voice subprocess is lifted.
-            # (Win32_Process is Windows-only; elsewhere we boost just the parent.)
-            if (Test-SuitePlatformWindows) {
-                $childById = @{}
-                foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
-                    $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
-                }
-                $toCheck = [System.Collections.Generic.Queue[int]]::new()
-                $toCheck.Enqueue([int]$t.Id)
-                while ($toCheck.Count -gt 0) {
-                    $cur = $toCheck.Dequeue()
-                    foreach ($other in $childById.GetEnumerator()) {
-                        if ($other.Value -eq $cur) {
-                            $cid = [int]$other.Key
-                            $cp = Get-Process -Id $cid -ErrorAction SilentlyContinue
-                            if ($cp -and $cp.Id -ne $ExceptPid -and $cp.Id -ne $PID -and -not $candidatePids.Contains($cp.Id)) {
-                                $candidatePids[$cp.Id] = $cp.ProcessName
-                            }
-                            $toCheck.Enqueue($cid)
+            $childById = @{}
+            foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
+                $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
+            }
+            $toCheck = [System.Collections.Generic.Queue[int]]::new()
+            $toCheck.Enqueue([int]$t.Id)
+            while ($toCheck.Count -gt 0) {
+                $cur = $toCheck.Dequeue()
+                foreach ($other in $childById.GetEnumerator()) {
+                    if ($other.Value -eq $cur) {
+                        $cid = [int]$other.Key
+                        $cp = Get-Process -Id $cid -ErrorAction SilentlyContinue
+                        if ($cp -and $cp.Id -ne $ExceptPid -and $cp.Id -ne $PID -and -not $candidatePids.Contains($cp.Id)) {
+                            $candidatePids[$cp.Id] = $cp.ProcessName
                         }
+                        $toCheck.Enqueue($cid)
                     }
                 }
             }
@@ -874,11 +760,8 @@ function Update-VoiceChatSupport {
             if ($prev -eq 'RealTime') { continue }
 
             # Voice apps get a modest above-normal bump so their encode/audio
-            # threads outrank everything except the game. AboveNormal is valid
-            # on Windows; on Unix fall back to the highest implementable class
-            # so party audio still wins over background apps on weak CPUs.
+            # threads outrank everything except the game.
             $want = 'AboveNormal'
-            if (-not (Test-SuitePlatformWindows)) { $want = 'High' }
             if ($prev -ne $want) {
                 try { $t.PriorityClass = $want } catch { }
             }
@@ -964,7 +847,6 @@ function Invoke-FsoCompatFlag {
         [hashtable]$Journal,
         [switch]$Undo
     )
-    if (-not (Test-SuitePlatformWindows)) { return }   # AppCompat registry is Windows-only
     $path = $null
     try   { $path = $Process.Path } catch { }
     if (-not $path) { try { $path = $Process.MainModule.FileName } catch { } }
@@ -997,7 +879,6 @@ function Invoke-FsoCompatFlag {
 
 function Undo-FsoCompatFlags {
     param([hashtable]$State, [hashtable]$Journal)
-    if (-not (Test-SuitePlatformWindows)) { return }
     foreach ($path in @($State.Keys)) {
         try {
             Remove-ItemProperty -Path $script:FsoKey -Name ([string]$path) -ErrorAction SilentlyContinue
@@ -1042,37 +923,19 @@ function Get-ActiveWindowProcessId {
         desktop cannot provide that information. A missing desktop backend
         must not prevent headless game detection.
     #>
-    if (Test-SuitePlatformWindows) {
-        try {
-            if (-not ('Suite.ForegroundWindow' -as [type])) {
-                Add-Type -Namespace Suite -Name ForegroundWindow -MemberDefinition @'
+    try {
+        if (-not ('Suite.ForegroundWindow' -as [type])) {
+            Add-Type -Namespace Suite -Name ForegroundWindow -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 '@
-            }
-            $window = [Suite.ForegroundWindow]::GetForegroundWindow()
-            if ($window -eq [IntPtr]::Zero) { return 0 }
-            $pid = [uint32]0
-            [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$pid)
-            return [int]$pid
-        } catch { return 0 }
-    }
-
-    if ($IsLinux) {
-        try {
-            $active = (& xprop -root _NET_ACTIVE_WINDOW 2>$null) -join ' '
-            if ($active -match 'window id # (0x[0-9a-f]+)') {
-                $pidLine = (& xprop -id $Matches[1] _NET_WM_PID 2>$null) -join ' '
-                if ($pidLine -match '=\s*(\d+)') { return [int]$Matches[1] }
-            }
-        } catch { }
-    } elseif ($IsMacOS) {
-        try {
-            $pid = (& osascript -e 'tell application "System Events" to unix id of first process whose frontmost is true' 2>$null)
-            if ("$pid" -match '^\s*(\d+)\s*$') { return [int]$Matches[1] }
-        } catch { }
-    }
-    return 0
+        }
+        $window = [Suite.ForegroundWindow]::GetForegroundWindow()
+        if ($window -eq [IntPtr]::Zero) { return 0 }
+        $pid = [uint32]0
+        [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$pid)
+        return [int]$pid
+    } catch { return 0 }
 }
 
 function Test-ActiveGameProcess {
@@ -1117,24 +980,10 @@ function Start-GameWatcher {
 
     # Windows must be elevated for the registry/driver tweaks - the .bat
     # launcher self-elevates, so a hard requirement there is correct.
-    # On Unix we degrade GRACEFULLY instead of throwing: a non-root watcher
-    # can still detect games, apply display scaling via xrandr, and log; the
-    # root-only operations (priority/power/network/purge) are simply skipped
-    # with a single warning. This is what lets option 3 "just run" without
-    # crashing on any platform.
-    if (Test-SuitePlatformWindows) {
-        Assert-AdminOrThrow
-    } elseif (-not (Test-Administrator)) {
-        Write-Log 'Watcher running WITHOUT root: process-priority/power/network-tuning are skipped; display scaling (xrandr) still works.' 'WARN'
-    }
+    Assert-AdminOrThrow
 
     # ---- recover anything a previous unclean session left behind ----
     try { Repair-OrphanedWatcherState | Out-Null } catch { }
-
-    # A killed watcher can leave a stale stop marker behind (Unix stop
-    # file; on Windows the kernel event dies with the process). Clear it
-    # so this fresh session is not stopped before it even starts.
-    Clear-StopRequest
 
     # Never compete with the game: our own watcher yields under any load
     try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
@@ -1187,10 +1036,7 @@ function Start-GameWatcher {
     Write-GpuInventory
 
     $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
-    # Display scaling picks its own backend by platform (user32 / xrandr /
-    # displayplacer) and is a safe no-op where none is available, so Unix
-    # hosts are only excluded here if the user or legacy profile asks.
-    $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations'] -and (Test-SuitePlatformWindows)
+    $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations']
     if ($skipScale)  { Write-Log 'Resolution switching is DISABLED for this session.' 'INFO' }
     if ($fsoDisable) { Write-Log 'Fullscreen optimizations will be disabled for detected games.' 'INFO' }
 
@@ -1318,13 +1164,8 @@ function Start-GameWatcher {
     $adaptiveCoolMs      = [int]$adaptiveCoolSec * 1000
     $adaptiveConsecutive = 0                      # consecutive pressure readings (tightens cooldown)
     $adaptiveTotalMB     = 0                      # total physical RAM, resolved once
-    if (Test-SuitePlatformWindows) {
-        try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
-    } elseif ($IsLinux) {
-        try { foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) { if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $adaptiveTotalMB = [int](([int64]$Matches[1] * 1024) / 1MB); break } } } catch { }
-    } elseif ($IsMacOS) {
-        try { $hd = & sysctl -n hw.memsize 2>$null; if ($hd) { $adaptiveTotalMB = [int](([int64]$hd) / 1MB) } } catch { }
-    }
+    Add-NativeBoostType
+    try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
     $reassertCounter     = 0                      # throttles per-game priority re-assertion
 
     # ---- idle tracking: ultra-low resource mode ---------------------------
@@ -1367,33 +1208,46 @@ function Start-GameWatcher {
     # ---- precompiled matchers (once per watcher run) -----------------
     # Watching 100+ game names individually via Get-Process -Name forces
     # PowerShell to enumerate the whole process table per name-list. We
-    # instead snapshot the table ONCE per poll and run cheap lowercase
-    # wildcard matches in-process - cheaper on every platform, and on a
-    # low-spec machine this is the difference between 1% and 0.05% CPU.
+    # instead snapshot the table ONCE per poll and run cheap in-process
+    # matching. Almost every game entry is an EXACT name, so those go into
+    # a HashSet for O(1) lookups; only the handful of genuinely wildcard
+    # patterns (eg 'discord*', 'r5apex*') fall back to -like. On a low-spec
+    # machine this is the difference between ~1% CPU and <0.05% while idle.
     $gameWatchPatterns = @($GameNames | ForEach-Object {
         ([string]$_ -replace '\.exe$','').ToLowerInvariant()
     } | Where-Object { $_ -and $_ -notmatch '^(steam|steamservice|steamwebhelper|riotclientservices|gamingservices)$' })
 
+    $exactGameNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($p in $gameWatchPatterns) { if ($p -notmatch '[*?]') { $null = $exactGameNames.Add($p) } }
+    $wildGamePatterns = @($gameWatchPatterns | Where-Object { $_ -match '[*?]' })
+    $wildMatcher = if ($wildGamePatterns.Count -gt 0) { $true } else { $false }
+
     try {
         while ($true) {
             # One native process snapshot serves the whole game lookup for
-            # this poll cycle.
+            # this poll cycle. A generic List avoids the pipeline overhead a
+            # ForEach-Object filter would add per process.
             try {
                 $allProc = [Diagnostics.Process]::GetProcesses()
             } catch {
                 Write-Log ("Process snapshot failed: {0}" -f $_.Exception.Message) 'WARN'
                 $allProc = @()
             }
-            $running = @($allProc | ForEach-Object {
+            $running = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+            foreach ($p in $allProc) {
                 $n = ''
-                try { $n = $_.ProcessName } catch { }
-                if (-not $n) { return }
+                try { $n = $p.ProcessName } catch { }
+                if (-not $n) { continue }
                 $nl = $n.ToLowerInvariant()
-                if ((Test-MatchAny -Name $nl -Patterns $gameWatchPatterns) -and
-                    (Test-ActiveGameProcess -Process $_ -ActiveOnly $ActiveGameOnly)) {
-                    $_                     # game - keep the Process object
+                # O(1) exact-name lookup; only rare wildcard patterns pay the -like loop.
+                $isGame = $exactGameNames.Contains($nl)
+                if (-not $isGame -and $wildMatcher -and (Test-MatchAny -Name $nl -Patterns $wildGamePatterns)) {
+                    $isGame = $true
                 }
-            })
+                if ($isGame -and (Test-ActiveGameProcess -Process $p -ActiveOnly $ActiveGameOnly)) {
+                    $running.Add($p)         # matched game - keep the Process object
+                }
+            }
 
             foreach ($game in $running) {
                 try {
@@ -1617,8 +1471,8 @@ function Start-GameWatcher {
                                     $scaledApplied = $true
                                     $journal['scaledActive'] = $true
                                     # Record whether the mode was stretched so a
-                                    # crash-recovery restore can undo the xrandr
-                                    # transform (not just the mode switch).
+                                    # crash-recovery restore returns the driver to
+                                    # native 1:1 scaling (not just the mode switch).
                                     $nativeNow['Stretched'] = [bool]$stretch
                                     $journal['nativeMode']   = $nativeNow
                                     Save-Journal
@@ -1664,22 +1518,15 @@ function Start-GameWatcher {
                 $nowMs = [datetime]::UtcNow
                 # Only probe free RAM when a purge could ACTUALLY run. Both
                 # purge paths are cooldown-gated, so probing memory on every
-                # poll right after a purge is pure waste - it reads /proc/meminfo
-                # / vm_stat each cycle for zero benefit. Skipping the probe until
-                # a path is eligible trims steady-state watcher CPU during the
-                # exact moments (map rendering, effect bursts) the game is busy.
+                # poll right after a purge is pure waste. Skipping the probe
+                # until a path is eligible trims steady-state watcher CPU during
+                # the exact moments (map rendering, effect bursts) the game is busy.
                 $classicEligible = (($nowMs - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds)
                 $adaptiveEligible = $false
                 if ($adaptiveOn) {
                     if ($adaptiveTotalMB -le 0) {
                         # Resolve total RAM once if the probe failed earlier
-                        if (Test-SuitePlatformWindows) {
-                            try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
-                        } elseif ($IsLinux) {
-                            try { foreach ($ln in (Get-Content /proc/meminfo -ErrorAction Stop)) { if ($ln -match '^MemTotal:\s+(\d+)\s*kB') { $adaptiveTotalMB = [int](([int64]$Matches[1] * 1024) / 1MB); break } } } catch { }
-                        } elseif ($IsMacOS) {
-                            try { $hd = & sysctl -n hw.memsize 2>$null; if ($hd) { $adaptiveTotalMB = [int](([int64]$hd) / 1MB) } } catch { }
-                        }
+                        try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
                     }
                     $adaptiveFloorMB = if ($adaptiveTotalMB -gt 0) { [int]($adaptiveTotalMB * $adaptiveFloorPct / 100.0) } else { $CriticalRamFloorMB }
                     # Under pressure the cooldown tightens (down to half the
@@ -1830,7 +1677,6 @@ function Start-GameWatcher {
         if ($netOn) {
             try { Undo-GameNetworkProfile -JournalState $journal['net'] } catch { }
         }
-        Clear-StopRequest                  # Unix stop marker (Windows: event reset by next start)
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair
         Write-Log 'Game watcher stopped, priorities/timer/resolution/network restored.' 'INFO'
