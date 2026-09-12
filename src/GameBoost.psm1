@@ -104,6 +104,7 @@ public static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
 $script:TimerActive = $false
 $script:TimerPeriod = 2   # period actually requested by timeBeginPeriod
+$script:StandbyPurgeUnavailableLogged = $false
 
 # ------------------------------------------------------------
 # Free RAM (native Win32 call)
@@ -278,7 +279,10 @@ function Clear-StandbyMemory {
     for ($attempt = 1; $attempt -le 3 -and $status -ne 0; $attempt++) {
         $priv = Enable-Privilege 'SeProfileSingleProcessPrivilege'
         if (-not $priv) {
-            Write-Log 'Standby purge: could not enable SeProfileSingleProcessPrivilege (run as Administrator).' 'WARN'
+            if (-not $script:StandbyPurgeUnavailableLogged) {
+                Write-Log 'Standby purge skipped: SeProfileSingleProcessPrivilege is not available in this elevated token. Check the user right assignment or use the Windows built-in Administrator account.' 'WARN'
+                $script:StandbyPurgeUnavailableLogged = $true
+            }
             return
         }
         # Small yield so the token adjust is fully committed inside ntdll.
@@ -294,7 +298,7 @@ function Clear-StandbyMemory {
         $freeGB = [math]::Round((Get-FreeRamMB) / 1024.0, 2)
         Write-Log "Standby memory purged (free RAM now ~$freeGB GB)" 'OK'
     } else {
-        Write-Log ("Standby purge failed with NTSTATUS 0x{0:X8}. This needs Administrator privileges and the SeProfileSingleProcessPrivilege, which could not be asserted." -f $status) 'ERROR'
+        Write-Log ("Standby purge skipped: Windows rejected the memory-list request with NTSTATUS 0x{0:X8} (SeProfileSingleProcessPrivilege is not held)." -f ([uint32]$status)) 'WARN'
     }
 }
 
@@ -963,6 +967,7 @@ function Start-GameWatcher {
         [int]$CriticalRamFloorMB = 768,      # standby purge during play ONLY below this floor
         [int]$PurgeCooldownSeconds = 900,    # minimum seconds between two standby purges
         [switch]$PurgeOnGameLaunch,          # one purge shortly after a game is detected
+        [bool]$AllowMidGamePurge = $false,   # opt-in: standby purges can hitch active gameplay
         [hashtable]$ProfileOverrides = @{},
         [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
@@ -1233,7 +1238,7 @@ function Start-GameWatcher {
                 Write-Log ("Process snapshot failed: {0}" -f $_.Exception.Message) 'WARN'
                 $allProc = @()
             }
-            $running = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+            $matchedGames = [System.Collections.Generic.List[Diagnostics.Process]]::new()
             foreach ($p in $allProc) {
                 $n = ''
                 try { $n = $p.ProcessName } catch { }
@@ -1244,8 +1249,26 @@ function Start-GameWatcher {
                 if (-not $isGame -and $wildMatcher -and (Test-MatchAny -Name $nl -Patterns $wildGamePatterns)) {
                     $isGame = $true
                 }
-                if ($isGame -and (Test-ActiveGameProcess -Process $p -ActiveOnly $ActiveGameOnly)) {
-                    $running.Add($p)         # matched game - keep the Process object
+                if ($isGame) {
+                    $matchedGames.Add($p)    # matched game - keep the Process object
+                }
+            }
+
+            # Prefer the game owning the foreground window, but do not treat
+            # an overlay, launcher, or transient desktop window as proof that
+            # the game ended. During combat this could otherwise restore the
+            # boost/resolution state for one poll and introduce a hitch.
+            $running = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+            if (-not $ActiveGameOnly) {
+                foreach ($game in $matchedGames) { $running.Add($game) }
+            } else {
+                $activeMatches = @($matchedGames | Where-Object {
+                    Test-ActiveGameProcess -Process $_ -ActiveOnly $true
+                })
+                if ($activeMatches.Count -gt 0) {
+                    foreach ($game in $activeMatches) { $running.Add($game) }
+                } else {
+                    foreach ($game in $matchedGames) { $running.Add($game) }
                 }
             }
 
@@ -1514,7 +1537,7 @@ function Start-GameWatcher {
             # mid-frame), so during play it happens ONLY below the critical
             # floor AND at most once per cooldown window. Skipped entirely
             # in low-spec mode.
-            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
+            if ($running.Count -gt 0 -and $AllowMidGamePurge -and -not $lowSpecSkipPurge) {
                 $nowMs = [datetime]::UtcNow
                 # Only probe free RAM when a purge could ACTUALLY run. Both
                 # purge paths are cooldown-gated, so probing memory on every

@@ -39,6 +39,7 @@ $heartbeatMin = if ($cfg['IdleHeartbeatMinutes'])         { [int]$cfg['IdleHeart
 $critFloorMB  = if ($cfg['CriticalRamFloorMB'])          { [int]$cfg['CriticalRamFloorMB'] }          else { 768 }
 $purgeCoolSec = if ($cfg['StandbyPurgeCooldownSeconds']) { [int]$cfg['StandbyPurgeCooldownSeconds'] } else { 900 }
 $purgeLaunch  = if ($null -ne $cfg['PurgeOnGameLaunch']) { [bool]$cfg['PurgeOnGameLaunch'] }          else { $true }
+$midGamePurge = if ($null -ne $cfg['AllowMidGamePurge'])  { [bool]$cfg['AllowMidGamePurge'] }          else { $false }
 
 # Pre-game optimization (applies tweaks before game process appears)
 $preGameOpt   = if ($null -ne $cfg['PreGameOptimization'])   { [bool]$cfg['PreGameOptimization'] }   else { $true }
@@ -216,7 +217,8 @@ function Invoke-Watcher {
             -IdleHeartbeatMinutes $heartbeatMin `
             -FreeRamThresholdMB $ramFloorMB `
             -CriticalRamFloorMB $critFloorMB -PurgeCooldownSeconds $purgeCoolSec `
-            -PurgeOnGameLaunch:([bool]$purgeLaunch) -ProfileOverrides $profOv `
+            -PurgeOnGameLaunch:([bool]$purgeLaunch) -AllowMidGamePurge:([bool]$midGamePurge) `
+            -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
             -LowSpecSettings $lowSpecEff `

@@ -145,6 +145,10 @@
     # is detected (the loading screen absorbs the cost) and during play
     # only below the critical floor, at most once per cooldown.
     PurgeOnGameLaunch           = $true   # one purge right when a game is detected
+    # Standby purges pause the memory manager and can cause a visible hitch
+    # during combat/effects. Keep this off unless the machine is genuinely
+    # exhausting RAM while a game is already running.
+    AllowMidGamePurge           = $false
     CriticalRamFloorMB          = 768     # mid-game purge ONLY below this free-RAM floor
     StandbyPurgeCooldownSeconds = 900     # minimum seconds between two purges
     FreeRamThresholdMB          = 2048    # deprecated (kept for compatibility)

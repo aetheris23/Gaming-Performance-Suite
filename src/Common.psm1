@@ -117,10 +117,14 @@ public struct TOKENPRIVILEGES
         $tp.PrivilegeCount = 1
         $tp.Luid       = $luid
         $tp.Attributes = $SE_PRIVILEGE_ENABLED
-        [void][Suite.NativeToken]::AdjustTokenPrivileges($token, $false, [ref]$tp, 0, [IntPtr]::Zero, [IntPtr]::Zero)
-        # ERROR_SUCCESS (0) or ERROR_NOT_ALL_ASSIGNED (1300) -> token updated as far as possible
+        $adjusted = [Suite.NativeToken]::AdjustTokenPrivileges(
+            $token, $false, [ref]$tp, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+        if (-not $adjusted) { return $false }
+        # ERROR_NOT_ALL_ASSIGNED (1300) means the token does not contain this
+        # privilege; treating it as success causes privileged native calls to
+        # fail later with STATUS_PRIVILEGE_NOT_HELD.
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        return ($err -eq 0 -or $err -eq 1300)
+        return ($err -eq 0)
     } finally {
         if ($token -ne [IntPtr]::Zero) { [void][Suite.NativeToken]::CloseHandle($token) }
     }
