@@ -21,12 +21,10 @@ scan now stays native to Windows and much lighter on the CPU.
   idle, and no lag/voice cutouts that accumulate during long sessions on weak CPUs.
 - **Microphone noise suppression + echo cancellation (Windows 10 1809+ / 11).**
   The suite drives the OS capture-stream DSP - Deep Noise Suppression + classic Noise
-  Suppression + Acoustic Echo Cancellation - and, where Windows lacks Deep NS (the
-  common Windows 10 case), layers in an embedded real-time software suppressor so
-  distant background speech (a call to prayer, people talking nearby, room/street
-  noise), fans, traffic and the game's own audio leaking into your mic are removed
-  automatically while you game. It engages when a game starts and is released the
-  moment the last game closes.
+  Suppression + Acoustic Echo Cancellation. The software fallback is now opt-in
+  because it has no virtual-microphone sink and sending processed mic audio to the
+  default speakers can cause feedback, volume pumping, and voice-chat delay. It
+  engages when a game starts and is released the moment the last game closes.
 - **Watcher auto-stops on game close.** The background watcher now exits completely
   when your game session ends instead of idling resident in memory, so there is no
   lingering overhead, priority/timer/network state is fully restored, and nothing
@@ -193,22 +191,18 @@ Windows 11:
 
 - **Windows 11 (and any Windows that exposes Deep NS):** the OS AI Deep Noise
   Suppression pipeline is driven directly - automatic and instant.
-- **Windows 10 (or where deep NS is absent):** Windows 10's classic NS alone
-  leaves loud/intermittent background noise (fans, traffic, broadcasts) audible,
-  so the suite layers in its **own embedded real-time spectral noise suppressor**
-  - a self-contained, allocation-light DSP (no installs) that strips that
-  background noise in real time and also renders the cleaned stream to the
-  default audio output.
+- **Windows 10 (or where deep NS is absent):** Windows 10's classic NS remains
+  available through the platform effects manager. The optional embedded
+  real-time spectral suppressor is disabled by default because it requires a
+  virtual-microphone routing setup.
 
 The DSP engages **automatically while a game runs** (per-game-session) and is released
 the moment the last game closes - it never lingers on the desktop and the host process
 exits completely.
 
-> **Note on routing.** The OS effects apply to every app using the mic. Because
-> Windows 10 has no universal deep-NS driver, the real-time software filter's cleaned
-> output is streamed to the default audio output; to feed it to a specific chat app,
-> enable that app to use loopback / "Listen to this device" (or install a virtual-cable
-> mic and point `ExternalEngine` at it) for the strongest result.
+> **Note on routing.** The OS effects apply to every app using the mic. If you
+> explicitly enable `SoftwareFallback`, route its output through a virtual cable
+> to a chat app; do not use the default speakers as the microphone destination.
 
 Configured in `src/Config.ps1`:
 
@@ -261,7 +255,7 @@ LowSpecMode = @{
 What low-spec mode does:
 - **Auto-detection**: weak CPU (≤4 threads or low clock) + legacy GPU → enabled
   for you automatically; strong machines stay at full strength
-- **Polling intervals**: 15s gaming / 35s idle (vs 10s/25s) - less CPU overhead
+- **Polling intervals**: 15s gaming / 35s idle - less CPU overhead
 - **BelowNormal watcher priority**: yields to everything else on the system
 - **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
 - **Gentler standby purges**: only when RAM critically low, with cooldown gates
@@ -380,7 +374,7 @@ Configure in `src/Config.ps1` under `AdaptiveTuning`:
 
 ```powershell
 AdaptiveTuning = @{
-    Enabled              = $true
+    Enabled              = $false
     AdaptivePurgeFloor   = 10      # % of total RAM treated as "under pressure"
     PressureCooldownSec  = 60      # min seconds between adaptive purges
     ReassertPriorities   = $true   # periodically re-apply game priority/affinity

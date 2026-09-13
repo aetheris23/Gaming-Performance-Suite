@@ -28,13 +28,13 @@ $cfgPath = Join-Path $root 'Config.ps1'
 $cfg = if (Test-Path $cfgPath) { & $cfgPath } else { @{} }
 $gameNames  = if ($cfg['GameProcesses'])      { $cfg['GameProcesses'] }      else { @('VALORANT-Win64','pcsx2','cs2') }
 $activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGameOnly'] } else { $true }
-$pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 10 }
+$pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 15 }
 $ramFloorMB = if ($cfg['FreeRamThresholdMB']) { [int]$cfg['FreeRamThresholdMB'] } else { 2048 }
 $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
 
 # Stutter-safe standby-purge policy (see Config.ps1 for details)
-$idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds'] }             else { 25 }
-$extIdleSecs  = if ($cfg['ExtendedIdlePollSeconds'])      { [int]$cfg['ExtendedIdlePollSeconds'] }      else { 60 }
+$idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds']             }             else { 35 }
+$extIdleSecs  = if ($cfg['ExtendedIdlePollSeconds'])      { [int]$cfg['ExtendedIdlePollSeconds']      }      else { 90 }
 $heartbeatMin = if ($cfg['IdleHeartbeatMinutes'])         { [int]$cfg['IdleHeartbeatMinutes'] }         else { 5 }
 $critFloorMB  = if ($cfg['CriticalRamFloorMB'])          { [int]$cfg['CriticalRamFloorMB'] }          else { 768 }
 $purgeCoolSec = if ($cfg['StandbyPurgeCooldownSeconds']) { [int]$cfg['StandbyPurgeCooldownSeconds'] } else { 900 }
@@ -499,7 +499,8 @@ try {
                         Start-NoiseSuppressionExternal -Engine $nsCfg['ExternalEngine'] -Args $nsCfg['ExternalArgs']
                     } elseif (Test-VoiceDspPlatform) {
                         $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.85 }
-                        Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg
+                        $nsFallback = if ($null -ne $nsCfg['SoftwareFallback']) { [bool]$nsCfg['SoftwareFallback'] } else { $false }
+                        Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg -SoftwareFallback $nsFallback
                     } else {
                         Write-Log 'Mic DSP unavailable on this platform (needs Windows 10 1809 or later).' 'WARN'
                         }

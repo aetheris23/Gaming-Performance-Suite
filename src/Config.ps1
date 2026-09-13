@@ -125,9 +125,9 @@
     # cannot report a foreground process, the watcher safely falls back to
     # matching the configured game list.
     ActiveGameOnly         = $true
-    WatcherPollSeconds     = 10      # scan cadence while a game is running
-    IdlePollSeconds        = 25      # slower cadence while NO game runs (lighter idle load)
-    ExtendedIdlePollSeconds= 60      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
+    WatcherPollSeconds     = 15      # scan cadence while a game is running
+    IdlePollSeconds        = 35      # slower cadence while NO game runs (lighter idle load)
+    ExtendedIdlePollSeconds= 90      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
     IdleHeartbeatMinutes   = 5       # log "watcher alive" every N minutes while idle (0 = off)
 
     # ---- Session lifecycle ----------------------------------
@@ -199,7 +199,10 @@
     #                          affinity if the OS or heavy load knocked it back
     #   ReassertEveryCycles  : re-check every N poll cycles during play
     AdaptiveTuning = @{
-        Enabled              = $true
+        # Standby-list purges suspend the memory manager and can hitch frames
+        # during combat/effect bursts. Keep this opt-in; launch-time purge
+        # remains available through PurgeOnGameLaunch.
+        Enabled              = $false
         AdaptivePurgeFloor   = 10
         PressureCooldownSec  = 60
         ReassertPriorities   = $true
@@ -343,11 +346,13 @@
     # Turns the OS microphone into a clean, party-ready source while you
     # game. On Windows 10 1809+/11 the suite drives the platform DSP (Deep
     # Noise Suppression + classic Noise Suppression + Acoustic Echo
-    # Cancellation), and where Windows lacks Deep NS (Windows 10) it also
-    # layers in an embedded real-time spectral suppressor, so distant
+    # Cancellation). The optional software fallback is disabled by default
+    # because it has no virtual-microphone sink and must not play mic audio
+    # through the default speakers. This avoids feedback and voice-chat delay.
     # background speech (a call to prayer, people talking nearby, room/street
     # noise), fans, traffic and the game's own audio leaking into your mic
-    # are removed regardless of volume - only your voice reaches the party.
+    # are removed when the platform DSP supports them - only your voice
+    # reaches the party without routing mic audio to the speakers.
     #   Enabled          : master switch (auto-engages while a game runs)
     #   ElevateMicBoost  : also raise the mic thread scheduling priority
     #   ExternalEngine   : optional path to your own noise-suppression host
@@ -356,6 +361,10 @@
     NoiseSuppression = @{
         Enabled         = $true
         ElevateMicBoost = $true
+        # The software fallback has no virtual-microphone sink and would
+        # render the processed mic to the default speakers. Keep it off by
+        # default to prevent feedback, level pumping, and voice-chat delay.
+        SoftwareFallback = $false
         ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
         ExternalArgs    = ''
         Aggressiveness  = 1.85   # 0.5-2.0; higher removes more background sound

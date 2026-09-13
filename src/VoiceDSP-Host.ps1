@@ -17,7 +17,8 @@
 
 param(
     [string]$Root = $PSScriptRoot,
-    [double]$Aggressiveness = 1.55
+    [double]$Aggressiveness = 1.55,
+    [bool]$SoftwareFallback = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,7 +66,7 @@ try {
         Start-Sleep -Milliseconds 400
         try { $deepNs = (Test-VoiceDeepNSPresent) } catch { $deepNs = $false }
     }
-    if (-not $deepNs) {
+    if (-not $deepNs -and $SoftwareFallback) {
         $rtStatus = Start-VoiceRealTimeFilter -Aggressive $Aggressiveness
         if ($rtStatus -like 'running:*') {
             $realTimeActive = $true
@@ -73,8 +74,10 @@ try {
         } else {
             Write-Log ("Mic DSP: real-time software filter could not start ({0}); using only whatever the OS DSP provides." -f $rtStatus) 'WARN'
         }
-    } else {
+    } elseif ($deepNs) {
         Write-Log 'Mic DSP: Deep Noise Suppression present on this OS - using Windows AI noise suppression.' 'OK'
+    } else {
+        Write-Log 'Mic DSP: software fallback disabled; using the platform capture effects only.' 'INFO'
     }
 
     # 3) Raise our scheduling priority for the audio threads.
