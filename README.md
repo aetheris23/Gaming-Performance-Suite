@@ -102,6 +102,32 @@ Prerequisite: Windows 10/11 with built-in PowerShell 5.1+ - nothing to install.
 > extracting the ZIP can never duplicate or overwrite the builder. Rebuild only from
 > the source repository (step 2).
 
+### Portable operation and low-resource behavior
+
+The runtime package is drive-letter independent. After extraction or after moving
+the folder, the launchers and PowerShell modules resolve the suite root from their
+own location rather than from a fixed `C:\` or `D:\` path. This remains true when
+the folder is placed on another internal drive, an external drive, or a USB stick.
+The suite does not install services, drivers, scheduled tasks, registry startup
+entries, or system-wide files; its diagnostic logs and recovery journal stay under
+the package's own `logs/` directory.
+
+The optimizer is also designed to stay lightweight on older PCs and laptops:
+
+- Low-spec mode is auto-detected and uses longer polling intervals, a
+  `BelowNormal` watcher priority, throttled scans, and gentler optional actions.
+- The watcher uses one native process snapshot per poll, avoids repeated WMI work
+  in the hot loop, and exits when the monitored game session ends.
+- Expensive actions are staged around game launch and guarded by cooldowns so they
+  do not continuously consume CPU, memory, or power during gameplay.
+- Moving the package between an HDD and SSD does not change runtime behavior or
+  require reconfiguration. An SSD can improve startup and log I/O latency, but the
+  suite's in-game CPU, memory, and polling footprint is the same.
+
+Peak FPS still depends on the game, drivers, thermals, and available hardware;
+portability guarantees the suite can run from the new location, while the
+low-spec controls minimize the suite's own overhead.
+
 ## What happens when you start a game
 
 The watcher polls cheaply - every 15 s while a game runs (low-spec default), every
@@ -430,9 +456,11 @@ logs/
 
 ## Portable install
 
-The suite is fully portable. Copy the folder (or extracted ZIP) anywhere - `D:\`, USB
-stick, home directory - and run. Everything resolves relative to its own folder;
-nothing is registered system-wide. Delete the folder and it is completely gone.
+The suite is fully portable. Copy the folder (or extracted ZIP) anywhere - `C:\`,
+`D:\`, `E:\`, `F:\`, another drive letter, an HDD, an SSD, or a USB stick - and run.
+Everything resolves relative to its own folder; no drive letter is embedded in the
+runtime. Nothing is registered system-wide, and deleting the folder removes the
+suite's files completely.
 
 ## Notes & safety
 

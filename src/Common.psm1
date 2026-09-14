@@ -14,6 +14,26 @@ $script:LogDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPat
 if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path $script:LogDir | Out-Null }
 $script:LogFile = Join-Path $script:LogDir ("suite_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 
+# Scope named coordination objects to this installation. Without a stable
+# per-folder suffix, two extracted copies on different drives share one global
+# mutex/event and a moved copy can incorrectly report the other copy as running.
+$script:SuiteIdentity = $null
+try {
+    $suiteRootForIdentity = [System.IO.Path]::GetFullPath(
+        (Split-Path -Parent (Split-Path -Parent $PSCommandPath))).TrimEnd('\').ToLowerInvariant()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($suiteRootForIdentity))
+    } finally {
+        $sha.Dispose()
+    }
+    $script:SuiteIdentity = (-join ($hashBytes | ForEach-Object { $_.ToString('x2') })).Substring(0, 16)
+} catch {
+    # The script path is always available for normal execution; this fallback
+    # keeps module import usable in constrained PowerShell hosts.
+    $script:SuiteIdentity = 'default'
+}
+
 function Remove-SuiteLogs {
     <#
         Logs are diagnostic-only session artifacts. Remove old files at
@@ -152,8 +172,8 @@ function Test-SuitePlatformWindows {
 $script:RuntimeDir = Join-Path $script:LogDir 'runtime'
 if (-not (Test-Path $script:RuntimeDir)) { New-Item -ItemType Directory -Path $script:RuntimeDir | Out-Null }
 
-function Get-WatcherStopEventName { 'Global\GamingPerformanceSuite_Stop' }
-function Get-WatcherMutexName     { 'Global\GamingPerformanceSuite_Instance' }
+function Get-WatcherStopEventName { "Global\GamingPerformanceSuite_${script:SuiteIdentity}_Stop" }
+function Get-WatcherMutexName     { "Global\GamingPerformanceSuite_${script:SuiteIdentity}_Instance" }
 function Get-WatcherPidFile       { Join-Path $script:RuntimeDir 'watcher.pid' }
 
 function New-WatcherStopEvent {
