@@ -148,6 +148,7 @@ namespace SuiteVoice
 
         static readonly Guid IID_IAudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         static readonly Guid IID_IAudioEffectsManager = new Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8");
+        static readonly Guid IID_IAudioCaptureClient = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
 
         // Effect GUIDs
         static readonly Guid EFFECT_DEEP_NS = new Guid("6f64add0-8211-11e2-8c70-2c27d7f001fa");
@@ -157,10 +158,14 @@ namespace SuiteVoice
         // One capture "session": owns the client + effects manager + prior states
         static IntPtr _clientPtr = IntPtr.Zero;
         static object _effectsObj = null;
+        static Thread _drainThread;      // drains the live capture stream
+        static volatile bool _drainRun;  // so the shared endpoint never overflows
+        static object _capRcw;           // keeps the capture-client RCW alive
+        static string _effectsSummary = "";   // what Enable() observed on the endpoint
         // priorState per effect id: -1 = unavailable, else previous AUDIO_EFFECT_STATE
         static System.Collections.Generic.Dictionary<Guid, int> _prior = new System.Collections.Generic.Dictionary<Guid, int>();
 
-        public static string Enable()
+        public static string Enable(bool forceAcousticEchoCancellation)
         {
             try
             {
@@ -216,7 +221,26 @@ namespace SuiteVoice
                 _clientPtr  = actsite;
 
                 // Query current effects and record prior states before toggling.
-                ApplyEffects(eMgr, true);
+                ApplyEffects(eMgr, true, forceAcousticEchoCancellation);
+
+                // The DSP stays engaged only while a live capture stream exists.
+                // Drain that stream on a background thread so its buffer can never
+                // fill up: an unread capture buffer on some driver stacks makes
+                // the whole shared endpoint hiccup - audible as game/speaker audio
+                // cutting out for no reason while the host is alive.
+                object capSvcObj;
+                Guid iidCap = IID_IAudioCaptureClient;
+                int capSvcHr = client.GetService(ref iidCap, out capSvcObj);
+                if (capSvcHr == 0 && capSvcObj != null)
+                {
+                    _drainRun = true;
+                    _capRcw = capSvcObj;
+                    IAudioCaptureClient capGrab = (IAudioCaptureClient)capSvcObj;
+                    _drainThread = new Thread(() => DrainLoop(capGrab));
+                    _drainThread.IsBackground = true;
+                    _drainThread.Priority = ThreadPriority.AboveNormal;
+                    _drainThread.Start();
+                }
                 return "enabled";
             }
             catch (Exception ex)
@@ -227,11 +251,14 @@ namespace SuiteVoice
         }
 
         // Turn effects ON (enable) or restore prior states (disable).
-        static void ApplyEffects(IAudioEffectsManager eMgr, bool enable)
+        // Deep/classic Noise Suppression are always honored. Acoustic Echo
+        // Cancellation is only forced ON when the user explicitly opts in:
+        // forcing AEC against an imperfect render reference is a well-known
+        // cause of a quiet, flat microphone, and on some driver stacks it
+        // agitates the whole shared audio endpoint (intermittent dropouts).
+        static void ApplyEffects(IAudioEffectsManager eMgr, bool enable, bool forceAec)
         {
-            Guid[] wanted = enable
-                ? new Guid[] { EFFECT_DEEP_NS, EFFECT_NS, EFFECT_AEC }
-                : new Guid[] { EFFECT_DEEP_NS, EFFECT_NS, EFFECT_AEC };
+            bool presentDeep = false, presentNs = false, presentAec = false;
 
             IntPtr effPtr;
             uint count;
@@ -245,16 +272,22 @@ namespace SuiteVoice
                     IntPtr slot = new IntPtr(effPtr.ToInt64() + (i * Marshal.SizeOf(typeof(AUDIO_EFFECT))));
                     AUDIO_EFFECT fx = (AUDIO_EFFECT)Marshal.PtrToStructure(slot, typeof(AUDIO_EFFECT));
 
-                    bool isWanted = fx.id == EFFECT_DEEP_NS || fx.id == EFFECT_NS || fx.id == EFFECT_AEC;
-                    if (!isWanted) continue;
+                    bool isDeep = fx.id == EFFECT_DEEP_NS;
+                    bool isNs   = fx.id == EFFECT_NS;
+                    bool isAec  = fx.id == EFFECT_AEC;
+                    if (!(isDeep || isNs || isAec)) continue;
+
+                    if (isDeep) presentDeep = true;
+                    if (isNs)   presentNs   = true;
+                    if (isAec)  presentAec  = true;
 
                     if (enable)
                     {
                         // Remember what it was so Disable can restore it.
                         if (!_prior.ContainsKey(fx.id)) { _prior[fx.id] = fx.state; }
-                        if (fx.canSetState && fx.state == 0)   // OFF
+                        bool shouldEnable = (isDeep || isNs) || (isAec && forceAec);
+                        if (fx.canSetState && fx.state == 0 && shouldEnable)   // OFF -> 1 (ON)
                         {
-                            // 1 = ON
                             eMgr.SetAudioEffectState(fx.id, 1);
                         }
                     }
@@ -272,7 +305,39 @@ namespace SuiteVoice
             {
                 Marshal.FreeCoTaskMem(effPtr);
             }
+
+            // Record what the endpoint exposes so the host does not need to
+            // open a second live client to answer "is Deep NS present here?".
+            if (enable)
+            {
+                _effectsSummary = "deepNS=" + (presentDeep ? "True" : "False") +
+                    ",ns=" + (presentNs ? "True" : "False") +
+                    ",aec=" + (presentAec ? "True" : "False");
+            }
         }
+
+        // Background drain of the live capture stream (started by Enable()).
+        static void DrainLoop(IAudioCaptureClient cap)
+        {
+            try
+            {
+                while (_drainRun)
+                {
+                    uint next;
+                    while (_drainRun && cap.GetNextPacketSize(out next) == 0 && next > 0)
+                    {
+                        IntPtr data; uint frames; int flags;
+                        if (cap.GetBuffer(out data, out frames, out flags, IntPtr.Zero, IntPtr.Zero) != 0) break;
+                        cap.ReleaseBuffer(frames);
+                    }
+                    Thread.Sleep(60);
+                }
+            }
+            catch { }
+        }
+
+        // What Enable() observed on the endpoint, without touching the device.
+        public static string EffectsSummary() { return _effectsSummary; }
 
         // Report which OS effects are exposed on the default comms capture
         // endpoint (no state change). Used to decide if a real-time software
@@ -330,12 +395,17 @@ namespace SuiteVoice
 
         public static string Disable()
         {
+            _drainRun = false;
+            try { if (_drainThread != null) _drainThread.Join(300); } catch { }
+            _drainThread = null;
+            _capRcw = null;
+            _effectsSummary = "";
             try
             {
                 if (_effectsObj != null && _clientPtr != IntPtr.Zero)
                 {
                     IAudioEffectsManager eMgr = (IAudioEffectsManager)_effectsObj;
-                    ApplyEffects(eMgr, false);
+                    ApplyEffects(eMgr, false, false);
                 }
             }
             catch { }
@@ -412,6 +482,10 @@ namespace SuiteVoice
         // Processed mono output ring, drained by the render thread
         static float[] _outRing;
         static int _outHead, _outTail;
+        // Reused batch buffers - no per-sample object / P/Invoke churn
+        static float[] _capFloatBuf;
+        static short[] _capShortBuf;
+        static float[] _renFloatBuf;
 
         // DSP scratch / state
         static float[] _win;
@@ -439,8 +513,9 @@ namespace SuiteVoice
             // speech and fans.  The soft floor preserves consonants.
             _aAggr = aggressiveness < 0.5 ? 0.5 : (aggressiveness > 2.0 ? 2.0 : aggressiveness);
             // Spectral floor: higher aggressiveness -> deeper suppression of
-            // residual musical noise, still keeps low-level voice harmonics.
-            _noiseFloor = _aAggr >= 1.55f ? 0.008f : (_aAggr >= 1.3f ? 0.02f : 0.06f);
+            // residual musical noise, but never low enough to eat soft speech.
+            // (The old 0.008 floor made quiet/soft voices virtually inaudible.)
+            _noiseFloor = _aAggr >= 1.6f ? 0.06f : (_aAggr >= 1.3f ? 0.09f : 0.12f);
 
             try
             {
@@ -523,6 +598,10 @@ namespace SuiteVoice
                 _renClientRcw = renClient;
                 _capThread = new Thread(new ThreadStart(() => CaptureLoop(capGrab)));
                 _renThread = new Thread(new ThreadStart(() => RenderLoop(renClient, renGrab, renRate, renCh)));
+                // Audio threads must not starve under game load or they miss
+                // their buffer deadlines - the top cause of dropouts/garble.
+                try { _capThread.Priority = ThreadPriority.AboveNormal; } catch { }
+                try { _renThread.Priority = ThreadPriority.AboveNormal; } catch { }
 
                 // Rolling buffers sized for ~0.5 s at the capture rate.
                 _monoIn = new float[_sampleRate / 2];
@@ -618,12 +697,18 @@ namespace SuiteVoice
                 else        { _noisePow[i] = (p < np) ? (np + (p - np) * 0.25f) : (np + (p - np) * 0.035f); }
             }
             _noiseFrameEnergy = framePow;
-            // 3) oversubtractive spectral gating with a soft floor
+            // 3) spectral gating with a voice-preserving soft floor. The noise
+            //    subtraction is capped at 1.2x the estimate so quiet / lower-
+            //    volume speech is never squashed into inaudibility, and every
+            //    bin keeps at least the soft floor so consonants survive.
+            //    (Over-subtracting at the old 1.5-1.85x multiplier is what made
+            //    a normal voice "too quiet for the party").
+            float sub = (float)Math.Min(1.2, _aAggr);
             for (int i = 0; i <= FFTSIZE / 2; i++)
             {
                 float p = _pow[i];
                 float np = _noisePow[i];
-                float gain = (p - np * (float)_aAggr) / (p + 1e-6f);
+                float gain = (p - np * sub) / (p + 1e-6f);
                 if (gain < _noiseFloor) gain = _noiseFloor;
                 if (gain > 1f) gain = 1f;
                 _re[i] *= gain; _im[i] *= gain;
@@ -669,36 +754,46 @@ namespace SuiteVoice
 
         static void FeedRaw(IntPtr data, uint frames, bool silent)
         {
-            long base_ = data.ToInt64();
             int ch = _channels;
+            int total = (int)frames * ch;
+            if (total <= 0) return;
+            // Batch-decode straight into reused arrays (Marshal.Copy has no
+            // per-sample P/Invoke or object allocations - the old per-sample
+            // Marshal.PtrToStructure churn is what made the capture thread
+            // jitter and the whole audio path stutter on weak CPUs).
             if (_capFloat)
             {
-                for (uint f = 0; f < frames; f++)
+                if (_capFloatBuf == null || _capFloatBuf.Length < total) _capFloatBuf = new float[total];
+                Marshal.Copy(data, _capFloatBuf, 0, total);
+                for (int f = 0; f < (int)frames; f++)
                 {
                     float s = 0f;
-                    for (int c = 0; c < ch; c++)
-                        s += Marshal.PtrToStructure<float>(new IntPtr(base_ + ((long)(f * ch + c) * 4)));
-                    s /= ch;
-                    FeedSample(silent ? 0f : s);
+                    int off = f * ch;
+                    for (int c = 0; c < ch; c++) s += _capFloatBuf[off + c];
+                    FeedSample(silent ? 0f : (s / ch));
                 }
             }
             else
             {
-                for (uint f = 0; f < frames; f++)
+                if (_capShortBuf == null || _capShortBuf.Length < total) _capShortBuf = new short[total];
+                Marshal.Copy(data, _capShortBuf, 0, total);
+                for (int f = 0; f < (int)frames; f++)
                 {
                     float s = 0f;
-                    for (int c = 0; c < ch; c++)
-                    {
-                        short v = Marshal.PtrToStructure<short>(new IntPtr(base_ + ((long)(f * ch + c) * 2)));
-                        s += v / 32768f;
-                    }
-                    s /= ch;
-                    FeedSample(silent ? 0f : s);
+                    int off = f * ch;
+                    for (int c = 0; c < ch; c++) s += _capShortBuf[off + c] / 32768f;
+                    FeedSample(silent ? 0f : (s / ch));
                 }
             }
         }
 
         // Render thread: drain cleaned mono and upmix to float32 render buffer.
+        // Samples are written in ONE Marshal.Copy burst (no per-frame
+        // BitConverter/Marshal.WriteInt32 garbage - that churn made the render
+        // thread miss deadlines), and an underrun is released as a SILENT
+        // packet so the shared output is never fed stale/zero frames. Both old
+        // behaviors disturbed every app mixing on the endpoint -> the game
+        // audio used to cut out whenever the DSP briefly lagged.
         static void RenderLoop(IAudioClient renClient, IAudioRenderClient ren, int rate, int ch)
         {
             try
@@ -714,13 +809,24 @@ namespace SuiteVoice
                     if (available < (uint)(rate / 100)) continue;
                     IntPtr ptr;
                     if (ren.GetBuffer(available, out ptr) != 0) continue;
-                    long b = ptr.ToInt64();
-                    for (uint f = 0; f < available; f++)
+
+                    int have = (_outTail - _outHead + _outRing.Length) % _outRing.Length;
+                    if (!_running) { ren.ReleaseBuffer(available, AUDCLNT_BUFFERFLAGS_SILENT); break; }
+                    if (have < (int)available)
+                    {
+                        ren.ReleaseBuffer(available, AUDCLNT_BUFFERFLAGS_SILENT);
+                        continue;
+                    }
+
+                    int framesOut = (int)available;
+                    int samples = framesOut * ch;
+                    if (_renFloatBuf == null || _renFloatBuf.Length < samples) _renFloatBuf = new float[samples];
+                    for (int f = 0; f < framesOut; f++)
                     {
                         float v = PopOut();
-                        for (int c = 0; c < ch; c++)
-                            Marshal.WriteInt32(new IntPtr(b + ((long)(f * ch + c) * 4)), BitConverter.ToInt32(BitConverter.GetBytes(v), 0));
+                        for (int c = 0; c < ch; c++) _renFloatBuf[f * ch + c] = v;
                     }
+                    Marshal.Copy(_renFloatBuf, 0, ptr, samples);
                     ren.ReleaseBuffer(available, 0);
                 }
             }
@@ -872,7 +978,8 @@ function Enable-VoiceNoiseSuppression {
     [CmdletBinding()]
     param(
         [double]$Aggressiveness = 1.55,
-        [bool]$SoftwareFallback = $false
+        [bool]$SoftwareFallback = $false,
+        [bool]$EchoCancellation = $false
     )
 
     if (-not (Test-VoiceDspPlatform)) {
@@ -887,7 +994,7 @@ function Enable-VoiceNoiseSuppression {
         Ensure-VoiceDspEngine
         # The DSP stays engaged only while a capture stream is held open, so we
         # spawn a hidden host process that owns the stream until told to stop.
-        $launched = Start-VoiceDspHost -Aggressiveness $Aggressiveness -SoftwareFallback $SoftwareFallback
+        $launched = Start-VoiceDspHost -Aggressiveness $Aggressiveness -SoftwareFallback $SoftwareFallback -EchoCancellation $EchoCancellation
         if ($launched) {
             Write-Log 'Mic DSP engaged: deep noise suppression + echo cancellation active (background noise, distant voices & game/speaker echo removed).' 'OK'
             return $true
@@ -932,7 +1039,8 @@ function Get-VoiceDspHostScript {
 function Start-VoiceDspHost {
     param(
         [double]$Aggressiveness = 1.55,
-        [bool]$SoftwareFallback = $false
+        [bool]$SoftwareFallback = $false,
+        [bool]$EchoCancellation = $false
     )
     if (-not (Test-Path $script:VoiceDspTokensDir)) { New-Item -ItemType Directory -Path $script:VoiceDspTokensDir -Force | Out-Null }
     Remove-Item $script:VoiceDspStopFile -Force -ErrorAction SilentlyContinue
@@ -946,7 +1054,8 @@ function Start-VoiceDspHost {
     $safeAggressiveness = [Math]::Max(0.5, [Math]::Min(2.0, $Aggressiveness))
     $args = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $hostScript,
               "-Root", $mainsrc, '-Aggressiveness', "$safeAggressiveness",
-              '-SoftwareFallback', "$SoftwareFallback")
+              '-SoftwareFallback', "$SoftwareFallback",
+              '-EchoCancellation', "$EchoCancellation")
     try {
         $p = Start-Process -FilePath $pwsh -ArgumentList $args -WindowStyle Hidden -PassThru
         Start-Sleep -Milliseconds 600

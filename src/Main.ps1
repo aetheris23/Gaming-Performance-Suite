@@ -405,7 +405,9 @@ function Show-Status {
     if ($nsEnabled -and $nsCfg['ExternalEngine']) {
         Write-Log ("Mic noise suppression: external engine configured ({0}) - {1}" -f $nsCfg['ExternalEngine'], $nsActive) 'INFO'
     } elseif ($nsEnabled) {
-        Write-Log ("Mic noise suppression (deep NS + echo cancellation): {0} (Windows DSP)" -f $nsActive) 'INFO'
+        $nsEcho = if ($null -ne $nsCfg['EchoCancellation']) { [bool]$nsCfg['EchoCancellation'] } else { $false }
+        Write-Log ("Mic noise suppression (deep NS + classic NS{0}): {1} (Windows DSP)" -f `
+            $(if ($nsEcho) { ' + echo cancellation' } else { '' }), $nsActive) 'INFO'
     } else {
         Write-Log 'Mic noise suppression: DISABLED in Config.ps1' 'INFO'
     }
@@ -498,9 +500,10 @@ try {
                     if ($nsCfg['ExternalEngine']) {
                         Start-NoiseSuppressionExternal -Engine $nsCfg['ExternalEngine'] -Args $nsCfg['ExternalArgs']
                     } elseif (Test-VoiceDspPlatform) {
-                        $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.85 }
+                        $nsAgg = if ($nsCfg['Aggressiveness']) { [double]$nsCfg['Aggressiveness'] } else { 1.25 }
                         $nsFallback = if ($null -ne $nsCfg['SoftwareFallback']) { [bool]$nsCfg['SoftwareFallback'] } else { $false }
-                        Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg -SoftwareFallback $nsFallback
+                        $nsEcho = if ($null -ne $nsCfg['EchoCancellation']) { [bool]$nsCfg['EchoCancellation'] } else { $false }
+                        Enable-VoiceNoiseSuppression -Aggressiveness $nsAgg -SoftwareFallback $nsFallback -EchoCancellation $nsEcho
                     } else {
                         Write-Log 'Mic DSP unavailable on this platform (needs Windows 10 1809 or later).' 'WARN'
                         }

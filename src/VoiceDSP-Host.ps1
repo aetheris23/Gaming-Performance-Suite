@@ -18,7 +18,8 @@
 param(
     [string]$Root = $PSScriptRoot,
     [double]$Aggressiveness = 1.55,
-    [bool]$SoftwareFallback = $false
+    [bool]$SoftwareFallback = $false,
+    [bool]$EchoCancellation = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +45,7 @@ try {
 
     # 1) Engage whatever the OS DSP exposes (Deep NS / classic NS / AEC).
     #    Keep the capture stream (and any effects manager) alive.
-    $state = [SuiteVoice.MicNoiseSuppression]::Enable()
+    $state = [SuiteVoice.MicNoiseSuppression]::Enable($EchoCancellation)
     $msg = switch ($state) {
         'enabled'          { 'Mic DSP host engaged.' }
         'already-running'  { 'Mic DSP host already running.' }
@@ -60,12 +61,15 @@ try {
     #    to strip that background noise completely.
     $realTimeActive = $false
     $deepNs = $false
-    try { $deepNs = (Test-VoiceDeepNSPresent) } catch { $deepNs = $false }
-    if (-not $deepNs) {
-        # Capture still coming up? Give the endpoint a moment before probing.
-        Start-Sleep -Milliseconds 400
-        try { $deepNs = (Test-VoiceDeepNSPresent) } catch { $deepNs = $false }
-    }
+    try {
+        # Enable() already enumerated the endpoint effects. Reuse that summary
+        # instead of opening a second live client on the same device - that
+        # extra client churn is what made some driver stacks briefly drop the
+        # audio (both the mic and the game through the shared endpoint).
+        $summary = [SuiteVoice.MicNoiseSuppression]::EffectsSummary()
+        if (-not $summary) { $summary = (Test-VoiceDeepNSPresent) }
+        $deepNs = ($summary -match 'deepNS=True')
+    } catch { $deepNs = $false }
     if (-not $deepNs -and $SoftwareFallback) {
         $rtStatus = Start-VoiceRealTimeFilter -Aggressive $Aggressiveness
         if ($rtStatus -like 'running:*') {

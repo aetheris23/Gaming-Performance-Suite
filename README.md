@@ -207,10 +207,14 @@ reach the party:
 
 - **Distant background speech removed** (a call to prayer, people talking nearby,
   room/street noise) regardless of how loud it is - only your voice gets through.
-- **Echo/kill**: the game's own audio leaking into your mic is cancelled, so the
-  party doesn't hear their own voices echo back.
-- **Deep Noise Suppression** + classic **Noise Suppression** + **Acoustic Echo
-  Cancellation** are engaged at the OS level (native DSP, no downloads).
+- **Echo/kill (optional)**: the game's own audio leaking into your mic is cancelled,
+  so the party doesn't hear their own voices echo back. Off by default - forcing
+  Acoustic Echo Cancellation is the classic cause of a quiet, flat mic and can
+  agitate the shared audio endpoint, so enable it only if teammates actually hear
+  themselves echoing.
+- **Deep Noise Suppression** + classic **Noise Suppression** are engaged at the OS
+  level when present (native DSP, no downloads). AEC is engaged only when you set
+  `EchoCancellation = $true`.
 
 The suite supports **every modern Windows edition** (10 1809+ and 11), not just
 Windows 11:
@@ -234,10 +238,17 @@ Configured in `src/Config.ps1`:
 
 ```powershell
 NoiseSuppression = @{
-    Enabled         = $true      # auto-engages while a game runs
-    ElevateMicBoost = $true      # also raise the mic thread scheduling priority
-    ExternalEngine  = ''         # optional path to your own NS host (RNNoise / APO)
-    ExternalArgs    = ''
+    Enabled          = $true      # auto-engages while a game runs
+    ElevateMicBoost  = $true      # also raise the mic thread scheduling priority
+    SoftwareFallback = $false     # embedded real-time filter (needs virtual-cable routing)
+    ExternalEngine   = ''         # optional path to your own NS host (RNNoise / APO)
+    ExternalArgs     = ''
+    # 0.5-2.0; higher strips more background sound. >=1.5 over-subtracts and
+    # makes a normal voice quieter than the game. 1.25 is the safe default.
+    Aggressiveness   = 1.25
+    # AEC: game/speaker audio echoing back into your mic. Off by default - see
+    # the 'Echo/kill (optional)' note above. Enable only when needed.
+    EchoCancellation = $false
 }
 ```
 

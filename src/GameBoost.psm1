@@ -1091,6 +1091,10 @@ function Start-GameWatcher {
     if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('SoftwareFallback')) {
         $nsSoftwareFallback = [bool]$NoiseSuppressionSettings['SoftwareFallback']
     }
+    $nsEchoCancellation = $false
+    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('EchoCancellation')) {
+        $nsEchoCancellation = [bool]$NoiseSuppressionSettings['EchoCancellation']
+    }
     $nsEngaged = $false   # $true once the DSP / external engine is running this session
 
     # Recovery journal - written through at EVERY state change so any
@@ -1361,7 +1365,8 @@ function Start-GameWatcher {
                                 if (-not $engagedExternal -and (Get-Command Enable-VoiceNoiseSuppression -ErrorAction SilentlyContinue)) {
                                     $engagedDsp = Enable-VoiceNoiseSuppression `
                                         -Aggressiveness $nsAggressiveness `
-                                        -SoftwareFallback $nsSoftwareFallback
+                                        -SoftwareFallback $nsSoftwareFallback `
+                                        -EchoCancellation $nsEchoCancellation
                                 }
                                 if ($engagedExternal -or $engagedDsp) {
                                     $nsEngaged = $true

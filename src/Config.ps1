@@ -367,6 +367,16 @@
         SoftwareFallback = $false
         ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
         ExternalArgs    = ''
-        Aggressiveness  = 1.85   # 0.5-2.0; higher removes more background sound
+        # 0.5-2.0; higher removes more background sound. Values >=1.5
+        # over-subtract and can make a normal voice quieter than the game.
+        # 1.25 strips noise without eating speech (kind to soft voices).
+        Aggressiveness  = 1.25
+        # Acoustic Echo Cancellation (removes game/speaker audio leaking back
+        # into your mic). Kept OFF by default: forcing AEC against an imperfect
+        # render reference is the classic cause of a "quiet mic in party chat",
+        # and on some driver stacks it agitates the shared audio endpoint
+        # (occasional game-audio cutouts). Turn ON only if your teammates
+        # actually hear their own voice echoing back.
+        EchoCancellation = $false
     }
 }
