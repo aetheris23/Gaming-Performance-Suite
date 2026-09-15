@@ -15,7 +15,7 @@
 
         # === Steam ===
         'hl2', 'cs2', 'csgo', 'dota2'
-        'GTA5', 'GTA5.exe', 'RDR2'
+        'GTA5', 'RDR2'
         'FortniteClient-Win64Shipping'
         'Minecraft.Windows', 'javaw'
         'Cyberpunk2077', 'cyberpunk2077'
@@ -180,7 +180,6 @@
         SkipBackgroundSilence   = $false  # skip background app deprioritization
         SkipFrameGenBridge      = $true   # skip frame-generation companion app
         ReducedPolling          = $true   # use longer poll intervals (15s/35s)
-        MinimalNetworkTweaks    = $false  # apply only essential network tweaks
         SkipHags                = $true   # skip HAGS registry write on old GPUs
         MaxCpuCores             = 0       # 0 = auto-detect; >0 = limit affinity to N cores
         AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
@@ -340,43 +339,5 @@
         BoostVoiceAppsDuringGame   = $true
         MmcssAudioPriority         = $true
         ExtraProtectedProcessNames = @()
-    }
-
-    # ---- Microphone noise suppression & echo cancellation --------
-    # Turns the OS microphone into a clean, party-ready source while you
-    # game. On Windows 10 1809+/11 the suite drives the platform DSP (Deep
-    # Noise Suppression + classic Noise Suppression + Acoustic Echo
-    # Cancellation). The optional software fallback is disabled by default
-    # because it has no virtual-microphone sink and must not play mic audio
-    # through the default speakers. This avoids feedback and voice-chat delay.
-    # background speech (a call to prayer, people talking nearby, room/street
-    # noise), fans, traffic and the game's own audio leaking into your mic
-    # are removed when the platform DSP supports them - only your voice
-    # reaches the party without routing mic audio to the speakers.
-    #   Enabled          : master switch (auto-engages while a game runs)
-    #   ElevateMicBoost  : also raise the mic thread scheduling priority
-    #   ExternalEngine   : optional path to your own noise-suppression host
-    #                      (e.g. an RNNoise filter app / EqualizerAPO session).
-    #                      Leave '' to use the built-in Windows DSP.
-    NoiseSuppression = @{
-        Enabled         = $true
-        ElevateMicBoost = $true
-        # The software fallback has no virtual-microphone sink and would
-        # render the processed mic to the default speakers. Keep it off by
-        # default to prevent feedback, level pumping, and voice-chat delay.
-        SoftwareFallback = $false
-        ExternalEngine  = ''     # e.g. 'C:\Tools\mynoise.exe'
-        ExternalArgs    = ''
-        # 0.5-2.0; higher removes more background sound. Values >=1.5
-        # over-subtract and can make a normal voice quieter than the game.
-        # 1.25 strips noise without eating speech (kind to soft voices).
-        Aggressiveness  = 1.25
-        # Acoustic Echo Cancellation (removes game/speaker audio leaking back
-        # into your mic). Kept OFF by default: forcing AEC against an imperfect
-        # render reference is the classic cause of a "quiet mic in party chat",
-        # and on some driver stacks it agitates the shared audio endpoint
-        # (occasional game-audio cutouts). Turn ON only if your teammates
-        # actually hear their own voice echoing back.
-        EchoCancellation = $false
     }
 }

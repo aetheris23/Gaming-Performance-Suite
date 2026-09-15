@@ -974,7 +974,6 @@ function Start-GameWatcher {
         [hashtable]$LegacySettings     = @{},
         [hashtable]$NetworkSettings    = @{ Enabled = $true },
         [hashtable]$VoiceSettings      = @{},
-        [hashtable]$NoiseSuppressionSettings = @{ Enabled = $false },
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
@@ -1064,38 +1063,6 @@ function Start-GameWatcher {
 
     $boostVoice = $true
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('BoostVoiceAppsDuringGame')) { $boostVoice = [bool]$VoiceSettings['BoostVoiceAppsDuringGame'] }
-
-    # ---- resolve noise-suppression settings --------------------------
-    $nsOn = $false
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('Enabled')) {
-        $nsOn = [bool]$NoiseSuppressionSettings['Enabled']
-    }
-    $nsElevateMic = $true
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ElevateMicBoost')) {
-        $nsElevateMic = [bool]$NoiseSuppressionSettings['ElevateMicBoost']
-    }
-    $nsExternal = ''
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ExternalEngine')) {
-        $nsExternal = [string]$NoiseSuppressionSettings['ExternalEngine']
-    }
-    $nsExternalArgs = ''
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('ExternalArgs')) {
-        $nsExternalArgs = [string]$NoiseSuppressionSettings['ExternalArgs']
-    }
-    $nsAggressiveness = 1.55
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('Aggressiveness')) {
-        $nsAggressiveness = [double]$NoiseSuppressionSettings['Aggressiveness']
-    }
-    $nsAggressiveness = [Math]::Max(0.5, [Math]::Min(2.0, $nsAggressiveness))
-    $nsSoftwareFallback = $false
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('SoftwareFallback')) {
-        $nsSoftwareFallback = [bool]$NoiseSuppressionSettings['SoftwareFallback']
-    }
-    $nsEchoCancellation = $false
-    if ($NoiseSuppressionSettings -and $NoiseSuppressionSettings.ContainsKey('EchoCancellation')) {
-        $nsEchoCancellation = [bool]$NoiseSuppressionSettings['EchoCancellation']
-    }
-    $nsEngaged = $false   # $true once the DSP / external engine is running this session
 
     # Recovery journal - written through at EVERY state change so any
     # kind of death (kill, console close, crash, power loss) is fully
@@ -1348,34 +1315,6 @@ function Start-GameWatcher {
                             Update-VoiceChatSupport -Patterns $voiceOnlyProtected `
                                 -ExceptPid $game.Id -State $voiceBoosted -Journal $journal -Activate
                         }
-
-                        # ---- microphone noise suppression + echo kill ----
-                        # Engage the voice DSP once per session so background
-                        # speech and game echo never reach the party. The
-                        # external engine (if configured) is preferred; otherwise
-                        # the built-in OS DSP (plus, on Windows 10, the embedded
-                        # real-time suppressor) drives the mic.
-                        if ($nsOn -and -not $nsEngaged) {
-                            try {
-                                $engagedExternal = $false
-                                if ($nsExternal) {
-                                    $engagedExternal = Start-NoiseSuppressionExternal -Engine $nsExternal -Args $nsExternalArgs
-                                }
-                                $engagedDsp = $false
-                                if (-not $engagedExternal -and (Get-Command Enable-VoiceNoiseSuppression -ErrorAction SilentlyContinue)) {
-                                    $engagedDsp = Enable-VoiceNoiseSuppression `
-                                        -Aggressiveness $nsAggressiveness `
-                                        -SoftwareFallback $nsSoftwareFallback `
-                                        -EchoCancellation $nsEchoCancellation
-                                }
-                                if ($engagedExternal -or $engagedDsp) {
-                                    $nsEngaged = $true
-                                    if ($nsElevateMic) { try { Set-MicClarityTweaks -IncludeMmcss $true } catch { } }
-                                }
-                            } catch {
-                                Write-Log ("Mic noise suppression failed: {0}" -f $_.Exception.Message) 'WARN'
-                            }
-                        }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
                         $needBoost = $true
@@ -1433,13 +1372,6 @@ function Start-GameWatcher {
                     if ($fsoDone.Count -gt 0) {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
-                    }
-                    # Release the mic DSP / external noise suppressor when the
-                    # last game closes (re-engaged automatically on next game).
-                    if ($nsEngaged) {
-                        try { Disable-VoiceNoiseSuppression } catch { }
-                        try { Stop-NoiseSuppressionExternal } catch { }
-                        $nsEngaged = $false
                     }
                     if ($ExitWhenGameSessionEnds) {
                         Write-Log 'Game session ended. Watcher shutting down completely - nothing keeps polling for another game.' 'ACTION'
@@ -1705,7 +1637,6 @@ function Start-GameWatcher {
         Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
         $journal['fgToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
-        if ($nsEngaged) { try { Disable-VoiceNoiseSuppression; Stop-NoiseSuppressionExternal } catch { } }  # never leave mic DSP on
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
         if ($netOn) {

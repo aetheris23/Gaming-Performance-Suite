@@ -70,15 +70,17 @@ function Get-ActiveNetworkType {
     } catch { }
 
     try {
-        $physNic = Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue |
+        $physNic = @(Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue |
             Where-Object { $_.NetConnectionStatus -eq 2 -and $_.PhysicalAdapter -eq $true -and
-                $_.Name -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth' }
-        if ($physNic) {
-            foreach ($n in $physNic) {
-                if ($n.Name -match '(?i)wi-?fi|wireless|802\.11|wlan') { return 'WiFi' }
-                return 'Ethernet'
-            }
+                $_.Name -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth' })
+        # Prefer WiFi - a wireless link needs the ACK-flood-safe TCP settings, so it
+        # is checked first (consistent with the netsh probe above). Only fall back to
+        # Ethernet when no connected physical Wi-Fi adapter was found, instead of
+        # returning the first adapter WMI happens to order.
+        foreach ($n in $physNic) {
+            if ($n.Name -match '(?i)wi-?fi|wireless|802\.11|wlan') { return 'WiFi' }
         }
+        if ($physNic.Count -gt 0) { return 'Ethernet' }
     } catch { }
 
     return 'Unknown'
@@ -207,7 +209,7 @@ function Enable-GameNetworkProfile {
                             # Keep TCP auto-tune healthy: force a large receive window
                             # on both link types. A tiny 65535 window chokes throughput
                             # on high-bandwidth WiFi and can surface as drops.
-                            if ($connType -eq 'WiFi') { 0xFFFF0 } else { 0xFFFF0 }
+                            0xFFFF0
                         }
                         default { 0 }
                     }

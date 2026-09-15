@@ -3,7 +3,7 @@
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
 your system, tunes your network for lower latency (with WiFi vs LAN awareness to
-prevent packet loss), keeps your microphone clear and noise-free, adapts to older
+prevent packet loss), keeps voice apps smooth, adapts to older
 hardware, and eliminates launch stutter.
 
 **Windows-only build.** Linux, macOS and Android/Termux support have been removed so
@@ -19,12 +19,6 @@ scan now stays native to Windows and much lighter on the CPU.
   patterns that actually contain `?`/`*`. A single native process snapshot per poll now
   uses a `List<Process>` instead of a pipeline filter - near-zero watcher CPU while
   idle, and no lag/voice cutouts that accumulate during long sessions on weak CPUs.
-- **Microphone noise suppression + echo cancellation (Windows 10 1809+ / 11).**
-  The suite drives the OS capture-stream DSP - Deep Noise Suppression + classic Noise
-  Suppression + Acoustic Echo Cancellation. The software fallback is now opt-in
-  because it has no virtual-microphone sink and sending processed mic audio to the
-  default speakers can cause feedback, volume pumping, and voice-chat delay. It
-  engages when a game starts and is released the moment the last game closes.
 - **Watcher auto-stops on game close.** The background watcher now exits completely
   when your game session ends instead of idling resident in memory, so there is no
   lingering overhead, priority/timer/network state is fully restored, and nothing
@@ -187,7 +181,7 @@ on wireless links:
 | `TcpAckFrequency` | **1** (minimum latency) | **2** (prevents ACK-flood packet loss) |
 | `TCPNoDelay` | 1 (Nagle off) | 1 (Nagle off) |
 | `TcpDelAckTicks` | **0** (immediate ACKs) | **2** (batches ACKs to reduce overhead) |
-| `GlobalMaxTcpWindowSize` | 65535 | 65535 |
+| `GlobalMaxTcpWindowSize` | 1048560 (0xFFFF0) | 1048560 (0xFFFF0) |
 | NIC power-saving off | Yes | Yes (more aggressive) |
 
 ### Additional network fixes
@@ -198,68 +192,6 @@ on wireless links:
 
 Every value is read *before* it is written, stored in the recovery journal, and restored
 exactly when the watcher stops.
-
-## Microphone noise suppression & echo cancellation
-
-Turns your mic into a clean, party-ready source while you game. The suite cleans
-the capture stream so distant background speech, traffic, fans and game echo never
-reach the party:
-
-- **Distant background speech removed** (a call to prayer, people talking nearby,
-  room/street noise) regardless of how loud it is - only your voice gets through.
-- **Echo/kill (optional)**: the game's own audio leaking into your mic is cancelled,
-  so the party doesn't hear their own voices echo back. Off by default - forcing
-  Acoustic Echo Cancellation is the classic cause of a quiet, flat mic and can
-  agitate the shared audio endpoint, so enable it only if teammates actually hear
-  themselves echoing.
-- **Deep Noise Suppression** + classic **Noise Suppression** are engaged at the OS
-  level when present (native DSP, no downloads). AEC is engaged only when you set
-  `EchoCancellation = $true`.
-
-The suite supports **every modern Windows edition** (10 1809+ and 11), not just
-Windows 11:
-
-- **Windows 11 (and any Windows that exposes Deep NS):** the OS AI Deep Noise
-  Suppression pipeline is driven directly - automatic and instant.
-- **Windows 10 (or where deep NS is absent):** Windows 10's classic NS remains
-  available through the platform effects manager. The optional embedded
-  real-time spectral suppressor is disabled by default because it requires a
-  virtual-microphone routing setup.
-
-The DSP engages **automatically while a game runs** (per-game-session) and is released
-the moment the last game closes - it never lingers on the desktop and the host process
-exits completely.
-
-> **Note on routing.** The OS effects apply to every app using the mic. If you
-> explicitly enable `SoftwareFallback`, route its output through a virtual cable
-> to a chat app; do not use the default speakers as the microphone destination.
-
-Configured in `src/Config.ps1`:
-
-```powershell
-NoiseSuppression = @{
-    Enabled          = $true      # auto-engages while a game runs
-    ElevateMicBoost  = $true      # also raise the mic thread scheduling priority
-    SoftwareFallback = $false     # embedded real-time filter (needs virtual-cable routing)
-    ExternalEngine   = ''         # optional path to your own NS host (RNNoise / APO)
-    ExternalArgs     = ''
-    # 0.5-2.0; higher strips more background sound. >=1.5 over-subtracts and
-    # makes a normal voice quieter than the game. 1.25 is the safe default.
-    Aggressiveness   = 1.25
-    # AEC: game/speaker audio echoing back into your mic. Off by default - see
-    # the 'Echo/kill (optional)' note above. Enable only when needed.
-    EchoCancellation = $false
-}
-```
-
-If you already use an external noise-suppression host (an RNNoise filter app,
-EqualizerAPO session, etc.), set `ExternalEngine` to its path - the suite will launch
-it during a session and stop it when the session ends, instead of using the built-in
-Windows DSP. Leave it empty to use the built-in effect.
-
-**Menu:** Option **6** engages mic noise suppression (plus network + MMCSS tweaks)
-right now; option **7** reverts. During a game session the watcher handles
-engage/release automatically.
 
 ## Low-spec / legacy PC support
 
@@ -449,11 +381,6 @@ src/
   GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
                               (DXGI / registry / CIM)
   NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
-  VoiceDSP.psm1               microphone noise suppression + echo cancellation
-                              (Windows 10 1809+/11 native DSP + embedded real-time
-                              spectral suppressor + external engine)
-  VoiceDSP-Host.ps1           hidden capture-stream host that holds/engages the
-                              mic DSP effects during a game session
   Build-Suite.ps1             generates .bat launchers + repacks ZIP
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)
@@ -478,9 +405,6 @@ suite's files completely.
 - All actions use standard OS APIs/registry values; no installs, no downloads.
 - Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched.
 - Voice apps (Discord, TeamSpeak, etc.) are never silenced - your mic stays clean.
-- Mic noise suppression/echo cancellation uses the OS DSP (plus a self-contained
-  real-time spectral suppressor on Windows 10) - still no installs, no downloads, and
-  it only engages while a game runs.
 - Network/voice tweaks are journaled and reverted exactly on stop.
 - If an action fails, check `logs/` - most failures mean the script wasn't elevated
   (run as Administrator).

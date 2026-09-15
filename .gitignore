@@ -26,8 +26,6 @@ GamingPerformanceSuite.zip
 Start-GamingSuite.bat
 Start-Watcher-Hidden.bat
 Stop-GamingSuite.bat
-Start-GamingSuite.sh
-Start-Watcher-Hidden.sh
 
 # Build temp directory
 .build_generated/
