@@ -179,7 +179,7 @@ function Get-WindowsBuildInfo {
         Version                   = '10.0'
         Build                     = $build
         UBR                       = $ubr
-        FullBuild                 = if ($build -gt 0) { (if ($ubr -gt 0) { '{0}.{1}' -f $build, $ubr } else { [string]$build }) } else { 'unknown' }
+        FullBuild                 = if ($build -gt 0) { $(if ($ubr -gt 0) { '{0}.{1}' -f $build, $ubr } else { [string]$build }) } else { 'unknown' }
         Edition                   = $edition
         EditionId                 = $editionId
         ProductName               = $productName
