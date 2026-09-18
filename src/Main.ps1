@@ -21,6 +21,7 @@ Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')   -Force
+Import-Module (Join-Path $root 'WinDetect.psm1') -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -30,6 +31,7 @@ $activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGame
 $pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 15 }
 $ramFloorMB = if ($cfg['FreeRamThresholdMB']) { [int]$cfg['FreeRamThresholdMB'] } else { 2048 }
 $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
+$neverWatch = if ($cfg['NeverWatchProcesses']) { @($cfg['NeverWatchProcesses']) } else { @() }
 
 # Stutter-safe standby-purge policy (see Config.ps1 for details)
 $idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds']             }             else { 35 }
@@ -220,6 +222,7 @@ function Invoke-Watcher {
             -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
             -LowSpecSettings $lowSpecEff `
             -AdaptiveTuningSettings $adaptiveCfg `
+            -NeverWatchProcesses $neverWatch `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
             -ExitWhenGameSessionEnds:([bool]$exitWhenGameEnds) `
@@ -251,13 +254,19 @@ if ($BackgroundWatch) {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.5'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.6'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
-    Write-Host '  Windows | Low-spec optimized | Clear voice'            -ForegroundColor Cyan
+    Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
     Write-Host (" Session: {0} | Log: {1}" -f $tag, (Get-LogPath)) -ForegroundColor DarkGray
+    try {
+        $osInfo = Get-WindowsBuildInfo
+        $osLine = Get-OsStatusLine
+        $debloatTag = if ($osInfo.IsDebloated) { ' (debloated build - safe fallbacks active)' } else { '' }
+        Write-Host (" OS: {0}{1}" -f $osLine, $debloatTag) -ForegroundColor DarkGray
+    } catch { }
     try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { }
 
     # Show connection type
@@ -431,7 +440,16 @@ function Show-Status {
     }
 
     # ---- platform info ------------------------------------------
-    Write-Log ("Platform: {0} | PowerShell {1}" -f $PSVersionTable.Platform, $PSVersionTable.PSVersion) 'INFO'
+    Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
+    try {
+        $os = Get-WindowsBuildInfo
+        $osLine = Get-OsStatusLine
+        Write-Log ("OS: {0}" -f $osLine) 'INFO'
+        if ($os.IsDebloated) { Write-Log ("  Custom/debloated build detected '{0}' - suite is using safe fallbacks for missing components." -f $os.Flavor) 'WARN' }
+        Write-Log ("  powercfg available: {0} | High perf scheme: {1} | Ultimate scheme: {2} | active scheme: {3}" -f `
+            $os.PowerCfgAvailable, $os.HighPerfPowerPlan, $os.UltimatePowerPlan, $(if ($os.ActivePowerGuid) { $os.ActivePowerGuid } else { 'none/n/a' })) 'INFO'
+        Write-Log ("  netsh wlan available: {0} | MMCSS Games class: {1}" -f $os.NetshWlanAvailable, $os.MmcssGamesClass) 'INFO'
+    } catch { }
 }
 
 function Wait-MenuKey {

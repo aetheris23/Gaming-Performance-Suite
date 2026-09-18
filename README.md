@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.5
+# Gaming Performance Suite v2.6
 
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
@@ -7,9 +7,30 @@ prevent packet loss), keeps voice apps smooth, adapts to older
 hardware, and eliminates launch stutter.
 
 **Windows-only build.** Linux, macOS and Android/Termux support have been removed so
-the watcher no longer carries cross-platform code paths (sysfs `/proc` scans,
+the watcher no longer carries cross-platform code paths (sysproc `/proc` scans,
 `xrandr`/`displayplacer` calls, `sysctl`/`iw` tuning, stop-marker polling). Every
 scan now stays native to Windows and much lighter on the CPU.
+
+## What's new in v2.6
+
+- **Auto-detects every Windows flavor — official and custom builds.** The suite now
+  reads the registry to identify *exactly* which Windows is running: major version +
+  build (10 vs 11), edition (Home/Pro/Server/LTSC), feature release (21H2…24H2) and any
+  custom build marker. Debloated gaming builds like **ReviOS, AtlasOS, Ghost Spectre,
+  Tiny11/12 and Windows Server** are recognized automatically and shown on the banner
+  and the status screen.
+- **Power plans tailored to debloated builds.** On builds that strip the stock
+  "High performance" / "Ultimate performance" schemes (or even `powercfg` itself), the
+  suite no longer fails: it clones the active scheme, or skips the plan switch cleanly
+  and continues every other optimization. No whitelist to maintain — it just probes
+  powercfg and works around whatever is missing.
+- **Never-boost safety list.** Anti-cheat, kernel services and launcher helper
+  processes (`vgc`, `BEService`, `EasyAntiCheat`, `Battle.net`, …) are never touched,
+  even temporarily. The list is built-in and safely extensible via
+  `NeverWatchProcesses` in `Config.ps1`.
+- **Shallower CLI polling.** Watcher cadence auto-slows when no game is running to cut
+  idle CPU load (still catches launches instantly), and `ActiveGameOnly` keeps boosting
+  focused on the foreground window.
 
 ## What's new in v2.5
 

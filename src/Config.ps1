@@ -18,7 +18,7 @@
         'GTA5', 'RDR2'
         'FortniteClient-Win64Shipping'
         'Minecraft.Windows', 'javaw'
-        'Cyberpunk2077', 'cyberpunk2077'
+        'Cyberpunk2077'
         'eldenring'
         'HogwartsLegacy'
         'BaldursGate3', 'bg3_dx11'
@@ -45,7 +45,6 @@
         'ZenlessZoneZero'
 
         # === Epic Games ===
-        'FortniteClient-Win64Shipping'
         'ShooterGame'
 
         # === PlayStation emulators ===
@@ -68,7 +67,6 @@
         'ppsspp', 'PPSSPPWindows'
         'xemu'
         'qemu-system'
-        'Dolphin'
         'mame', 'mame64'
         'mednafen'
         'snes9x'
@@ -83,8 +81,6 @@
         'MuMuPlayer', 'MuMuVMMHeadless'     # MuMu
         'BlueStacks', 'HD-Player', 'BstkVMM'  # BlueStacks
         'MEmu', 'MEmuHeadless'              # MEmu
-        '夜神模拟器', 'Nox'
-        'bluestacks'
 
         # === Roblox / Android games ===
         'RobloxPlayerBeta'
@@ -93,32 +89,35 @@
         'com.tencent.tmgp.sgame'
 
         # === EA ===
-        'EADesktop'
-        'EABackgroundService'
-        'BEService'
         'NeedForSpeed'
 
         # === Ubisoft ===
-        'UbisoftConnect'
-        'upc'
+        'thehuntercotw', 'orleanspawn', 'ghostreconbreakpoint'
 
         # === Blizzard ===
-        'Battle.net'
-        'Agent.exe'
         'Overwatch'
         'Diablo'
         'WoW'
-
-        # === Other launchers ===
-        'goggalaxy'
-        'itch'
-        'Itch.io'
 
         # === VR ===
         'vrcompositor'
         'oculus'
         'openvr'
 
+    )
+
+    # Processes NEVER boosted or touched - NOT even temporarily during a
+    # watcher session. Reserved for anti-cheat, kernel services and
+    # launcher/driver helpers that can flag priority changes as tampering
+    # (e.g. 'vgc', 'BEService', 'EasyAntiCheat', 'Battle.net'). The built-in
+    # safety list in GameBoost never changes; extend it here if a tool on your
+    # custom build is missing from that list.
+    NeverWatchProcesses    = @(
+        'vgc', 'vgtray', 'vgk'                          # Riot Vanguard (kernel)
+        'BEService', 'EasyAntiCheat', 'EasyAntiCheatService'   # BattlEye / EAC
+        'BattlEyeService'
+        'agent', 'battle.net', 'blizzardbrowserhelper'  # Battle.net / Blizzard
+        'eadesktop', 'eabackgroundservice', 'eacore', 'eaapperror'  # EA app
     )
 
     # Only boost the game owning the active window. If the desktop backend

@@ -46,6 +46,9 @@ if (-not (Get-Module -Name 'GpuDetect')) {
 if (-not (Get-Module -Name 'NetTune')) {
     Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
 }
+if (-not (Get-Module -Name 'WinDetect')) {
+    Import-Module (Join-Path $PSScriptRoot 'WinDetect.psm1') -Force
+}
 
 function Write-GpuInventory {
     <# Logs every detected adapter once (integrated AND discrete),
@@ -119,47 +122,128 @@ function Get-FreeRamMB {
 }
 
 # ------------------------------------------------------------
-# 1. High-performance power plan + PCIe/CPU floor at max perf
+# Power-plan GUIDs the suite works with. Debloated custom builds
+# (ReviOS / AtlasOS / Ghost Spectre / Tiny11) REMOVE the stock
+# "High performance" scheme (and often "Balanced"/"Power saver"
+# too), so the suite never hard-codes a single source scheme: it
+# clones High performance, else Ultimate Performance, else the
+# ACTIVE scheme - whichever actually exists on this machine.
+# ------------------------------------------------------------
+$script:GuidMatch = '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'
+$script:PlanHighPerformance = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$script:PlanUltimate       = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
+
+# ------------------------------------------------------------
+# Processes the watcher must NEVER treat as games. Anti-cheat
+# (BattlEye, EasyAntiCheat, Vanguard, EAC/BE kernel services) and
+# store launchers must never get priority boosts - touching them
+# can trip anti-cheat integrity checks or just waste the boost.
+# This is a safety net on top of the Config.ps1 game list.
+# ------------------------------------------------------------
+$script:NeverWatchProcesses = @(
+    # Riot Vanguard
+    'vgc', 'vgtray', 'vgk'
+    # BattlEye + EasyAntiCheat
+    'beservice', 'easyanticheat', 'easyanticheatservice', 'eacgameclient'
+    # Crash handlers / bootstrappers
+    'crashhandler', 'rbxcrashhandler', 'eaclauncher', 'bepadornfh'
+    # Steam family
+    'steam', 'steamservice', 'steamwebhelper', 'steamclient', 'crashhandler'
+    # Riot
+    'riotclientservices'
+    # EA
+    'eadesktop', 'eabackgroundservice', 'eacore', 'eaapperror'
+    # Ubisoft
+    'ubisoftconnect', 'upc', 'uplay', 'uplay_service'
+    # Epic
+    'epicwebhelper', 'epicgameslauncher', 'epicgamesbootstrap'
+    # Blizzard
+    'agent', 'battle.net', 'blizzardbrowserhelper'
+    # GOG / itch
+    'goggalaxy', 'galaxyclient', 'galaxynotifications', 'itch', 'itch-electron'
+    # Overlays / launcher frameworks
+    'overwolf', 'overwolflauncher'
+    # Windows gaming services
+    'gamingservices', 'gamingservicesnet', 'gamingservicesui', 'gamebar', 'gamebarpresencewriter'
+)
+
+# ------------------------------------------------------------
+# 1a. Power plan: High performance + PCIe/CPU floor at max perf
 # ------------------------------------------------------------
 function Enable-GamingPowerPlan {
     [CmdletBinding()] param()
 
     Assert-AdminOrThrow
 
-    # Duplicate "High performance" into a dedicated gaming plan if missing
-    $planLine = powercfg /list | Where-Object { $_ -match 'Gaming Performance Suite' } | Select-Object -First 1
-    if (-not $planLine) {
+    $os = Get-WindowsBuildInfo
+
+    if (-not $os.PowerCfgAvailable) {
+        Write-Log 'powercfg is not available on this Windows build - power-plan switch skipped. Other optimizations continue.' 'WARN'
+        return
+    }
+
+    # --- reuse the dedicated gaming plan when it already exists ---
+    $planGuid = $null
+    try {
+        foreach ($ln in @(& powercfg /list 2>$null)) {
+            if ($ln -match 'Gaming Performance Suite' -and $ln -match $script:GuidMatch) {
+                $planGuid = $Matches[1]
+                break
+            }
+        }
+    } catch { }
+
+    # --- otherwise clone a scheme that actually exists on THIS build ---
+    if (-not $planGuid) {
         Write-Log 'Creating dedicated gaming power plan...' 'ACTION'
-        $dupOut = powercfg /duplicatescheme 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-String
-        if ($dupOut -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
-            powercfg /changename $Matches[1] 'Gaming Performance Suite' 'Max FPS stability profile' | Out-Null
+        $sources = @()
+        if ($os.HighPerfPowerPlan) { $sources += $script:PlanHighPerformance }
+        if ($os.UltimatePowerPlan) { $sources += $script:PlanUltimate }
+        if ($os.ActivePowerGuid)   { $sources += $os.ActivePowerGuid }
+
+        $cloned = ''
+        foreach ($src in $sources) {
+            try {
+                $dupOut = (& powercfg /duplicatescheme $src 2>$null | Out-String)
+                if ($dupOut -match $script:GuidMatch) { $planGuid = $Matches[1]; $cloned = $src; break }
+            } catch { }
         }
-        $planLine = powercfg /list | Where-Object { $_ -match 'Gaming Performance Suite' } | Select-Object -First 1
+
+        if ($planGuid) {
+            try {
+                if ($os.IsDebloated -or $os.Flavor -ne 'Standard') {
+                    $srcName = if ($cloned -eq $script:PlanHighPerformance) { 'High performance' }
+                               elseif ($cloned -eq $script:PlanUltimate)   { 'Ultimate Performance' }
+                               else { 'currently active' }
+                    Write-Log ("Custom Windows build detected ('{0}'): the stock power schemes may be missing, so the gaming plan is cloned from {1}." -f $os.Flavor, $srcName) 'INFO'
+                }
+                & powercfg /changename $planGuid 'Gaming Performance Suite' 'Max FPS stability profile' | Out-Null
+            } catch { }
+        }
     }
 
-    if ($planLine -match '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})') {
-        $guid = $Matches[1]
-        powercfg /setactive $guid | Out-Null
-        Write-Log "Active power plan set to 'Gaming Performance Suite' ($guid)" 'OK'
-
-        # PCI Express Link State Power Management -> Off (GPU latency spikes)
-        foreach ($src in 'AC','DC') {
-            powercfg /set${src}valueindex $guid `
-                501a4d13-42af-4429-9fd1-a8218c268e20 `
-                ee12f906-d277-404b-b6da-e5fa1a576df5 0 | Out-Null
-        }
-        # Minimum processor state 100% (AC + DC) - kills core-throttle dips
-        foreach ($src in 'AC','DC') {
-            powercfg /set${src}valueindex $guid `
-                54533251-82be-4824-96c1-47b60b740d00 `
-                bc5038f7-23e0-4960-96da-33abaf5935ec 100 | Out-Null
-        }
-        powercfg /setactive $guid | Out-Null
-        Write-Log 'PCIe link + CPU floor forced to Maximum Performance' 'OK'
-    } else {
-        Write-Log 'Could not resolve a power plan GUID; falling back to High performance.' 'WARN'
-        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null
+    if (-not $planGuid) {
+        Write-Log 'Could not create a dedicated power plan (no scheme available on this build); leaving the current power plan untouched.' 'WARN'
+        return
     }
+
+    & powercfg /setactive $planGuid | Out-Null
+    Write-Log "Active power plan set to 'Gaming Performance Suite' ($planGuid)" 'OK'
+
+    # PCI Express Link State Power Management -> Off (GPU latency spikes)
+    foreach ($src in 'AC','DC') {
+        & powercfg "/set${src}valueindex" $planGuid `
+            501a4d13-42af-4429-9fd1-a8218c268e20 `
+            ee12f906-d277-404b-b6da-e5fa1a576df5 0 | Out-Null
+    }
+    # Minimum processor state 100% (AC + DC) - kills core-throttle dips
+    foreach ($src in 'AC','DC') {
+        & powercfg "/set${src}valueindex" $planGuid `
+            54533251-82be-4824-96c1-47b60b740d00 `
+            bc5038f7-23e0-4960-96da-33abaf5935ec 100 | Out-Null
+    }
+    & powercfg /setactive $planGuid | Out-Null
+    Write-Log 'PCIe link + CPU floor forced to Maximum Performance' 'OK'
 }
 
 # ------------------------------------------------------------
@@ -979,6 +1063,7 @@ function Start-GameWatcher {
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [bool]$ExitWhenGameSessionEnds = $true,
+        [string[]]$NeverWatchProcesses = @(),
         [System.Threading.EventWaitHandle]$StopEvent = $null
     )
 
@@ -1202,6 +1287,14 @@ function Start-GameWatcher {
     $wildGamePatterns = @($gameWatchPatterns | Where-Object { $_ -match '[*?]' })
     $wildMatcher = if ($wildGamePatterns.Count -gt 0) { $true } else { $false }
 
+    # Merged exclusion list: hard anti-cheat/launcher safety net + anything the
+    # user added via Config.ps1 NeverWatchProcesses. Never watched or boosted.
+    $neverWatch = @($script:NeverWatchProcesses)
+    foreach ($uw in @($NeverWatchProcesses)) {
+        $nw = ([string]$uw -replace '\.exe$', '').ToLowerInvariant().Trim()
+        if ($nw -and $neverWatch -notcontains $nw) { $neverWatch += $nw }
+    }
+
     try {
         while ($true) {
             # One native process snapshot serves the whole game lookup for
@@ -1219,6 +1312,9 @@ function Start-GameWatcher {
                 try { $n = $p.ProcessName } catch { }
                 if (-not $n) { continue }
                 $nl = $n.ToLowerInvariant()
+                # Anti-cheat services / store launchers are NEVER watched or
+                # boosted - boosting them can trip anti-cheat integrity checks.
+                if ($neverWatch -contains $nl) { continue }
                 # O(1) exact-name lookup; only rare wildcard patterns pay the -like loop.
                 $isGame = $exactGameNames.Contains($nl)
                 if (-not $isGame -and $wildMatcher -and (Test-MatchAny -Name $nl -Patterns $wildGamePatterns)) {
