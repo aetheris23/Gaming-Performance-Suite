@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.6
+# Gaming Performance Suite v2.7
 
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
@@ -10,6 +10,39 @@ hardware, and eliminates launch stutter.
 the watcher no longer carries cross-platform code paths (sysproc `/proc` scans,
 `xrandr`/`displayplacer` calls, `sysctl`/`iw` tuning, stop-marker polling). Every
 scan now stays native to Windows and much lighter on the CPU.
+
+## What's new in v2.7
+
+- **Network packet-loss fixes.** Connection detection no longer parses localized
+  `netsh` text (which misread non-English installs and forced Ethernet ACK settings
+  onto WiFi). It now reads the routing table + adapter object model, is cached for
+  60 s (no WMI/netsh probes in the polling loop), and TCP tuning only touches adapters
+  that are **actually connected** - virtual/vEthernet/sandbox links are left alone.
+  Unknown link types default to the WiFi-safe `TcpAckFrequency=2` profile so wireless
+  can never receive the ACK-flood settings. The suite also restores Windows TCP window
+  **auto-tune to "Normal"** - a disabled/limited auto-tune (a common leftover of old
+  "optimizers") is a leading *software* cause of upload/download packet loss.
+- **Background noise removed from party/team chat without the old heavy DSP host.**
+  The Windows built-in per-mic **input signal enhancements** (Noise Suppression + AEC +
+  auto gain) are now enabled at game start and reverted on stop:
+  `EnableMicNoiseSuppression` in `Config.ps1 > VoiceClarity`. Registry-only, near-zero
+  CPU/RAM cost - the 1200-line VoiceDSP module stays gone.
+- **WinDetect module removed - lighter startup.** The background watcher no longer
+  probes powercfg/netsh/WMI/registry on every start. Build detection is now a single
+  registry read for the status line, and power-plan facts are probed once, only when
+  option 1 (full optimization) actually needs them.
+- **Battery-aware power plan.** The 100% minimum-CPU floor and PCIe power-management
+  off now apply **only on AC** by default, so laptops don't drain battery while the
+  aggressive values still remove FPS dips on mains. Override via
+  `Config.ps1 > PowerOptimization`.
+- **Performance / bug fixes.** Voice-app boosting enumerates the process tree once per
+  activation instead of once per candidate; watcher startup performs zero WinDetect
+  work in the hot path.
+
+> Note: v2.6's "auto-detect every Windows flavor / debloated build" feature
+> (`src/WinDetect.psm1`) was **removed** in v2.7 - the diagnostic value did not justify
+> its startup cost. It leaves no traces: the old WinDetect import is gone from every
+> module.
 
 ## What's new in v2.6
 
@@ -401,7 +434,9 @@ src/
   DisplayScale.psm1           dynamic display-mode switching + native restore (user32)
   GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
                               (DXGI / registry / CIM)
-  NetTune.psm1                network latency (WiFi/LAN aware) + mic/MMCSS clarity
+  NetTune.psm1                network latency (WiFi/LAN aware, cached detection,
+                              ACK-flood-safe TCP, auto-tune fix) + mic noise
+                              suppression + MMCSS clarity
   Build-Suite.ps1             generates .bat launchers + repacks ZIP
 logs/
   runtime/watcher.pid         background watcher PID (removed on clean stop)

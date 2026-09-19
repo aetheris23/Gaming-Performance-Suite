@@ -46,9 +46,6 @@ if (-not (Get-Module -Name 'GpuDetect')) {
 if (-not (Get-Module -Name 'NetTune')) {
     Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
 }
-if (-not (Get-Module -Name 'WinDetect')) {
-    Import-Module (Join-Path $PSScriptRoot 'WinDetect.psm1') -Force
-}
 
 function Write-GpuInventory {
     <# Logs every detected adapter once (integrated AND discrete),
@@ -169,13 +166,60 @@ $script:NeverWatchProcesses = @(
 
 # ------------------------------------------------------------
 # 1a. Power plan: High performance + PCIe/CPU floor at max perf
+#
+# The old WinDetect module probed the whole Windows build (registry reads,
+# powercfg lists, netsh checks) on every startup just to decide which power
+# plan could be cloned. That probes are now done HERE, only when this
+# function is actually invoked (menu option 1), so the background watcher
+# never pays for it. On battery power the aggressive CPU floor / PCIe LPM
+# settings are limited to AC so laptops are not drained (-Force* switches
+# override via Config.ps1 PowerOptimization).
 # ------------------------------------------------------------
+function Get-PowerPlanState {
+    <#
+        Cheap one-shot powercfg probe used ONLY when the gaming power plan is
+        actually needed. Returns the facts Enable-GamingPowerPlan relies on:
+        scheme availability / the active scheme GUID. Never throws.
+    #>
+    $powerCfg = Get-Command powercfg -ErrorAction SilentlyContinue
+    if (-not $powerCfg) {
+        return @{ PowerCfgAvailable = $false; HighPerfPowerPlan = $false; UltimatePowerPlan = $false; ActivePowerGuid = $null }
+    }
+    $schemesText = ''
+    $activeGuid  = $null
+    try {
+        $schemesText = (@(& powercfg /list 2>$null) -join "`n")
+        $activeOut   = (& powercfg /getactivescheme 2>$null | Out-String)
+        if ($activeOut -match $script:GuidMatch) { $activeGuid = $Matches[1].ToLowerInvariant() }
+    } catch { }
+    return @{
+        PowerCfgAvailable  = $true
+        HighPerfPowerPlan  = ($schemesText -match '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c')
+        UltimatePowerPlan  = ($schemesText -match 'e9a42b02-d5df-448d-aa00-03f14749eb61')
+        ActivePowerGuid    = $activeGuid
+    }
+}
+
+function Test-OnBattery {
+    <# $true when the machine is currently running from battery power.
+       Desktops (no battery) always report $false. One-shot CIM probe. #>
+    try {
+        $b = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $b) { return $false }
+        # BatteryStatus: 1 = discharging (on battery), 2 = on AC
+        return ([int]$b.BatteryStatus -eq 1)
+    } catch { return $false }
+}
+
 function Enable-GamingPowerPlan {
-    [CmdletBinding()] param()
+    [CmdletBinding()] param(
+        [bool]$ForceMaxCpuOnBattery   = $false,   # force 100% min processor state on DC too
+        [bool]$ForcePcieOffOnBattery  = $false    # force PCIe ASPM off on DC too
+    )
 
     Assert-AdminOrThrow
 
-    $os = Get-WindowsBuildInfo
+    $os = Get-PowerPlanState
 
     if (-not $os.PowerCfgAvailable) {
         Write-Log 'powercfg is not available on this Windows build - power-plan switch skipped. Other optimizations continue.' 'WARN'
@@ -211,12 +255,10 @@ function Enable-GamingPowerPlan {
 
         if ($planGuid) {
             try {
-                if ($os.IsDebloated -or $os.Flavor -ne 'Standard') {
-                    $srcName = if ($cloned -eq $script:PlanHighPerformance) { 'High performance' }
-                               elseif ($cloned -eq $script:PlanUltimate)   { 'Ultimate Performance' }
-                               else { 'currently active' }
-                    Write-Log ("Custom Windows build detected ('{0}'): the stock power schemes may be missing, so the gaming plan is cloned from {1}." -f $os.Flavor, $srcName) 'INFO'
-                }
+                $srcName = if ($cloned -eq $script:PlanHighPerformance) { 'High performance' }
+                           elseif ($cloned -eq $script:PlanUltimate)   { 'Ultimate Performance' }
+                           else { 'currently active' }
+                Write-Log ("Power plan cloned from {0} (stock schemes may be missing on this build - the suite adapts)." -f $srcName) 'INFO'
                 & powercfg /changename $planGuid 'Gaming Performance Suite' 'Max FPS stability profile' | Out-Null
             } catch { }
         }
@@ -230,20 +272,36 @@ function Enable-GamingPowerPlan {
     & powercfg /setactive $planGuid | Out-Null
     Write-Log "Active power plan set to 'Gaming Performance Suite' ($planGuid)" 'OK'
 
-    # PCI Express Link State Power Management -> Off (GPU latency spikes)
-    foreach ($src in 'AC','DC') {
-        & powercfg "/set${src}valueindex" $planGuid `
-            501a4d13-42af-4429-9fd1-a8218c268e20 `
-            ee12f906-d277-404b-b6da-e5fa1a576df5 0 | Out-Null
+    # Battery awareness: the aggressive values below force the CPU to idle at
+    # 100% and keep PCIe links out of low-power mode - fantastic for FPS on
+    # AC, a constant battery drain on a laptop. By default they apply ONLY on
+    # AC so a low-spec laptop keeps its battery; flipping the Config.ps1
+    # PowerOptimization switches replicates the old always-on behavior.
+    $onBattery = Test-OnBattery
+    if ($onBattery) {
+        Write-Log 'Running on battery: the 100% CPU floor and PCIe-LPM-off are skipped on DC to save power (Config.ps1 > PowerOptimization can override).' 'INFO'
     }
-    # Minimum processor state 100% (AC + DC) - kills core-throttle dips
-    foreach ($src in 'AC','DC') {
+
+    $cpuTargets = @('AC')
+    if ($ForceMaxCpuOnBattery) { $cpuTargets += 'DC' }
+    # Minimum processor state 100% (AC, optionally DC) - kills core-throttle dips
+    foreach ($src in $cpuTargets) {
         & powercfg "/set${src}valueindex" $planGuid `
             54533251-82be-4824-96c1-47b60b740d00 `
             bc5038f7-23e0-4960-96da-33abaf5935ec 100 | Out-Null
     }
+
+    $pcieTargets = @('AC')
+    if ($ForcePcieOffOnBattery) { $pcieTargets += 'DC' }
+    # PCI Express Link State Power Management -> Off (GPU latency spikes)
+    foreach ($src in $pcieTargets) {
+        & powercfg "/set${src}valueindex" $planGuid `
+            501a4d13-42af-4429-9fd1-a8218c268e20 `
+            ee12f906-d277-404b-b6da-e5fa1a576df5 0 | Out-Null
+    }
+
     & powercfg /setactive $planGuid | Out-Null
-    Write-Log 'PCIe link + CPU floor forced to Maximum Performance' 'OK'
+    Write-Log ("PCIe link + CPU floor set for Maximum Performance ({0}); battery values left untouched." -f ($cpuTargets -join '+')) 'OK'
 }
 
 # ------------------------------------------------------------
@@ -809,6 +867,7 @@ function Update-VoiceChatSupport {
     # a positional index and throws "index out of range", which was silently
     # swallowed here and made voice boosting never apply.
     $candidatePids = @{}
+    $childById = $null
     foreach ($t in $targets) {
         try {
             if ($t.Id -eq $ExceptPid -or $t.Id -eq $PID) { continue }
@@ -817,9 +876,14 @@ function Update-VoiceChatSupport {
             # threads in CHILD processes. Boosting only the parent leaves the
             # real encoder starved -> party audio still stutters on weak CPUs.
             # Walk the whole descendant tree so every voice subprocess is lifted.
-            $childById = @{}
-            foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
-                $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
+            # The process table is enumerated ONCE per activation and reused for
+            # every candidate (it was per-candidate before - multiple expensive
+            # Win32_Process walks per poll on low-spec machines).
+            if ($null -eq $childById) {
+                $childById = @{}
+                foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
+                    $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
+                }
             }
             $toCheck = [System.Collections.Generic.Queue[int]]::new()
             $toCheck.Enqueue([int]$t.Id)
@@ -1136,6 +1200,12 @@ function Start-GameWatcher {
     $micMmcss = $true
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('MmcssAudioPriority')) { $micMmcss = [bool]$VoiceSettings['MmcssAudioPriority'] }
 
+    # Windows' built-in input signal enhancements keep background noise out of
+    # party/team chat. Registry-only, near-zero cost - unlike the old VoiceDSP
+    # module. Config.ps1 > VoiceClarity > EnableMicNoiseSuppression gates it.
+    $micNoise = $true
+    if ($VoiceSettings -and $VoiceSettings.ContainsKey('EnableMicNoiseSuppression')) { $micNoise = [bool]$VoiceSettings['EnableMicNoiseSuppression'] }
+
     $protectedExtra = @()
     if ($VoiceSettings -and $VoiceSettings.ContainsKey('ExtraProtectedProcessNames')) {
         $protectedExtra = @($VoiceSettings['ExtraProtectedProcessNames']) | ForEach-Object { "$_*" }
@@ -1160,6 +1230,7 @@ function Start-GameWatcher {
         fsoFlags     = @()
         fgToolPid    = 0
         net          = $null
+        micNoise     = @{}
     }
     function Save-Journal { Save-WatcherJournal -State $journal }
 
@@ -1181,6 +1252,11 @@ function Start-GameWatcher {
         try {
             if ($micMmcss) { Set-MicClarityTweaks -IncludeMmcss $micMmcss }
         } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
+        # Built-in mic noise suppression (keeps voice chat clean in loud rooms)
+        if ($micNoise) {
+            try { Enable-MicNoiseSuppression -JournalState $journal['micNoise']; Save-Journal }
+            catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
+        }
     } else {
         # Apply network profile BEFORE games connect (legacy path)
         if ($netOn) {
@@ -1192,6 +1268,10 @@ function Start-GameWatcher {
         }
         if ($micMmcss) {
             try { Set-MicClarityTweaks -IncludeMmcss $micMmcss } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
+        }
+        if ($micNoise) {
+            try { Enable-MicNoiseSuppression -JournalState $journal['micNoise']; Save-Journal }
+            catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
         }
     }
 
@@ -1737,6 +1817,9 @@ function Start-GameWatcher {
         Set-TimerResolution -Restore
         if ($netOn) {
             try { Undo-GameNetworkProfile -JournalState $journal['net'] } catch { }
+        }
+        if ($micNoise) {
+            try { Undo-MicNoiseSuppression -JournalState $journal['micNoise'] } catch { }
         }
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair

@@ -448,6 +448,15 @@ function Repair-OrphanedWatcherState {
         }
     } catch { Write-Log "Recovery: network revert failed: $_" 'WARN' }
 
+    # ---- 7. Mic noise-suppression revert --------------------------------
+    try {
+        $mic = Get-StateField $j 'micNoise'
+        if ($mic) {
+            Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
+            Undo-MicNoiseSuppression -JournalState (ConvertTo-HashtableDeep $mic)
+        }
+    } catch { Write-Log "Recovery: mic noise-suppression revert failed: $_" 'WARN' }
+
     Clear-WatcherJournal
 
     # Remove the pid file ONLY if it does not describe a live watcher.

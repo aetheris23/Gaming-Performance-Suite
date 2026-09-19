@@ -331,12 +331,31 @@
     #   BoostVoiceAppsDuringGame : voice apps get AboveNormal priority so
     #                              mic capture/encode never starve on weak CPUs
     #   MmcssAudioPriority       : raises MMCSS Audio/Pro Audio/Capture classes
+    #   EnableMicNoiseSuppression: turns on Windows' BUILT-IN input signal
+    #                              enhancements (background Noise Suppression +
+    #                              acoustic echo cancellation) for your mic at
+    #                              game start, so keyboard/fan/room noise never
+    #                              bleeds into party & team chat. Registry-only,
+    #                              near-zero CPU/RAM cost - reverted on stop.
     #   ExtraProtectedProcessNames: additional voice app process names
     #                              (without .exe), e.g. @('MyChatApp')
     VoiceClarity = @{
         ProtectVoiceApps           = $true
         BoostVoiceAppsDuringGame   = $true
         MmcssAudioPriority         = $true
+        EnableMicNoiseSuppression  = $true
         ExtraProtectedProcessNames = @()
+    }
+
+    # ---- Power profile (menu option 1 / full optimization) -----
+    # The gaming power plan forces min processor state 100% and PCIe link
+    # power-management OFF to remove FPS dips. On a laptop those aggressive
+    # values drain the battery, so by default they apply ONLY while on AC.
+    # Set the two switches to $true only if you want them forced on battery
+    # too (matches the old always-on behavior).
+    PowerOptimization = @{
+        Enabled                = $true
+        ForceMaxCpuOnBattery   = $false
+        ForcePcieOffOnBattery  = $false
     }
 }

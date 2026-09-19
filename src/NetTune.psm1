@@ -46,44 +46,78 @@ $script:SysProfile   = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multi
 # ------------------------------------------------------------
 # WiFi vs LAN detection
 # ------------------------------------------------------------
+$script:NetTypeCache = $null
+$script:NetTypeStamp = [datetime]::MinValue
+$script:NetTypeTtlSec = 60
+
 function Get-ActiveNetworkType {
     <#
-        Detects whether the primary active connection is WiFi or Ethernet (LAN).
-        Uses netsh to check interface states - lightweight, no WMI overhead.
-        Returns: 'WiFi', 'Ethernet', or 'Unknown'
+        Detects whether the primary game-traffic connection is WiFi or Ethernet.
+        Never parses localized netsh text (that could misread a non-English
+        install): it uses the routing table + adapter object model instead, with
+        a WMI fallback only when the NetAdapter CIM provider is missing.
+        The result is cached for 60 s - the watcher and status screen call this
+        frequently, and a WMI/object-model probe on every poll would be wasteful
+        on low-spec machines. Returns 'WiFi', 'Ethernet', or 'Unknown'.
     #>
-    try {
-        $netsh = & netsh wlan show interfaces 2>$null
-        if ($netsh -match 'State\s*:\s*connected') {
-            return 'WiFi'
-        }
-    } catch { }
+    param([switch]$Refresh)
 
+    if (-not $Refresh -and $script:NetTypeStamp -ne [datetime]::MinValue -and
+        (([datetime]::UtcNow) - $script:NetTypeStamp).TotalSeconds -le $script:NetTypeTtlSec) {
+        return $script:NetTypeCache
+    }
+
+    $verdict = 'Unknown'
     try {
-        $adapters = Get-NetAdapter -ErrorAction SilentlyContinue |
-            Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth|wan\s+mini|loopback' }
-        foreach ($a in $adapters) {
-            if ($a.LinkLayerAddress -and $a.MediaType -eq '802.3') {
-                return 'Ethernet'
+        # Only physical, currently-connected adapters that carry real traffic.
+        $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -eq 'Up' -and
+                $_.InterfaceDescription -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth|wan\s+mini|loopback' })
+
+        if ($adapters.Count -gt 0) {
+            # 1) Prefer the adapter that owns the default IPv4 route - that is
+            #    the link game traffic actually rides on.
+            $gwIdx = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter -and $_.NetAdapter.Status -eq 'Up' } |
+                ForEach-Object { $_.InterfaceIndex })
+            $candidates = if ($gwIdx.Count -gt 0) {
+                @($adapters | Where-Object { $gwIdx -contains $_.ifIndex })
+            } else { $adapters }
+            if ($candidates.Count -eq 0) { $candidates = $adapters }
+
+            $wifi = $candidates | Where-Object { $_.InterfaceDescription -match '(?i)wi-?fi|wireless|802\.11|wlan|wifi' } | Select-Object -First 1
+            $eth  = $candidates | Where-Object { $_.MediaType -eq '802.3' -or $_.InterfaceDescription -match '(?i)ethernet|gigabit' } | Select-Object -First 1
+
+            if ($wifi) {
+                $verdict = 'WiFi'
+            } elseif ($eth) {
+                $verdict = 'Ethernet'
+            } else {
+                # Default-route adapter with an unrecognized description (LTE,
+                # mobile tethering, Wi-Fi Direct). If ANY wireless adapter is up
+                # anywhere, default to the WiFi-safe profile to avoid ACK floods.
+                $anyWifi = $adapters | Where-Object { $_.InterfaceDescription -match '(?i)wi-?fi|wireless|802\.11|wlan|wifi' } | Select-Object -First 1
+                if ($anyWifi) { $verdict = 'WiFi' } else { $verdict = 'Ethernet' }
             }
         }
     } catch { }
 
-    try {
-        $physNic = @(Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue |
-            Where-Object { $_.NetConnectionStatus -eq 2 -and $_.PhysicalAdapter -eq $true -and
-                $_.Name -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth' })
-        # Prefer WiFi - a wireless link needs the ACK-flood-safe TCP settings, so it
-        # is checked first (consistent with the netsh probe above). Only fall back to
-        # Ethernet when no connected physical Wi-Fi adapter was found, instead of
-        # returning the first adapter WMI happens to order.
-        foreach ($n in $physNic) {
-            if ($n.Name -match '(?i)wi-?fi|wireless|802\.11|wlan') { return 'WiFi' }
-        }
-        if ($physNic.Count -gt 0) { return 'Ethernet' }
-    } catch { }
+    if ($verdict -eq 'Unknown') {
+        # WMI fallback (last resort, one-shot - never called from a hot loop).
+        try {
+            $physNic = @(Get-WmiObject Win32_NetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.NetConnectionStatus -eq 2 -and $_.PhysicalAdapter -eq $true -and
+                    $_.Name -notmatch '(?i)virtual|hyper|vpn|tap|bluetooth' })
+            foreach ($n in $physNic) {
+                if ($n.Name -match '(?i)wi-?fi|wireless|802\.11|wlan') { $verdict = 'WiFi'; break }
+            }
+            if ($verdict -eq 'Unknown' -and $physNic.Count -gt 0) { $verdict = 'Ethernet' }
+        } catch { }
+    }
 
-    return 'Unknown'
+    $script:NetTypeCache = $verdict
+    $script:NetTypeStamp = [datetime]::UtcNow
+    return $verdict
 }
 
 function Get-NetStateField {
@@ -160,6 +194,7 @@ function Enable-GameNetworkProfile {
     $applied = @()
     $rec = @{
         ThrottlingIndexOriginal = $null
+        TcpAutoTuneOriginal = $null
         Interfaces = @{}
         NicPower   = @{}
         ConnectionType = 'Unknown'
@@ -169,6 +204,12 @@ function Enable-GameNetworkProfile {
     $connType = Get-ActiveNetworkType
     $rec.ConnectionType = $connType
     Write-Log ("Active connection type: {0}" -f $connType) 'INFO'
+    if ($connType -eq 'Unknown') {
+        # We do not know the link. The ONLY safe choice for a wireless-possible
+        # machine is the WiFi profile - Ethernet can tolerate it, WiFi cannot
+        # tolerate the Ethernet ACK-flood settings.
+        Write-Log "Connection type is unknown - using WiFi-safe TCP values to avoid ACK-flood packet loss." 'WARN'
+    }
 
     # ---- 1. Disable multimedia network throttling -----------------------
     if (Get-TweakBool $Settings 'DisableNetworkThrottling' $true) {
@@ -178,32 +219,70 @@ function Enable-GameNetworkProfile {
         $applied += 'network throttling disabled'
     }
 
+    # ---- 1b. TCP receive-window autotune ---------------------------------
+    # Keep Windows' TCP window autotuning at "Normal" (0xFFFFFFFF). A disabled
+    # or limited autotune (a common leftover of old "gaming optimizer" tools)
+    # collapses the sender's window under load, which is one of the most common
+    # SOFTWARE causes of upload/download "packet loss".
+    $tcpParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+    $autoOrig = Get-RegRaw -Path $tcpParams -Name 'TCPAutotuningLevel'
+    if ($autoOrig -ne -1) {
+        Set-RegDword -Path $tcpParams -Name 'TCPAutotuningLevel' -Value -1
+        $rec.TcpAutoTuneOriginal = $autoOrig
+        if ($autoOrig -ne $script:AbsentMarker) {
+            $applied += 'TCP auto-tune restored to Normal'
+        } else {
+            $applied += ('TCP auto-tune fixed from {0} to Normal (window-collapse packet loss)' -f $autoOrig)
+        }
+    }
+
     # ---- 2. Per-interface TCP latency knobs ------------------------------
     # Adjusted based on WiFi vs Ethernet to prevent packet loss.
     # Must exist BEFORE the game opens its sockets.
     if (Get-TweakBool $Settings 'TcpLowLatency' $true) {
         $ifKeys = @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)
+
+        # Only tune adapters that are actually wired into the network stack.
+        # Each Tcpip interface key carries an 'ifIndex' matching a routes
+        # adapter; virtual links (Loopback, vEthernet, Wi-Fi Direct virtual
+        # adapters) are skipped to keep the registry section clean and avoid
+        # breaking sandbox/container traffic.
+        $activeIfIndex = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+            Where-Object { $_.NetAdapter -and $_.NetAdapter.Status -eq 'Up' } |
+            ForEach-Object { $_.InterfaceIndex })
+
         foreach ($k in $ifKeys) {
             try {
                 $node = @{}
+                $skip = $false
+                if ($activeIfIndex.Count -gt 0) {
+                    try {
+                        $kProp = Get-ItemProperty -Path $k.PSPath -ErrorAction Stop
+                        if ($kProp.PSObject.Properties['ifIndex'] -and $kProp.ifIndex -match '^\d+$') {
+                            if ($activeIfIndex -notcontains [int]$kProp.ifIndex) { $skip = $true }
+                        }
+                    } catch { }
+                }
+                if ($skip) { continue }
+
                 foreach ($name in @('TcpAckFrequency', 'TCPNoDelay', 'TcpDelAckTicks', 'GlobalMaxTcpWindowSize')) {
                     $orig = Get-RegRaw -Path $k.PSPath -Name $name
 
                     $val = switch ($name) {
                         'TcpAckFrequency' {
-                            # WiFi: use 2 to avoid ACK flooding that causes packet loss
+                            # WiFi/unknown: use 2 to avoid ACK flooding that causes packet loss
                             # Ethernet: use 1 for minimum latency
-                            if ($connType -eq 'WiFi') { 2 } else { 1 }
+                            if ($connType -ne 'Ethernet') { 2 } else { 1 }
                         }
                         'TCPNoDelay' { 1 }    # always on: disable Nagle
                         'TcpDelAckTicks' {
-                            # Delayed-ACK batching. WiFi: a *modest* batch reduces
+                            # Delayed-ACK batching. WiFi/unknown: a *modest* batch reduces
                             # ACK-count overhead without adding retransmission-trigger
                             # latency. IMPORTANT: a large value (e.g. 100) delays ACKs
                             # by ~100ms+, which the WiFi radio + TCP stacks read as a
                             # stalled receiver - that itself LOOKS like packet loss.
                             # Ethernet: 0 = immediate ACKs for minimum latency.
-                            if ($connType -eq 'WiFi') { 2 } else { 0 }
+                            if ($connType -ne 'Ethernet') { 2 } else { 0 }
                         }
                         'GlobalMaxTcpWindowSize' {
                             # Keep TCP auto-tune healthy: force a large receive window
@@ -223,7 +302,8 @@ function Enable-GameNetworkProfile {
             } catch { }
         }
         if ($rec.Interfaces.Count -gt 0) {
-            $applied += ('TCP fast-ack/no-delay on {0} interface(s) [{1} optimized]' -f $rec.Interfaces.Count, $connType)
+            $tunedNote = if ($activeIfIndex.Count -gt 0) { ' (active links only)' } else { '' }
+            $applied += ('TCP fast-ack/no-delay on {0} interface(s){1} [{2} optimized]' -f $rec.Interfaces.Count, $tunedNote, $connType)
         }
     }
 
@@ -312,6 +392,11 @@ function Undo-GameNetworkProfile {
             [void](Restore-RegFromJournal -Path $script:SysProfile -Name 'NetworkThrottlingIndex' -Original $orig)
         }
 
+        $autoOrig = Get-NetStateField $net 'TcpAutoTuneOriginal'
+        if ($null -ne $autoOrig) {
+            [void](Restore-RegFromJournal -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'TCPAutotuningLevel' -Original $autoOrig)
+        }
+
         $ifs = Get-NetStateField $net 'Interfaces'
         if ($ifs -is [hashtable]) {
             foreach ($guid in @($ifs.Keys)) {
@@ -354,6 +439,7 @@ function Undo-GameNetworkProfile {
 
     if ($RemoveKnownDefaults) {
         Remove-RegValue -Path $script:SysProfile -Name 'NetworkThrottlingIndex'
+        Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'TCPAutotuningLevel'
         $count = 1
         foreach ($k in @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)) {
             Remove-RegValue -Path $k.PSPath -Name 'TcpAckFrequency'
@@ -420,4 +506,115 @@ function Set-MicClarityTweaks {
     }
 }
 
-Export-ModuleMember -Function Enable-GameNetworkProfile, Undo-GameNetworkProfile, Set-MicClarityTweaks, Get-ActiveNetworkType
+# ------------------------------------------------------------
+# Microphone background-noise suppression
+#
+# Windows ships a built-in audio DSP pipeline ("input signal
+# enhancements") with background Noise Suppression + Acoustic Echo
+# Cancellation + auto gain for each capture endpoint. It is enabled
+# via the per-device PKEY_AudioEndpoint_Disable_SysFx property:
+#   0 = enhancements ON (noise suppression active)
+#   1 = enhancements OFF
+# We simply switch it on for every installed mic. No third-party DSP
+# host, no per-frame C# filters -> near-zero CPU/RAM cost while the
+# game runs (unlike the old VoiceDSP module this replaces).
+# ------------------------------------------------------------
+$script:CaptureMmBase    = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture'
+$script:SysFxDisableName = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'
+
+function Enable-MicNoiseSuppression {
+    <#
+        Turns on Windows' built-in input signal enhancements (background
+        noise suppression / AEC / auto gain) for every installed capture
+        endpoint, removing room / keyboard / fan noise from party & team
+        chat before it reaches the game.
+        Pass -JournalState (a hashtable) to record each endpoint's original
+        property so Undo-MicNoiseSuppression can restore it exactly. Best
+        effort: devices without a FxProperties store are skipped silently.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][hashtable]$JournalState = $null
+    )
+
+    Assert-AdminOrThrow
+
+    if (-not (Test-Path $script:CaptureMmBase)) {
+        Write-Log 'Mic noise suppression: no capture endpoints found.' 'WARN'
+        return
+    }
+
+    $endpoints = @(Get-ChildItem -Path $script:CaptureMmBase -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -match '^\{[0-9a-fA-F-]{36}\}$' })
+    if ($endpoints.Count -eq 0) {
+        Write-Log 'Mic noise suppression: no capture endpoint keys found.' 'WARN'
+        return
+    }
+
+    $enabled = @()
+    foreach ($ep in $endpoints) {
+        try {
+            $fxKey = Join-Path $ep.PSPath 'FxProperties'
+            if (-not (Test-Path $fxKey)) { continue }
+
+            $orig = Get-RegRaw -Path $fxKey -Name $script:SysFxDisableName
+            # 0 = signal enhancements/noise suppression ON, 1 = OFF.
+            if ($orig -ne 0) {
+                Set-RegDword -Path $fxKey -Name $script:SysFxDisableName -Value 0
+                if ($null -ne $JournalState) { $JournalState[$ep.PSChildName] = $orig }
+                $enabled += $ep.PSChildName
+            } elseif ($null -ne $JournalState -and -not $JournalState.ContainsKey($ep.PSChildName)) {
+                # Already enhancing, but still journal it so the session undo
+                # leaves the endpoint back in the pre-session state.
+                $JournalState[$ep.PSChildName] = 0
+            }
+        } catch { }
+    }
+
+    if ($enabled.Count -gt 0) {
+        Write-Log ("Mic noise suppression ENABLED on {0} input device(s) - background/echo noise removed from party audio." -f $enabled.Count) 'OK'
+    } else {
+        Write-Log 'Mic noise suppression: input enhancements already active (or not available on this hardware).' 'INFO'
+    }
+}
+
+function Undo-MicNoiseSuppression {
+    <#
+        Exact revert of Enable-MicNoiseSuppression from a journal node,
+        or -RemoveKnownDefaults to strip the managed property from every
+        capture endpoint (Windows then re-applies its normal defaults).
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][hashtable]$JournalState = $null,
+        [switch]$RemoveKnownDefaults
+    )
+
+    if ($JournalState -and $JournalState.Count -gt 0) {
+        foreach ($guid in @($JournalState.Keys)) {
+            $fxKey = Join-Path $script:CaptureMmBase (Join-Path ([string]$guid) 'FxProperties')
+            if (-not (Test-Path $fxKey)) { continue }
+            $orig = Get-NetStateField $JournalState $guid
+            if ($null -ne $orig) {
+                [void](Restore-RegFromJournal -Path $fxKey -Name $script:SysFxDisableName -Original $orig)
+            }
+        }
+        Write-Log 'Mic noise suppression reverted (original input enhancement state restored).' 'OK'
+        return
+    }
+
+    if ($RemoveKnownDefaults) {
+        foreach ($ep in @(Get-ChildItem -Path $script:CaptureMmBase -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^\{[0-9a-fA-F-]{36}\}$' })) {
+            Remove-RegValue -Path (Join-Path $ep.PSPath 'FxProperties') -Name $script:SysFxDisableName
+        }
+        Write-Log 'Mic noise suppression settings removed - Windows defaults restored.' 'OK'
+        return
+    }
+
+    Write-Log 'Mic noise suppression: nothing to revert (no journal).' 'INFO'
+}
+
+Export-ModuleMember -Function Enable-GameNetworkProfile, Undo-GameNetworkProfile,
+    Set-MicClarityTweaks, Get-ActiveNetworkType,
+    Enable-MicNoiseSuppression, Undo-MicNoiseSuppression

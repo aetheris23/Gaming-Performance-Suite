@@ -21,7 +21,6 @@ Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')   -Force
-Import-Module (Join-Path $root 'WinDetect.psm1') -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -180,6 +179,11 @@ function Resolve-LegacySettings {
     return $eff
 }
 
+# ---------------- Power-plan tuning (menu option 1) ------------------
+# Battery-aware by default: the aggressive CPU/PCIe settings only apply on
+# AC. Flip the two switches if you want them on battery too.
+$powerCfg   = if ($cfg['PowerOptimization'])        { $cfg['PowerOptimization'] }        else { @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false } }
+
 # ---------------- shared watcher invocation ----------------
 function Invoke-Watcher {
     param(
@@ -251,10 +255,32 @@ if ($BackgroundWatch) {
 }
 
 # ---------------- interactive mode ----------------
+function Get-OsStatusLine {
+    <#
+        Lightweight one-line OS label from a SINGLE registry read - the old
+        WinDetect module (flavor heuristics + powercfg/netsh probes) has been
+        removed because the background watcher was importing it on every start.
+    #>
+    try {
+        $nv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $k  = Get-ItemProperty -Path $nv -ErrorAction SilentlyContinue
+        if (-not $k) { return 'Windows' }
+        $product = if ($k.PSObject.Properties['ProductName']) { [string]$k.ProductName } else { 'Windows' }
+        $build   = if ($k.PSObject.Properties['CurrentBuildNumber']) { [string]$k.CurrentBuildNumber } else { '' }
+        if ($k.PSObject.Properties['UBR'] -and "$($k.UBR)" -match '^\d+$') { $build = "$build.$([int]$k.UBR)" }
+        $feat    = if ($k.PSObject.Properties['DisplayVersion']) { [string]$k.DisplayVersion } else { '' }
+        if (-not $feat) { $feat = '' }
+        $line = $product.Trim()
+        if ($feat)  { $line += " $feat" }
+        if ($build) { $line += " (build $build)" }
+        return $line
+    } catch { return 'Windows' }
+}
+
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.6'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.7'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
     Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
@@ -262,10 +288,7 @@ function Show-Banner {
     $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
     Write-Host (" Session: {0} | Log: {1}" -f $tag, (Get-LogPath)) -ForegroundColor DarkGray
     try {
-        $osInfo = Get-WindowsBuildInfo
-        $osLine = Get-OsStatusLine
-        $debloatTag = if ($osInfo.IsDebloated) { ' (debloated build - safe fallbacks active)' } else { '' }
-        Write-Host (" OS: {0}{1}" -f $osLine, $debloatTag) -ForegroundColor DarkGray
+        Write-Host (" OS: {0}" -f (Get-OsStatusLine)) -ForegroundColor DarkGray
     } catch { }
     try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { }
 
@@ -317,7 +340,12 @@ function Show-Menu {
 function Invoke-FullOptimization {
     $leg = Resolve-LegacySettings
     Write-Log '=== FULL OPTIMIZATION: starting ===' 'ACTION'
-    Enable-GamingPowerPlan
+
+    # Battery-aware power profile: aggressive CPU/PCIe values only on AC by
+    # default (see Config.ps1 > PowerOptimization to force on battery too).
+    $p = if ($powerCfg -and $powerCfg['Enabled']) { $powerCfg } else { @{} }
+    Enable-GamingPowerPlan -ForceMaxCpuOnBattery:([bool]$p['ForceMaxCpuOnBattery']) -ForcePcieOffOnBattery:([bool]$p['ForcePcieOffOnBattery'])
+
     Disable-GameDVR
     Set-MultimediaTweaks -EnableHags:([bool]$leg.EnableHags)
     Set-TimerResolution
@@ -325,6 +353,16 @@ function Invoke-FullOptimization {
         Clear-StandbyMemory
     }
     try { Set-MicClarityTweaks } catch { Write-Log $_.Exception.Message 'ERROR' }
+    # Windows' built-in input signal enhancements (background noise suppression
+    # for party/team comms) - pure registry writes on each capture endpoint,
+    # no extra DSP host and no sustained CPU/RAM cost.
+    try {
+        $micOn = $true
+        if ($cfg['VoiceClarity'] -and $cfg['VoiceClarity'].PSObject.Properties['EnableMicNoiseSuppression']) {
+            $micOn = [bool]$cfg['VoiceClarity']['EnableMicNoiseSuppression']
+        }
+        if ($micOn) { Enable-MicNoiseSuppression } else { Write-Log 'Mic noise suppression disabled in Config.ps1' 'INFO' }
+    } catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
     try { Enable-GameNetworkProfile -Settings $netCfg -JournalState $null } catch { Write-Log $_.Exception.Message 'ERROR' }
     if ($leg.EnableHags) {
         Write-Log '=== FULL OPTIMIZATION complete. Reboot once for HAGS. ===' 'OK'
@@ -442,13 +480,8 @@ function Show-Status {
     # ---- platform info ------------------------------------------
     Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
     try {
-        $os = Get-WindowsBuildInfo
-        $osLine = Get-OsStatusLine
-        Write-Log ("OS: {0}" -f $osLine) 'INFO'
-        if ($os.IsDebloated) { Write-Log ("  Custom/debloated build detected '{0}' - suite is using safe fallbacks for missing components." -f $os.Flavor) 'WARN' }
-        Write-Log ("  powercfg available: {0} | High perf scheme: {1} | Ultimate scheme: {2} | active scheme: {3}" -f `
-            $os.PowerCfgAvailable, $os.HighPerfPowerPlan, $os.UltimatePowerPlan, $(if ($os.ActivePowerGuid) { $os.ActivePowerGuid } else { 'none/n/a' })) 'INFO'
-        Write-Log ("  netsh wlan available: {0} | MMCSS Games class: {1}" -f $os.NetshWlanAvailable, $os.MmcssGamesClass) 'INFO'
+        Write-Log ("OS: {0}" -f (Get-OsStatusLine)) 'INFO'
+        Write-Log '  WinDetect module removed - startup no longer probes powercfg/netsh/WMI per session.' 'INFO'
     } catch { }
 }
 
@@ -495,6 +528,7 @@ try {
         '6' {
             try {
                 Set-MicClarityTweaks
+                try { Enable-MicNoiseSuppression } catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
                 Enable-GameNetworkProfile -Settings $netCfg -JournalState $null
             } catch { Write-Log $_.Exception.Message 'ERROR' }
             Wait-MenuKey
@@ -502,6 +536,7 @@ try {
         '7' {
             try {
                 Undo-GameNetworkProfile -RemoveKnownDefaults
+                try { Undo-MicNoiseSuppression -RemoveKnownDefaults } catch { Write-Log "Mic noise suppression revert skipped: $_" 'WARN' }
             } catch { Write-Log $_.Exception.Message 'ERROR' }
             Wait-MenuKey
         }
