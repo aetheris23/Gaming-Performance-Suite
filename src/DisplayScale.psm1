@@ -193,6 +193,32 @@ function Select-ScaledMode {
     })
     if ($candidates.Count -eq 0) { return $null }
 
+    # ---- refresh-rate preservation (never drop the panel's Hz) ----
+    # A lower-resolution mode that only exists at a LOW refresh silently drops
+    # the panel from e.g. 144Hz to 60Hz for the whole session. In a fast FPS
+    # that reads as lag / stutter / "packet loss" and it ruins aim (input feels
+    # delayed). This is also the mechanism by which "effects / flashes / large
+    # maps" suddenly look stuttery: the game is being rendered and upscaled at
+    # a low refresh while every effect adds frame time on top.
+    #
+    # Rule: only ever scale to a mode that keeps the panel's native refresh.
+    # Modes advertising no explicit frequency (0 = "driver default") are kept.
+    # When NO such mode exists we refuse to scale at all - staying at native
+    # resolution is always smoother than a framerated 60Hz mode.
+    $keptHz = @($candidates | Where-Object {
+        $_.Frequency -eq 0 -or $_.Frequency -eq $Native.Frequency
+    })
+    # If the driver reports an unknown current refresh (Frequency = 0) we cannot
+    # tell what to preserve - keep every candidate and skip the guard.
+    if ($Native.Frequency -gt 0) {
+        if ($keptHz.Count -gt 0) {
+            $candidates = @($keptHz)
+        } else {
+            Write-Log ("No '{0}' scaled mode keeps the panel's native {1}Hz - display scaling skipped, staying at native (a 60Hz drop would feel like lag/packet loss)." -f $Native.Width, $Native.Frequency) 'INFO'
+            return $null
+        }
+    }
+
     # Choose the ACTUAL mode that is closest to the requested ScalePercent
     # target, while preferring exact integer-ratio modes (whose dimensions
     # evenly divide native -> crisp GPU upscale, no blur, less upscale cost)

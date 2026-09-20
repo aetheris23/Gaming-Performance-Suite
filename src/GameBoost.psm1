@@ -1678,9 +1678,12 @@ function Start-GameWatcher {
                     $adaptiveEligible = (($nowMs - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs)
                 }
 
-                # No purge could legally run this cycle -> skip the RAM probe.
-                if (-not $classicEligible -and -not $adaptiveEligible) { }
-                else {
+                # Both purge paths are cooldown-gated. When neither is eligible
+                # this cycle we skip the RAM probe entirely - probing memory on
+                # every poll right after a purge is pure waste, and it keeps the
+                # watcher off the CPU during the exact moments (map rendering,
+                # effect bursts) the game is busy.
+                if ($classicEligible -or $adaptiveEligible) {
                     $freeMB = Get-FreeRamMB
                     $pressureNote = ''
 

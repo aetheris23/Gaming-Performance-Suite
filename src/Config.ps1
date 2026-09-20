@@ -246,19 +246,37 @@
 
     # Default tier for every detected profile:
     #   Emulator / Steam / Competitive / Android / Default
+    #
+    # IMPORTANT: 'Competitive' defaults to 'Native' (no fullscreen mode switch).
+    # For aim-oriented shooters (Valorant, CS2, Dota 2) a resolution drop on a
+    # 144Hz panel almost always lands on a mode that only exists at 60Hz, which:
+    #   - makes distant enemies blurry/mushy upscaled back to fullscreen (they
+    #     blend into the environment and are very hard to see at range)
+    #   - changes the effective mouse aim / reduces input smoothness
+    #   - forces a display-mode switch (and back) that hitches the renderer
+    #     right around round start
+    #   - feels like lag / packet loss even though the network is fine
+    # These titles already run fine at native on low-spec hardware, so they get
+    # the wins that DON'T touch the display: priority, timer, network, purge.
+    # To restore the aggressive "max FPS at lower resolution" behavior, set the
+    # per-game override below to 'Low' (or set Competitive to 'Low' here).
     ProfileTiers = @{
         Emulator    = 'Medium'   # emulators upscale crisp at half/quarter steps
         Steam       = 'Medium'   # balanced for most AAA titles
-        Competitive = 'Low'      # max FPS + lowest input latency for esports
+        Competitive = 'Native'   # NO display/fullscreen-mode switch (keeps aim + range visibility)
         Android     = 'Medium'   # Android emulators are very GPU-heavy
         Default     = 'Medium'   # any unclassified game
     }
 
-    # Per-game tier override (process name WITHOUT .exe -> tier):
+    # Per-game tier override (process name WITHOUT .exe -> tier).
+    # Beats the profile default above. VALORANT is pinned to Native so a
+    # re-edit of the competitive default above can never silently re-enable
+    # the 540p/60Hz drop for it. Delete this line to let other esports titles
+    # follow the Competitive default instead:
     GameTierOverrides = @{
+        'VALORANT-Win64' = 'Native'   # keep aim + long-range visibility intact
         # 'pcsx2'          = 'Low'
         # 'cs2'            = 'High'
-        # 'VALORANT-Win64' = 'Low'
         # 'dolphin'        = 'Native'
     }
 

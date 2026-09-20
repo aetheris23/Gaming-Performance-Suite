@@ -50,7 +50,7 @@ $resSettings = @{
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
     Stretched         = if ($null -ne $cfg['StretchedResolution']) { [bool]$cfg['StretchedResolution'] } else { $false }
     Tiers             = if ($cfg['ResolutionTiers'])      { $cfg['ResolutionTiers'] }      else { @{ Low = 55; Medium = 75; High = 88; Native = 0 } }
-    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Low'; Android = 'Medium'; Default = 'Medium' } }
+    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Native'; Android = 'Medium'; Default = 'Medium' } }
     GameTierOverrides = if ($cfg['GameTierOverrides'])    { $cfg['GameTierOverrides'] }    else { @{} }
 }
 # Session lifecycle: after the last monitored game closes, the watcher

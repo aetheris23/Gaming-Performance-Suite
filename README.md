@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.7
+# Gaming Performance Suite v2.8
 
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
@@ -44,6 +44,26 @@ scan now stays native to Windows and much lighter on the CPU.
 > its startup cost. It leaves no traces: the old WinDetect import is gone from every
 > module.
 
+## What's new in v2.8
+
+- **Competitive shooters now stay at NATIVE resolution by default** (Valorant, CS2,
+  Dota 2). The old `Competitive = Low` tier dropped the display to ~540p on a 1080p
+  panel and upscaled it back: distant enemies became mushy and blended into the
+  environment, effective aim changed, and the fullscreen mode switch added hitches
+  around round start. These titles already run fine at native on low-spec hardware,
+  so they keep every win *that doesn't touch the display* (priority, timer, network,
+  purge). Re-enable the aggressive drop per game via `GameTierOverrides` in
+  `src/Config.ps1` (e.g. `'cs2' = 'Low'`).
+- **The display scaler can no longer drop your refresh rate.** `Select-ScaledMode`
+  only selects a lower resolution when that mode keeps the panel's native Hz (e.g.
+  144Hz); modes that only exist at 60Hz are rejected and the screen stays native. A
+  144→60Hz drop while the game runs was a major source of the *"lag / packet loss /
+  missed shots"* feeling during effects, flashes and large-map rendering, even when
+  the network was fine.
+- **Lighter polling under load.** The memory-pressure RAM probe only runs on cycles
+  where a purge could legally fire; the watcher stays off the CPU during map renders
+  and effect bursts.
+
 ## What's new in v2.6
 
 - **Auto-detects every Windows flavor — official and custom builds.** The suite now
@@ -85,7 +105,10 @@ scan now stays native to Windows and much lighter on the CPU.
   consistent setup. The suite intentionally does not apply a whole-desktop gamma/color
   matrix: that would tint menus and non-game content, add scanout work on low-spec
   hardware, and may conflict with anti-cheat. Select the configured preset in
-  Valorant's enemy-highlight setting.
+  Valorant's enemy-highlight setting. If distant enemies still look hard to spot,
+  make sure the game is at **native resolution** - v2.8 no longer downsamples
+  competitive shooters (a blurry upscaled image is what made long-range targets blend
+  into the environment).
 - **Less watcher overhead during hot gameplay.** Standby-memory pressure is now probed
   only when a purge could legally run (cooldown-gated), eliminating useless per-poll
   memory reads; process affinity is only re-applied when it has actually drifted, so no
@@ -199,14 +222,19 @@ tweaks are in place BEFORE the game opens its sockets.
 > detected game is assigned a quality tier based on its **profile**, so the right
 > resolution is picked for Steam, Riot/esports, PS2/console emulators (PCSX2, PPSSPP,
 > Dolphin, RetroArch, DuckStation...), Android emulators on PC (Bluestacks, LDPlayer,
-> NOX, MuMu...), and anything else:
+> NOX, MuMu...), and anything else. Competitive shooters default to **Native** (no
+> display switch) so aim and long-range visibility are never degraded.
 
 | Tier | Target width | Typical use |
 |---|---|---|
-| **Low** | 55% of native | Competitive/esports (max FPS, lowest input latency) |
+| **Low** | 55% of native | Opt-in aggressive drop for weak GPUs (set via `GameTierOverrides`) |
 | **Medium** | 75% of native | Balanced default for Steam & emulators |
 | **High** | 88% of native | Nearly-native sharpness, still a solid gain |
-| **Native** | 100% (no switch) | When you want zero display changes |
+| **Native** | 100% (no switch) | Competitive shooters (Valorant/CS2/Dota) - keeps aim + Hz |
+
+Any scaled mode is only ever selected if it **keeps the panel's native refresh
+rate**; if the monitor only offers the lower resolution at 60Hz, the suite stays at
+native instead of downclocking your display mid-game.
 
 Supported games run at 480p, 720p, 900p, 1080p etc. - `Select-ScaledMode` picks the
 closest **same-aspect-ratio** mode to the tier's target, preferring exact 1/2 integer
