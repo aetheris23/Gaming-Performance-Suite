@@ -201,7 +201,11 @@ function Enable-GameNetworkProfile {
     }
 
     # ---- Detect connection type ----
-    $connType = Get-ActiveNetworkType
+    # Force a fresh probe here: the 60 s cache is fine for the status screen,
+    # but the profile is applied once per session and must match the link the
+    # game is about to use (a WiFi device can't tolerate the Ethernet ACK-flood
+    # TCP values, and vice versa).
+    $connType = Get-ActiveNetworkType -Refresh
     $rec.ConnectionType = $connType
     Write-Log ("Active connection type: {0}" -f $connType) 'INFO'
     if ($connType -eq 'Unknown') {
@@ -440,13 +444,11 @@ function Undo-GameNetworkProfile {
     if ($RemoveKnownDefaults) {
         Remove-RegValue -Path $script:SysProfile -Name 'NetworkThrottlingIndex'
         Remove-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'TCPAutotuningLevel'
-        $count = 1
         foreach ($k in @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)) {
             Remove-RegValue -Path $k.PSPath -Name 'TcpAckFrequency'
             Remove-RegValue -Path $k.PSPath -Name 'TCPNoDelay'
             Remove-RegValue -Path $k.PSPath -Name 'TcpDelAckTicks'
             Remove-RegValue -Path $k.PSPath -Name 'GlobalMaxTcpWindowSize'
-            $count++
         }
         foreach ($k in @(Get-ChildItem -Path $script:NicClassBase -ErrorAction SilentlyContinue |
                          Where-Object { $_.PSChildName -match '^00\d+$' })) {

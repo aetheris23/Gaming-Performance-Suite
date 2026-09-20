@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.8
+# Gaming Performance Suite v2.9
 
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
@@ -10,6 +10,29 @@ hardware, and eliminates launch stutter.
 the watcher no longer carries cross-platform code paths (sysproc `/proc` scans,
 `xrandr`/`displayplacer` calls, `sysctl`/`iw` tuning, stop-marker polling). Every
 scan now stays native to Windows and much lighter on the CPU.
+
+## What's new in v2.9
+
+- **Adaptive tuning is now ON by default** (`AdaptiveTuning.Enabled = $true`). Fixed a
+  gating bug so the adaptive mid-game purge actually runs: it previously required
+  `AllowMidGamePurge` (default OFF), which made the adaptive path inert on out-of-box
+  configs — the exact situation where skill/effect bursts and large-map loads spike RAM
+  and drop FPS. The classic purge stays opt-in (it can hitch a frame), while the
+  adaptive path fires only under a RAM-relative floor with its own tightening cooldown.
+- **Uneven combat/map FPS drops addressed** for Valorant & friends. Adaptive
+  `AdaptivePurgeFloor` and `PressureCooldownSec` are now validated/clamped in code
+  (1–90 % and ≥5 s), so a bad config value can no longer disable or over-tighten
+  the burst purger.
+- **Network profile refresh at apply time.** `Enable-GameNetworkProfile` forces a
+  fresh connection-type probe instead of trusting the 60 s cache, so the WiFi vs
+  Ethernet ACK/flood-safe TCP values always match the link the game is about to use —
+  reducing packet loss / RTT spikes on switch-prone laptops.
+- **Cleanup - dead code removed.** Cross-platform leftovers that were never called
+  (`Test-SuitePlatformWindows`, `Get-PlatformInfo`, `Test-WatcherLockHeld`,
+  `Test/Set/Clear-StopRequest`) are gone from `src/Common.psm1`, and duplicate entries
+  were dropped from game-process lists and never-watch lists. No behavior change.
+- **Voice clarity kept & future-proofed.** Mic enhancement is still enabled via
+  Windows' built-in input signal enhancements (no DSP host); behavior unchanged.
 
 ## What's new in v2.7
 

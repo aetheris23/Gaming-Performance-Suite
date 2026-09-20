@@ -158,11 +158,6 @@ function Get-LogPath {
     $script:LogFile
 }
 
-function Test-SuitePlatformWindows {
-    <# Always true - Windows-only build. #>
-    return $true
-}
-
 # ------------------------------------------------------------
 # Runtime coordination: single instance, background stop signal
 #
@@ -187,19 +182,6 @@ function Open-OrCreateStopEvent {
     <# Opens the existing stop event. Never fabricates an event just to exist. #>
     try   { return [System.Threading.EventWaitHandle]::OpenExisting((Get-WatcherStopEventName)) }
     catch { return $null }
-}
-
-function Test-StopRequested {
-    <# Windows uses the kernel stop event, never a marker file. #>
-    return $false
-}
-
-function Set-StopRequested {
-    <# Windows callers use the kernel event instead. #>
-}
-
-function Clear-StopRequest {
-    <# No-op on Windows - the kernel stop event is reset by the next session. #>
 }
 
 function Wait-StopOrTimeout {
@@ -245,11 +227,6 @@ function New-WatcherInstanceGuard {
     $guard = [pscustomobject]@{ IsHeld = $true }
     $guard | Add-Member -MemberType ScriptMethod -Name Release -Value $release -Force
     return $guard
-}
-
-function Test-WatcherLockHeld {
-    <# Always false on Windows (named mutex handles this). #>
-    return $false
 }
 
 function Test-WatcherPidAlive {
@@ -518,25 +495,10 @@ function Stop-BackgroundWatcher {
 # ------------------------------------------------------------
 # Platform detection helpers
 # ------------------------------------------------------------
-function Get-PlatformInfo {
-    <# Returns Windows platform information. #>
-    return @{
-        Platform     = 'Windows'
-        IsWindows    = $true
-        IsLinux      = $false
-        IsMacOS      = $false
-        IsAndroid    = $false
-        PSVersion    = $PSVersionTable.PSVersion.ToString()
-        Arch         = if ([Environment]::Is64BitProcess) { 'x64' } else { 'x86' }
-    }
-}
-
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
-    Remove-SuiteLogs, Get-SuiteRoot, Get-LogPath, Test-SuitePlatformWindows,
+    Remove-SuiteLogs, Get-SuiteRoot, Get-LogPath,
     Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
     New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive, Test-WatcherRunning,
-    New-WatcherInstanceGuard, Test-WatcherLockHeld, Test-StopRequested, Set-StopRequested,
-    Clear-StopRequest, Wait-StopOrTimeout,
+    New-WatcherInstanceGuard, Wait-StopOrTimeout,
     Get-WatcherJournalPath, Save-WatcherJournal, Get-WatcherJournal, Clear-WatcherJournal,
-    ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher,
-    Get-PlatformInfo
+    ConvertTo-HashtableDeep, Get-StateField, Repair-OrphanedWatcherState, Stop-BackgroundWatcher

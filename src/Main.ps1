@@ -280,7 +280,7 @@ function Get-OsStatusLine {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.7'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v2.9'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
     Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan

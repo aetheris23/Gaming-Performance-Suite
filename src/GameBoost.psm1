@@ -145,7 +145,7 @@ $script:NeverWatchProcesses = @(
     # Crash handlers / bootstrappers
     'crashhandler', 'rbxcrashhandler', 'eaclauncher', 'bepadornfh'
     # Steam family
-    'steam', 'steamservice', 'steamwebhelper', 'steamclient', 'crashhandler'
+    'steam', 'steamservice', 'steamwebhelper', 'steamclient'
     # Riot
     'riotclientservices'
     # EA
@@ -501,8 +501,7 @@ $script:SteamNames = @(
     'gta5*', 'rdr2*', 'cyberpunk2077', 'eldenring*', 'hogwarts*',
     'baldursgate3', 'bg3_dx11*', 'witcher3', 'stardew*', 'terraria',
     'hollowknight*', 'celeste*', 'hades*', 'portal2', 'halo*', 'forza*',
-    'starfield*', 'palworld*', 'lethalcompany*', 'contentwarning*',
-    'cyberpunk2077'
+    'starfield*', 'palworld*', 'lethalcompany*', 'contentwarning*'
 )
 
 # Android emulator process patterns
@@ -1177,8 +1176,8 @@ function Start-GameWatcher {
     $reassertEveryCycles  = 3
     if ($AdaptiveTuningSettings) {
         if ($AdaptiveTuningSettings.ContainsKey('Enabled'))            { $adaptiveOn          = [bool]$AdaptiveTuningSettings['Enabled'] }
-        if ($AdaptiveTuningSettings.ContainsKey('AdaptivePurgeFloor')) { $adaptiveFloorPct   = [int]$AdaptiveTuningSettings['AdaptivePurgeFloor'] }
-        if ($AdaptiveTuningSettings.ContainsKey('PressureCooldownSec')){ $adaptiveCoolSec    = [int]$AdaptiveTuningSettings['PressureCooldownSec'] }
+        if ($AdaptiveTuningSettings.ContainsKey('AdaptivePurgeFloor')) { $adaptiveFloorPct   = [Math]::Max(1, [Math]::Min(90, [int]$AdaptiveTuningSettings['AdaptivePurgeFloor'])) }
+        if ($AdaptiveTuningSettings.ContainsKey('PressureCooldownSec')){ $adaptiveCoolSec    = [Math]::Max(5, [int]$AdaptiveTuningSettings['PressureCooldownSec']) }
         if ($AdaptiveTuningSettings.ContainsKey('ReassertPriorities')) { $reassertPriorities = [bool]$AdaptiveTuningSettings['ReassertPriorities'] }
         if ($AdaptiveTuningSettings.ContainsKey('ReassertEveryCycles')){ $reassertEveryCycles= [Math]::Max(1, [int]$AdaptiveTuningSettings['ReassertEveryCycles']) }
     }
@@ -1653,17 +1652,26 @@ function Start-GameWatcher {
 
             # Memory pressure check - deliberately rare now. A standby purge
             # stalls the whole memory manager (a visible hitch if it lands
-            # mid-frame), so during play it happens ONLY below the critical
-            # floor AND at most once per cooldown window. Skipped entirely
-            # in low-spec mode.
-            if ($running.Count -gt 0 -and $AllowMidGamePurge -and -not $lowSpecSkipPurge) {
+            # mid-frame), so during play the CLASSIC purge happens ONLY below
+            # the critical floor AND at most once per cooldown window.
+            #
+            # The ADAPTIVE purge is a separate, self-gated path: it fires only
+            # under a RAM-relative floor (scales with the machine) with its own
+            # tightening cooldown, so skill/effect bursts and large-map loads
+            # are caught WITHOUT needing AllowMidGamePurge (the always-on path
+            # that can hitch frames). Adaptive tuning is enabled by default.
+            # Skipped entirely in low-spec mode when purge is disabled there.
+            if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
                 $nowMs = [datetime]::UtcNow
                 # Only probe free RAM when a purge could ACTUALLY run. Both
                 # purge paths are cooldown-gated, so probing memory on every
                 # poll right after a purge is pure waste. Skipping the probe
                 # until a path is eligible trims steady-state watcher CPU during
                 # the exact moments (map rendering, effect bursts) the game is busy.
-                $classicEligible = (($nowMs - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds)
+                $classicEligible = $false
+                if ($AllowMidGamePurge) {
+                    $classicEligible = (($nowMs - $lastPurgeUtc).TotalSeconds -ge $PurgeCooldownSeconds)
+                }
                 $adaptiveEligible = $false
                 if ($adaptiveOn) {
                     if ($adaptiveTotalMB -le 0) {
@@ -1688,6 +1696,8 @@ function Start-GameWatcher {
                     $pressureNote = ''
 
                     # 1) Classic fixed-floor purge (behaves exactly as before).
+                    #    Stays opt-in via AllowMidGamePurge because it runs on a
+                    #    timer cadence and can hitch a frame mid-render.
                     if ($classicEligible) {
                         if ($freeMB -lt $CriticalRamFloorMB) {
                             Write-Log ("Free RAM critical ({0} MB) - cooldown-gated standby purge..." -f $freeMB) 'WARN'

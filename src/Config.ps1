@@ -61,7 +61,6 @@
 
         # === Multi-system emulators ===
         'RetroArch'
-        'RetroArch.exe'
 
         # === Other emulators ===
         'ppsspp', 'PPSSPPWindows'
@@ -188,7 +187,9 @@
     # Smooth FPS during heavy moments (skill/effect bursts, large maps).
     # When a game runs, the watcher monitors memory pressure and re-asserts
     # the game's priority/affinity so drops don't cause visible hitches.
-    #   Enabled              : master switch
+    #   Enabled              : master switch (ON by default so effect/ability
+    #                          bursts and big map loads are caught without
+    #                          needing a config edit)
     #   AdaptivePurgeFloor   : % of total RAM treated as "under pressure".
     #                          Scales with the machine (small/large maps).
     #   PressureCooldownSec  : min seconds between adaptive purges (tightens
@@ -197,10 +198,11 @@
     #                          affinity if the OS or heavy load knocked it back
     #   ReassertEveryCycles  : re-check every N poll cycles during play
     AdaptiveTuning = @{
-        # Standby-list purges suspend the memory manager and can hitch frames
-        # during combat/effect bursts. Keep this opt-in; launch-time purge
-        # remains available through PurgeOnGameLaunch.
-        Enabled              = $false
+        # The adaptive purge is RAM-relative and cooldown-gated - it only runs
+        # below the floor, at most once per cooldown. The classic always-on
+        # mid-game purge (AllowMidGamePurge) stays OFF because THAT path can
+        # hitch frames; the adaptive path is what catches combat spikes.
+        Enabled              = $true
         AdaptivePurgeFloor   = 10
         PressureCooldownSec  = 60
         ReassertPriorities   = $true
