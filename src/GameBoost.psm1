@@ -839,6 +839,10 @@ function Update-VoiceChatSupport {
         [int]$ExceptPid,
         [hashtable]$State,           # pid -> @{ Name; Prev }
         [hashtable]$Journal,
+        # Highest priority voice apps may be raised to while a game runs. The
+        # caller caps this relative to the game's own priority so voice threads
+        # can never preempt the game on a weak CPU.
+        [string]$MaxVoicePriority = 'AboveNormal',
         [switch]$Activate
     )
 
@@ -910,9 +914,10 @@ function Update-VoiceChatSupport {
             $prev = [string]$t.PriorityClass
             if ($prev -eq 'RealTime') { continue }
 
-            # Voice apps get a modest above-normal bump so their encode/audio
-            # threads outrank everything except the game.
-            $want = 'AboveNormal'
+            # Voice apps get a modest bump (capped by the caller) so their
+            # encode/audio threads outrank background hogs - but NEVER the game
+            # itself (see -MaxVoicePriority).
+            $want = $MaxVoicePriority
             if ($prev -ne $want) {
                 try { $t.PriorityClass = $want } catch { }
             }
@@ -1110,7 +1115,6 @@ function Start-GameWatcher {
         [int]$IdlePollSeconds = 25,          # slower cadence while NO game runs (idle load)
         [int]$ExtendedIdlePollSeconds = 60,  # even slower when idle for a long time (ultra-low CPU)
         [int]$IdleHeartbeatMinutes = 5,      # log "watcher alive" every N minutes while idle
-        [int]$FreeRamThresholdMB = 2048,     # deprecated: mid-game purges use CriticalRamFloorMB
         [int]$CriticalRamFloorMB = 768,      # standby purge during play ONLY below this floor
         [int]$PurgeCooldownSeconds = 900,    # minimum seconds between two standby purges
         [switch]$PurgeOnGameLaunch,          # one purge shortly after a game is detected
@@ -1167,8 +1171,9 @@ function Start-GameWatcher {
     # ---- resolve adaptive mid-game tuning -------------------------------
     # Reacts to heavy-load moments (skill/effect bursts, large maps) where
     # memory pressure spikes and frame drops show up. Standby purges are
-    # still gated by a cooldown (never stall the middle of a frame) but the
-    # floor adapts to total RAM and the cooldown tightens under pressure.
+    # gated by a cooldown AND a two-consecutive-check pressure streak, so a
+    # purge can never stall the middle of a frame on a single transient dip.
+    # The floor adapts to total RAM and the cooldown tightens under pressure.
     $adaptiveOn           = $false
     $adaptiveFloorPct     = 10
     $adaptiveCoolSec      = 60
@@ -1306,7 +1311,7 @@ function Start-GameWatcher {
     # frame - always cooldown-gated and only under real pressure.
     $adaptiveLastUtc     = [datetime]::MinValue  # last adaptive purge
     $adaptiveCoolMs      = [int]$adaptiveCoolSec * 1000
-    $adaptiveConsecutive = 0                      # consecutive pressure readings (tightens cooldown)
+    $adaptiveConsecutive = 0                      # consecutive sub-floor readings (>=2 required before purging)
     $adaptiveTotalMB     = 0                      # total physical RAM, resolved once
     Add-NativeBoostType
     try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
@@ -1318,7 +1323,6 @@ function Start-GameWatcher {
     # [datetime]::MinValue here made [int](now - sentinel).TotalMilliseconds
     # overflow Int32 (~6.4e13 ms) and crash the watcher on its first idle poll.
     $lastHeartbeatUtc = [datetime]::UtcNow  # last time we logged "watcher alive"
-    $wasIdle           = $true                # start idle (no games yet)
     $idleHeartbeatMs   = $IdleHeartbeatMinutes * 60 * 1000
 
     $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 66 }
@@ -1340,10 +1344,6 @@ function Start-GameWatcher {
     $extrasQueued = @{}
 
     # ---- performance throttling: avoid redundant work per cycle --
-    # Background silence is expensive (iterates all target processes);
-    # only re-run it every N cycles (30s at 15s poll) instead of every poll.
-    $silenceThrottleSec = if ($isLowSpec) { 45 } else { 30 }
-    $lastSilenceUtc     = [datetime]::MinValue
     # PID exit checks: only scan the boosted table every other cycle
     # when gaming (the common case is no exits), halving the process
     # checks inside the cleanup loop.
@@ -1483,12 +1483,24 @@ function Start-GameWatcher {
                             Update-BackgroundSilence -Names @($prof.Deprioritize) `
                                 -ExceptPid $game.Id -State $silenced -Journal $journal `
                                 -ProtectedPatterns $protectedNames -Activate
-                            $lastSilenceUtc = [datetime]::UtcNow
                         }
 
+                        # Voice apps are only lifted as HIGH AS the game's own
+                        # priority allows. Raising Discord/Riot Voice ABOVE a
+                        # Competitive game (both would be AboveNormal) lets voice
+                        # threads preempt the game -> the very party-comms FPS
+                        # drops / audio cutouts / network-loop stutter this is
+                        # meant to prevent, on CPUs with few cores. High-priority
+                        # profiles (Emulator/Steam/Android at High) still grant a
+                        # one-step voice bump; Competitive/Default merely stop
+                        # voice apps slipping to BelowNormal. On low-spec machines
+                        # the bump is skipped entirely to spare the CPU.
                         if ($boostVoice) {
+                            $voiceMax = 'Normal'
+                            if (-not $isLowSpec -and $prof.Priority -eq 'High') { $voiceMax = 'AboveNormal' }
                             Update-VoiceChatSupport -Patterns $voiceOnlyProtected `
-                                -ExceptPid $game.Id -State $voiceBoosted -Journal $journal -Activate
+                                -ExceptPid $game.Id -State $voiceBoosted -Journal $journal `
+                                -MaxVoicePriority $voiceMax -Activate
                         }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
@@ -1657,9 +1669,11 @@ function Start-GameWatcher {
             #
             # The ADAPTIVE purge is a separate, self-gated path: it fires only
             # under a RAM-relative floor (scales with the machine) with its own
-            # tightening cooldown, so skill/effect bursts and large-map loads
-            # are caught WITHOUT needing AllowMidGamePurge (the always-on path
-            # that can hitch frames). Adaptive tuning is enabled by default.
+            # tightening cooldown, and only after the floor is crossed on TWO
+            # consecutive checks, so skill/effect bursts and large-map loads are
+            # caught WITHOUT needing AllowMidGamePurge (the always-on path that
+            # can hitch frames) and a single transient dip never stalls a frame
+            # mid-combat. Adaptive tuning is enabled by default.
             # Skipped entirely in low-spec mode when purge is disabled there.
             if ($running.Count -gt 0 -and -not $lowSpecSkipPurge) {
                 $nowMs = [datetime]::UtcNow
@@ -1709,15 +1723,21 @@ function Start-GameWatcher {
                     # 2) ADAPTIVE purge for skill-effect / large-map load spikes.
                     #    Uses a RAM-relative floor (so it scales with the machine,
                     #    big or small) and tightens its cooldown while pressure
-                    #    persists, reacting to bursts without stalling a frame.
+                    #    persists. A standby purge stalls the whole memory manager,
+                    #    so it only fires after the floor is crossed on TWO
+                    #    consecutive checks - a single transient dip (an ability
+                    #    splash, a short effect burst, one map corner) never costs
+                    #    a frame in the middle of combat.
                     if ($adaptiveOn) {
                         if ($freeMB -lt $adaptiveFloorMB) {
                             $adaptiveConsecutive++
-                            $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; spike burst detected"
-                            if (( [datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs) {
-                                Write-Log ("Adaptive purge: free RAM {0} MB under {1} ({2})." -f $freeMB, $adaptiveFloorMB, $pressureNote) 'WARN'
+                            $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; sustained pressure"
+                            if ($adaptiveConsecutive -ge 2 -and
+                                (([datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs)) {
+                                Write-Log ("Adaptive purge: free RAM {0} MB under {1} for {2} consecutive checks ({3})." -f $freeMB, $adaptiveFloorMB, $adaptiveConsecutive, $pressureNote) 'WARN'
                                 Clear-StandbyMemory
-                                $adaptiveLastUtc = [datetime]::UtcNow
+                                $adaptiveLastUtc       = [datetime]::UtcNow
+                                $adaptiveConsecutive   = 0
                             }
                         } else {
                             $adaptiveConsecutive = 0
@@ -1794,7 +1814,6 @@ function Start-GameWatcher {
                     if ($hbDueMs -lt $waitMs) { $waitMs = [Math]::Max(200, $hbDueMs) }
                 }
             }
-            $wasIdle = $isCurrentlyIdle
 
             if ($ramp.Count -gt 0) {
                 $minDue = $null

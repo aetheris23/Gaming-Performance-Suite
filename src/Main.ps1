@@ -28,7 +28,6 @@ $cfg = if (Test-Path $cfgPath) { & $cfgPath } else { @{} }
 $gameNames  = if ($cfg['GameProcesses'])      { $cfg['GameProcesses'] }      else { @('VALORANT-Win64','pcsx2','cs2') }
 $activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGameOnly'] } else { $true }
 $pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 15 }
-$ramFloorMB = if ($cfg['FreeRamThresholdMB']) { [int]$cfg['FreeRamThresholdMB'] } else { 2048 }
 $profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
 $neverWatch = if ($cfg['NeverWatchProcesses']) { @($cfg['NeverWatchProcesses']) } else { @() }
 
@@ -218,7 +217,6 @@ function Invoke-Watcher {
             -ActiveGameOnly:([bool]$activeGameOnly) `
             -IdlePollSeconds $idleSecs -ExtendedIdlePollSeconds $extIdleSecs `
             -IdleHeartbeatMinutes $heartbeatMin `
-            -FreeRamThresholdMB $ramFloorMB `
             -CriticalRamFloorMB $critFloorMB -PurgeCooldownSeconds $purgeCoolSec `
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -AllowMidGamePurge:([bool]$midGamePurge) `
             -ProfileOverrides $profOv `
@@ -280,7 +278,7 @@ function Get-OsStatusLine {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v2.9'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v3.0'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
     Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan

@@ -1,4 +1,4 @@
-# Gaming Performance Suite v2.9
+# Gaming Performance Suite v3.0
 
 Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
 nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
@@ -10,6 +10,29 @@ hardware, and eliminates launch stutter.
 the watcher no longer carries cross-platform code paths (sysproc `/proc` scans,
 `xrandr`/`displayplacer` calls, `sysctl`/`iw` tuning, stop-marker polling). Every
 scan now stays native to Windows and much lighter on the CPU.
+
+## What's new in v3.0
+
+- **Party/voice-comms FPS drops, audio cutouts and network-loop stutter fixed.**
+  The watcher used to raise Discord/Riot Voice to `AboveNormal` — the *same* priority
+  as a Competitive game (Valorant/CS2/Dota default to `AboveNormal`). On any CPU the
+  voice threads could then preempt the game threads, which is exactly the "choppy in a
+  party, smooth solo" pattern: voice encoding stealing CPU → frame drops, the engine's
+  network loop stalling (read as RTT spikes / packet loss) and game audio starving.
+  Voice apps are now only lifted **as high as the game's own priority** (one step below
+  for High games, and merely de-silenced for Competitive), and the bump is skipped
+  entirely in low-spec mode to spare the CPU. `BoostVoiceAppsDuringGame` still gates the
+  feature; behavior for High-priority profiles (Steam/Emulator/Android) is unchanged.
+- **Adaptive purge can no longer cost a frame on a single transient dip.** A standby
+  purge stalls the whole memory manager, and it used to fire the moment free RAM slipped
+  under the 10% floor — during ability effects and heavy map spots. It now requires the
+  floor to be crossed on **two consecutive checks** before purging (then keeps the
+  tightening cooldown), so a brief combat/map spike never causes a mid-render hitch
+  while genuinely sustained low-RAM pressure is still recovered.
+- **Dead code & duplicate entries removed.** Unused watcher bookkeeping
+  (`$lastSilenceUtc`, `$silenceThrottleSec`, `$wasIdle`) and the deprecated, never-read
+  `FreeRamThresholdMB` parameter/config key are gone, as is a duplicate `ryujinx` entry
+  in the game list. No behavior change.
 
 ## What's new in v2.9
 
@@ -433,6 +456,11 @@ memory and CPU load.
   it scales correctly whether you have 8 GB or 64 GB and whether the current map is
   tiny or enormous. When free RAM drops under the floor, a cooldown-gated standby purge
   reclaims memory without ever stalling a frame in the middle of a render.
+- **Two-check gate (v3.0).** A standby purge briefly pauses the whole memory manager,
+  so it only runs after free RAM stays under the floor on **two consecutive checks**.
+  One transient dip (a single ability splash, a short effect burst, one map corner)
+  can no longer cost a frame mid-combat; only genuinely sustained pressure triggers
+  a purge.
 - **Tightening cooldown under stress.** While memory pressure *persists* (a long skill
   fight or a huge map still loading), the purge cooldown shortens automatically (down
   to half) so recurring bursts are caught sooner - and it relaxes back to normal the
@@ -448,9 +476,9 @@ Configure in `src/Config.ps1` under `AdaptiveTuning`:
 
 ```powershell
 AdaptiveTuning = @{
-    Enabled              = $false
+    Enabled              = $true    # ON so ability/effect bursts and large maps are handled out-of-the-box
     AdaptivePurgeFloor   = 10      # % of total RAM treated as "under pressure"
-    PressureCooldownSec  = 60      # min seconds between adaptive purges
+    PressureCooldownSec  = 60      # min seconds between adaptive purges (needs 2 consecutive sub-floor checks)
     ReassertPriorities   = $true   # periodically re-apply game priority/affinity
     ReassertEveryCycles  = 3       # re-check every N poll cycles during play
 }

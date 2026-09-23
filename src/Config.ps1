@@ -57,7 +57,6 @@
         'yuzu', 'suyu', 'ryujinx', 'sudachi', 'citron'
         'dolphin'
         'cemu'
-        'Ryujinx'
 
         # === Multi-system emulators ===
         'RetroArch'
@@ -149,7 +148,6 @@
     AllowMidGamePurge           = $false
     CriticalRamFloorMB          = 768     # mid-game purge ONLY below this free-RAM floor
     StandbyPurgeCooldownSeconds = 900     # minimum seconds between two purges
-    FreeRamThresholdMB          = 2048    # deprecated (kept for compatibility)
 
     # ---- Pre-game optimization -------------------------------
     # Apply optimizations BEFORE the game process appears to
@@ -194,6 +192,10 @@
     #                          Scales with the machine (small/large maps).
     #   PressureCooldownSec  : min seconds between adaptive purges (tightens
     #                          automatically while pressure persists).
+    #                          NOTE: the purge needs the floor crossed on TWO
+    #                          consecutive checks before it runs, so a single
+    #                          transient dip (one ability splash / map corner)
+    #                          can never stall a frame mid-combat.
     #   ReassertPriorities   : periodically re-apply the game's priority/
     #                          affinity if the OS or heavy load knocked it back
     #   ReassertEveryCycles  : re-check every N poll cycles during play
@@ -348,8 +350,13 @@
     # Keeps comms smooth and clear for other players while gaming:
     #   ProtectVoiceApps         : Discord & friends are NEVER deprioritized
     #                              by the background-silencing logic
-    #   BoostVoiceAppsDuringGame : voice apps get AboveNormal priority so
-    #                              mic capture/encode never starve on weak CPUs
+    #   BoostVoiceAppsDuringGame : keep mic capture/encode smooth. Voice apps are
+    #                              raised only as high as the game's OWN priority
+    #                              (never above it), so Discord/Riot Voice can no
+    #                              longer preempt a Competitive game on a weak CPU
+    #                              (the classic party-comms FPS-drop / audio-cutout
+    #                              cause). The bump is skipped entirely in low-spec
+    #                              mode to spare the CPU.
     #   MmcssAudioPriority       : raises MMCSS Audio/Pro Audio/Capture classes
     #   EnableMicNoiseSuppression: turns on Windows' BUILT-IN input signal
     #                              enhancements (background Noise Suppression +
