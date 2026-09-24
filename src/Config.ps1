@@ -152,7 +152,7 @@
     # ---- Pre-game optimization -------------------------------
     # Apply optimizations BEFORE the game process appears to
     # eliminate launch stutter entirely.
-    PreGameOptimization         = $true   # apply power/network/multimedia tweaks on idle detect
+    PreGameOptimization         = $true   # apply system-wide FPS tweaks on idle detect
     PrePurgeBeforeLaunch        = $true   # purge standby memory before game launches (not after)
 
     # ---- Low-spec / legacy PC mode ---------------------------
@@ -211,15 +211,20 @@
         ReassertEveryCycles  = 3
     }
 
-    # ---- Competitive enemy highlighting ----------------------
-    # These are the in-game Valorant enemy-highlight presets.  The suite
-    # deliberately does not install a system-wide gamma/color filter: that
-    # would tint the whole desktop, cost GPU scanout time, and can interfere
-    # with anti-cheat.  Set the matching preset in the game's settings.
-    EnemyHighlight = @{
-        Enabled = $true
-        Profile = 'Red'   # Red | PurpleTritanopia | YellowProtanopia | YellowDeuteranopia
-    }
+    # ---- Universal watch: ANY game or video ------------------
+    # By default the watcher targets ANY foreground window that is immersive
+    # (a borderless-fullscreen game or a maximized video player) in ADDITION
+    # to the known-game list above. This makes FPS stability + dynamic
+    # resolution scaling apply to titles that are not in the list - new or
+    # unknown games, borderless-windowed games, and video players of any kind.
+    # Set $false to restrict the watcher to the configured game list only.
+    UniversalWatch = $true
+    # A foreground window is treated as a game/video when it covers at least
+    # this fraction of its own monitor. 0.90 catches maximized and
+    # borderless-fullscreen windows reliably while ignoring windowed apps
+    # that are merely large. Lower it (e.g. 0.60) to also optimize smaller
+    # windowed games and videos.
+    ImmersiveWindowThreshold = 0.90
 
     # ---- Per-game classification -----------------------------
     # The watcher auto-detects: Emulator / Steam / Competitive / Default
@@ -259,9 +264,9 @@
     #   - changes the effective mouse aim / reduces input smoothness
     #   - forces a display-mode switch (and back) that hitches the renderer
     #     right around round start
-    #   - feels like lag / packet loss even though the network is fine
+    #   - feels like input lag even though the game runs fine
     # These titles already run fine at native on low-spec hardware, so they get
-    # the wins that DON'T touch the display: priority, timer, network, purge.
+    # the wins that DON'T touch the display: priority, timer, purge.
     # To restore the aggressive "max FPS at lower resolution" behavior, set the
     # per-game override below to 'Low' (or set Competitive to 'Low' here).
     ProfileTiers = @{
@@ -323,55 +328,6 @@
     FrameGeneration = @{
         Enabled = $false
         ToolPath = ''                  # e.g. 'C:\Program Files\Lossless Scaling\LosslessScaling.exe'
-    }
-
-    # ---- Network optimization (applied while the watcher runs) --
-    # Reduces in-game latency and packet-loss stalls. Applied once when
-    # the watcher starts (BEFORE the game opens its sockets) and reverted
-    # to your original values when it stops.
-    #   DisableNetworkThrottling : off switches the multimedia network
-    #                              throttle that periodically delays packets
-    #   TcpLowLatency            : per-interface fast ACK + no Nagle delay
-    #                              (auto-adjusts for WiFi vs Ethernet)
-    #   DisableNicPowerSaving    : stops Windows powering down the Wi-Fi/
-    #                              Ethernet adapter between bursts (micro-
-    #                              dropouts that look like packet loss)
-    #   ConnectionTypeDetection   : auto-detect WiFi vs LAN for optimal
-    #                              TCP settings (prevents packet loss on WiFi)
-    NetworkOptimization = @{
-        Enabled                  = $true
-        DisableNetworkThrottling = $true
-        TcpLowLatency            = $true
-        DisableNicPowerSaving    = $true
-        ConnectionTypeDetection  = $true   # detect WiFi vs LAN and adjust TCP settings
-    }
-
-    # ---- Microphone / voice clarity -----------------------------
-    # Keeps comms smooth and clear for other players while gaming:
-    #   ProtectVoiceApps         : Discord & friends are NEVER deprioritized
-    #                              by the background-silencing logic
-    #   BoostVoiceAppsDuringGame : keep mic capture/encode smooth. Voice apps are
-    #                              raised only as high as the game's OWN priority
-    #                              (never above it), so Discord/Riot Voice can no
-    #                              longer preempt a Competitive game on a weak CPU
-    #                              (the classic party-comms FPS-drop / audio-cutout
-    #                              cause). The bump is skipped entirely in low-spec
-    #                              mode to spare the CPU.
-    #   MmcssAudioPriority       : raises MMCSS Audio/Pro Audio/Capture classes
-    #   EnableMicNoiseSuppression: turns on Windows' BUILT-IN input signal
-    #                              enhancements (background Noise Suppression +
-    #                              acoustic echo cancellation) for your mic at
-    #                              game start, so keyboard/fan/room noise never
-    #                              bleeds into party & team chat. Registry-only,
-    #                              near-zero CPU/RAM cost - reverted on stop.
-    #   ExtraProtectedProcessNames: additional voice app process names
-    #                              (without .exe), e.g. @('MyChatApp')
-    VoiceClarity = @{
-        ProtectVoiceApps           = $true
-        BoostVoiceAppsDuringGame   = $true
-        MmcssAudioPriority         = $true
-        EnableMicNoiseSuppression  = $true
-        ExtraProtectedProcessNames = @()
     }
 
     # ---- Power profile (menu option 1 / full optimization) -----

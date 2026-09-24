@@ -120,7 +120,7 @@ $script:DMDFO_STRETCH  = 1
 # Native mode remembered for the lifetime of the watcher session
 $script:NativeMode     = $null
 $script:ScaledActive   = $false
-$script:StretchActive  = $false
+# State is kept in the restore path so native is always restored 1:1
 
 function Get-CurrentDisplayMode {
     <# Returns the ACTIVE mode of the primary display as a hashtable. #>
@@ -196,7 +196,7 @@ function Select-ScaledMode {
     # ---- refresh-rate preservation (never drop the panel's Hz) ----
     # A lower-resolution mode that only exists at a LOW refresh silently drops
     # the panel from e.g. 144Hz to 60Hz for the whole session. In a fast FPS
-    # that reads as lag / stutter / "packet loss" and it ruins aim (input feels
+    # that reads as lag / stutter and it ruins aim (input feels
     # delayed). This is also the mechanism by which "effects / flashes / large
     # maps" suddenly look stuttery: the game is being rendered and upscaled at
     # a low refresh while every effect adds frame time on top.
@@ -214,7 +214,7 @@ function Select-ScaledMode {
         if ($keptHz.Count -gt 0) {
             $candidates = @($keptHz)
         } else {
-            Write-Log ("No '{0}' scaled mode keeps the panel's native {1}Hz - display scaling skipped, staying at native (a 60Hz drop would feel like lag/packet loss)." -f $Native.Width, $Native.Frequency) 'INFO'
+            Write-Log ("No '{0}' scaled mode keeps the panel's native {1}Hz - display scaling skipped, staying at native (a 60Hz drop would feel like lag/stutter)." -f $Native.Width, $Native.Frequency) 'INFO'
             return $null
         }
     }
@@ -310,7 +310,6 @@ function Enable-LowResolutionMode {
     $native.Stretched = [bool]$Stretch
     $script:NativeMode   = $native
     $script:ScaledActive = $true
-    $script:StretchActive = [bool]$Stretch
     if ($Stretch) {
         Write-Log ("Render resolution dropped AND stretched to fill: {0}x{1}@{2}Hz -> {3}x{4}@{5}Hz on a {6}x{7} panel (FPS stretched look, GPU load down)" -f `
             $native.Width, $native.Height, $native.Frequency, `
@@ -362,7 +361,6 @@ function Restore-NativeResolution {
     } finally {
         $script:ScaledActive  = $false
         $script:NativeMode    = $null
-        $script:StretchActive = $false
     }
 }
 

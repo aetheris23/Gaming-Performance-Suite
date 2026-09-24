@@ -274,7 +274,7 @@ function Test-WatcherRunning {
 # Recovery journal.
 #
 # The watcher records every system change it makes (display mode,
-# silenced processes, FSO flags, network values...) to this file
+# silenced processes, FSO flags...) to this file
 # the moment it makes it. If the watcher dies without cleanup -
 # killed console, forced kill, power loss, crash - the NEXT start
 # (or Stop-GamingSuite.bat) replays the undo side of the journal
@@ -333,11 +333,11 @@ function Get-StateField {
 function Repair-OrphanedWatcherState {
     <#
         Undoes every change recorded in a leftover recovery journal:
-        restores native resolution, background-app priorities, voice-app
-        priorities, fullscreen-optimization flags, kills an orphaned
-        frame-gen tool and reverts network tuning. Called automatically
-        when a watcher starts over a dead previous session, and as the
-        final fallback of Stop-GamingSuite.bat.
+        restores native resolution, background-app priorities,
+        fullscreen-optimization flags and kills an orphaned frame-gen
+        tool. Called automatically when a watcher starts over a dead
+        previous session, and as the final fallback of
+        Stop-GamingSuite.bat.
     #>
     $raw = Get-WatcherJournal
     if (-not $raw) { return $false }
@@ -375,23 +375,7 @@ function Repair-OrphanedWatcherState {
         }
     } catch { }
 
-    # ---- 3. Voice apps boosted for mic clarity -> previous priority -----
-    try {
-        $vb = Get-StateField $j 'voiceBoosted'
-        if ($vb -is [hashtable]) {
-            foreach ($procId in @($vb.Keys)) {
-                try {
-                    $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-                    if ($p -and $p.PriorityClass -eq 'AboveNormal') {
-                        $prev = Get-StateField $vb[$procId] 'Prev'
-                        $p.PriorityClass = $(if ($prev) { $prev } else { 'Normal' })
-                    }
-                } catch { }
-            }
-        }
-    } catch { }
-
-    # ---- 4. Fullscreen-optimization compat flags ------------------------
+    # ---- 3. Fullscreen-optimization compat flags ------------------------
     try {
         $flags = @(Get-StateField $j 'fsoFlags') | Where-Object { $_ }
         foreach ($path in $flags) {
@@ -401,7 +385,7 @@ function Repair-OrphanedWatcherState {
         if (@($flags).Count -gt 0) { Write-Log 'Fullscreen-optimization overrides cleared.' 'RECOVER' }
     } catch { }
 
-    # ---- 5. Orphaned frame-generation tool ------------------------------
+    # ---- 4. Orphaned frame-generation tool ------------------------------
     try {
         $fgPid = 0
         [void][int]::TryParse("$([string](Get-StateField $j 'fgToolPid'))", [ref]$fgPid)
@@ -415,24 +399,6 @@ function Repair-OrphanedWatcherState {
             }
         }
     } catch { }
-
-    # ---- 6. Network tuning revert ---------------------------------------
-    try {
-        $net = Get-StateField $j 'net'
-        if ($net) {
-            Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
-            Undo-GameNetworkProfile -JournalState (ConvertTo-HashtableDeep $net)
-        }
-    } catch { Write-Log "Recovery: network revert failed: $_" 'WARN' }
-
-    # ---- 7. Mic noise-suppression revert --------------------------------
-    try {
-        $mic = Get-StateField $j 'micNoise'
-        if ($mic) {
-            Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
-            Undo-MicNoiseSuppression -JournalState (ConvertTo-HashtableDeep $mic)
-        }
-    } catch { Write-Log "Recovery: mic noise-suppression revert failed: $_" 'WARN' }
 
     Clear-WatcherJournal
 

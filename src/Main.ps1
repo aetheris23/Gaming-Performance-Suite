@@ -20,7 +20,6 @@ Import-Module (Join-Path $root 'Common.psm1')    -Force
 Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
-Import-Module (Join-Path $root 'NetTune.psm1')   -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -58,8 +57,9 @@ $resSettings = @{
 $exitWhenGameEnds = if ($null -ne $cfg['ExitWhenGameSessionEnds']) { [bool]$cfg['ExitWhenGameSessionEnds'] } else { $true }
 $fgSettings = if ($cfg['FrameGeneration']) { $cfg['FrameGeneration'] } else { @{ Enabled = $false; ToolPath = '' } }
 $lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { @{ Mode = 'Auto' } }
-$netCfg     = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $true } }
-$voiceCfg   = if ($cfg['VoiceClarity'])        { $cfg['VoiceClarity'] }        else { @{} }
+$universalCfg = @{}
+if ($cfg.ContainsKey('UniversalWatch')) { $universalCfg['Enabled'] = [bool]$cfg['UniversalWatch'] }
+if ($cfg.ContainsKey('ImmersiveWindowThreshold')) { $universalCfg['ImmersiveWindowThreshold'] = [double]$cfg['ImmersiveWindowThreshold'] }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Mode = 'Auto' } }
 $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      else { @{ Enabled = $false } }
 
@@ -221,8 +221,8 @@ function Invoke-Watcher {
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -AllowMidGamePurge:([bool]$midGamePurge) `
             -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
-            -LegacySettings $leg -NetworkSettings $netCfg -VoiceSettings $voiceCfg `
-            -LowSpecSettings $lowSpecEff `
+            -LegacySettings $leg -LowSpecSettings $lowSpecEff `
+            -UniversalSettings $universalCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
             -NeverWatchProcesses $neverWatch `
             -PreGameOptimization:([bool]$preGameOpt) `
@@ -279,7 +279,7 @@ function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     Write-Host '        GAMING PERFORMANCE SUITE  v3.0'                -ForegroundColor Cyan
-    Write-Host '  FPS stability | Dynamic res | Net + mic tuning'      -ForegroundColor Cyan
+    Write-Host '  FPS stability | Dynamic res | Universal windowed mode' -ForegroundColor Cyan
     Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
     $admin = Test-Administrator
@@ -289,12 +289,6 @@ function Show-Banner {
         Write-Host (" OS: {0}" -f (Get-OsStatusLine)) -ForegroundColor DarkGray
     } catch { }
     try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { }
-
-    # Show connection type
-    try {
-        $connType = Get-ActiveNetworkType
-        Write-Host (" Network: {0}" -f $connType) -ForegroundColor DarkGray
-    } catch { }
 
     # Show low-spec mode
     if ($lowSpecEff['Enabled']) {
@@ -325,11 +319,8 @@ function Show-Menu {
     Write-Host '  3) Start watcher HIDDEN in background (recommended)'
     Write-Host '  4) Start watcher in THIS window (Ctrl+C to stop)'
     Write-Host '  5) STOP background watcher'
-    Write-Host ' --- NETWORK & MICROPHONE ------------------------------' -ForegroundColor Yellow
-    Write-Host '  6) Apply network + mic optimizations NOW'
-    Write-Host '  7) Revert network + mic optimizations (restore originals)'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
-    Write-Host '  8) Show watcher / display / network / GPU status'
+    Write-Host '  6) Show watcher / display / GPU status'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
     Write-Host '  Q) Quit'
     Write-Host ''
@@ -350,18 +341,6 @@ function Invoke-FullOptimization {
     if (-not ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipStandbyPurge'])) {
         Clear-StandbyMemory
     }
-    try { Set-MicClarityTweaks } catch { Write-Log $_.Exception.Message 'ERROR' }
-    # Windows' built-in input signal enhancements (background noise suppression
-    # for party/team comms) - pure registry writes on each capture endpoint,
-    # no extra DSP host and no sustained CPU/RAM cost.
-    try {
-        $micOn = $true
-        if ($cfg['VoiceClarity'] -and $cfg['VoiceClarity'].PSObject.Properties['EnableMicNoiseSuppression']) {
-            $micOn = [bool]$cfg['VoiceClarity']['EnableMicNoiseSuppression']
-        }
-        if ($micOn) { Enable-MicNoiseSuppression } else { Write-Log 'Mic noise suppression disabled in Config.ps1' 'INFO' }
-    } catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
-    try { Enable-GameNetworkProfile -Settings $netCfg -JournalState $null } catch { Write-Log $_.Exception.Message 'ERROR' }
     if ($leg.EnableHags) {
         Write-Log '=== FULL OPTIMIZATION complete. Reboot once for HAGS. ===' 'OK'
     } else {
@@ -427,24 +406,16 @@ function Show-Status {
     Write-Log ("Integer scaling preferred: {0}" -f $resSettings.PreferIntegerScale) 'INFO'
     Write-Log ("Stretched resolution: {0}" -f $(if ($resSettings.Stretched) { 'ON - fullscreen fill (FPS stretch) even across aspect ratios' } else { 'OFF - same-aspect only' })) 'INFO'
 
-    # ---- network + voice summary ---------------------------------------
-    $netOn  = if ($null -ne $netCfg['Enabled'])   { [bool]$netCfg['Enabled'] }   else { $true }
-    try {
-        $connType = Get-ActiveNetworkType
-        Write-Log ("Network tuning: {0} (connection: {1}, TCP auto-optimized for connection type)" -f $(if ($netOn) { 'enabled' } else { 'disabled' }), $connType) 'INFO'
-    } catch {
-        Write-Log ("Network tuning: {0}" -f $(if ($netOn) { 'enabled' } else { 'disabled' })) 'INFO'
+    # ---- universal watch summary ---------------------------------------
+    $univOn = $false
+    if ($universalCfg -and $universalCfg.ContainsKey('Enabled')) { $univOn = [bool]$universalCfg['Enabled'] }
+    if ($univOn) {
+        $immT = 0.90
+        if ($universalCfg.ContainsKey('ImmersiveWindowThreshold')) { $immT = [double]$universalCfg['ImmersiveWindowThreshold'] }
+        Write-Log ("Universal watch: ON - any immersive foreground game/video window is optimized (threshold {0:P0} of its monitor)" -f $immT) 'INFO'
+    } else {
+        Write-Log 'Universal watch: off (watcher targets the configured game list only)' 'INFO'
     }
-    $micMmcss = if ($null -ne $voiceCfg['MmcssAudioPriority']) { [bool]$voiceCfg['MmcssAudioPriority'] } else { $true }
-    $extraProt = @()
-    if ($voiceCfg['ExtraProtectedProcessNames']) { $extraProt = @($voiceCfg['ExtraProtectedProcessNames']) }
-    Write-Log ("Voice clarity: MMCSS mic priority {0}; voice apps protected from silencing{1}" -f `
-        $(if ($micMmcss) { 'on' } else { 'off' }), $(if ($extraProt.Count -gt 0) { ' (+ your extras)' } else { '' })) 'INFO'
-    $enemyCfg = if ($cfg['EnemyHighlight']) { $cfg['EnemyHighlight'] } else { @{} }
-    $enemyProfile = if ($enemyCfg['Profile']) { [string]$enemyCfg['Profile'] } else { 'Red' }
-    $validEnemyProfiles = @('Red','PurpleTritanopia','YellowProtanopia','YellowDeuteranopia')
-    if ($enemyProfile -notin $validEnemyProfiles) { $enemyProfile = 'Red' }
-    Write-Log ("Enemy highlight preset: {0} (set this preset in Valorant; no system-wide color filter is applied)" -f $enemyProfile) 'INFO'
 
     try {
         $leg = Resolve-LegacySettings
@@ -479,7 +450,6 @@ function Show-Status {
     Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
     try {
         Write-Log ("OS: {0}" -f (Get-OsStatusLine)) 'INFO'
-        Write-Log '  WinDetect module removed - startup no longer probes powercfg/netsh/WMI per session.' 'INFO'
     } catch { }
 }
 
@@ -523,22 +493,7 @@ try {
         }
         '4' { try { Invoke-Watcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '5' { try { Stop-BackgroundWatcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
-        '6' {
-            try {
-                Set-MicClarityTweaks
-                try { Enable-MicNoiseSuppression } catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
-                Enable-GameNetworkProfile -Settings $netCfg -JournalState $null
-            } catch { Write-Log $_.Exception.Message 'ERROR' }
-            Wait-MenuKey
-        }
-        '7' {
-            try {
-                Undo-GameNetworkProfile -RemoveKnownDefaults
-                try { Undo-MicNoiseSuppression -RemoveKnownDefaults } catch { Write-Log "Mic noise suppression revert skipped: $_" 'WARN' }
-            } catch { Write-Log $_.Exception.Message 'ERROR' }
-            Wait-MenuKey
-        }
-        '8' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '6' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         { $_ -in 'Q','q' } { break menu }
         default { }
     }

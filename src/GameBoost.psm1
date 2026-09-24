@@ -1,18 +1,19 @@
 # ============================================================
 #  GameBoost.psm1 - FPS stability + dynamic game handling
-#  (Valorant, Steam titles, PCSX2 and other emulators).
+#  (Valorant, Steam titles, PCSX2 and other emulators, plus ANY
+#  foreground game or video: see UniversalWatch in Config.ps1).
 #
 #  Windows-only build (Linux/macOS/Android support removed -
 #  the cross-platform branches added per-poll scanning overhead
 #  that degraded long gaming sessions). Optimized for low-spec
 #  PCs and laptops.
 #
-#  On game detection the watcher:
-#    - classifies the title (Emulator / Steam / Competitive)
+#  On detection of a game/video the watcher:
+#    - classifies the title (Emulator / Steam / Competitive /
+#      Android / Default); unknown immersive windows become
+#      Default so ANY game/video in windowed mode is covered
 #    - raises its scheduling priority + steers it off core 0
-#    - silences known background hogs (NEVER voice apps -
-#      your microphone stays clean for other players)
-#    - optionally boosts voice-chat apps so comms stay smooth
+#    - silences known background hogs (browsers, Steam helper)
 #    - DROPS THE DISPLAY RESOLUTION to cut GPU load
 #      (restored to native automatically on game exit/stop)
 #    - optionally launches a driver-level frame-generation
@@ -42,9 +43,6 @@ Set-StrictMode -Version Latest
 # the whole module and adds avoidable startup lag on low-spec machines).
 if (-not (Get-Module -Name 'GpuDetect')) {
     Import-Module (Join-Path $PSScriptRoot 'GpuDetect.psm1') -Force
-}
-if (-not (Get-Module -Name 'NetTune')) {
-    Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
 }
 
 function Write-GpuInventory {
@@ -162,6 +160,34 @@ $script:NeverWatchProcesses = @(
     'overwolf', 'overwolflauncher'
     # Windows gaming services
     'gamingservices', 'gamingservicesnet', 'gamingservicesui', 'gamebar', 'gamebarpresencewriter'
+)
+
+# ------------------------------------------------------------
+# Universal-watch blocklist.
+#
+# UniversalWatch treats ANY foreground window that fills its monitor as a
+# game/video candidate. This list keeps the desktop, shell, system helpers,
+# stores, browsers and productivity apps out of that path so an everyday
+# maximized window is never boosted/downscaled. Anti-cheat + launchers are
+# already covered by $script:NeverWatchProcesses; the universal path merges
+# both. Extend here if a tool on your custom build is missing.
+# ------------------------------------------------------------
+$script:UniversalBlocklist = @(
+    # Windows shell / desktop / system
+    'explorer', 'progman', 'dwm', 'cmd', 'conhost', 'openssh', 'taskmgr'
+    'winlogon', 'lsass', 'csrss', 'system', 'runtimebroker', 'sihost'
+    'searchhost', 'searchindexer', 'startmenuexperiencehost', 'textinputhost'
+    'shellexperiencehost', 'smartscreen', 'securityhealthsystray'
+    # Built-in utilities / applets
+    'calculator', 'notepad', 'wordpad', 'mspaint', 'regedit', 'mmc'
+    'control', 'sndvol', 'osk', 'magnify', 'narrator', 'winver', 'dosprompt'
+    # Office / productivity
+    'winword', 'excel', 'powerpnt', 'outlook', 'onenote', 'ms-teams', 'msteams'
+    'teams2', 'code', 'code-insiders', 'notion', 'slack', 'acrobat'
+    'acrord32', 'libreoffice', 'soffice', 'obs64', 'obs32',
+    # Browsers (videos inside a browser play fine - never downscale surfing)
+    'chrome', 'msedge', 'firefox', 'opera', 'brave', 'vivaldi', 'chromium'
+    'iexplore', 'qqbrowser', '360se', 'seamonkey', 'waterfox'
 )
 
 # ------------------------------------------------------------
@@ -463,8 +489,8 @@ $script:GameProfiles = @{
     'Competitive' = @{
         Priority         = 'AboveNormal'
         AvoidCores       = @(0)
-        # NOTE: Discord/voice apps are deliberately NOT silenced - they carry
-        # your microphone. See $script:VoiceAppPatterns + Update-VoiceChatSupport.
+        # Silencing only covers the profile's Deprioritize list, so comms apps
+        # you actively use are never touched unless you add them here.
         Deprioritize     = @('steamwebhelper','chrome','msedge','firefox','spotify')
         Description      = 'Latency-critical online play: AboveNormal priority + browsers/Steam silenced'
     }
@@ -511,33 +537,6 @@ $script:AndroidEmulatorNames = @(
     'mumuplayer', 'mumuvmmheadless',
     'bluestacks', 'hd-player', 'bstkvmm',
     'memu', 'memuheadless'
-)
-
-# Voice/comms/party apps that must NEVER be silenced while gaming - they carry
-# your microphone and team audio (and their voice/audio runs in child
-# processes too, covered by Update-VoiceChatSupport). A party of 3+ means
-# several of these are encoding/decoding continuously on a weak CPU, so if any
-# of them slips through the guard and gets BelowNormal, party audio stutters or
-# drops. Extended via Config.ps1 VoiceClarity.ExtraProtectedProcessNames.
-$script:VoiceAppPatterns = @(
-    # Discord family (main + subprocesses: voice/RPC/updater/PTB/Canary)
-    'discord*', 'discordptb', 'discordcanary', 'discordvoice',
-    'discord_rpc', 'discordupdater', 'discordcrash',
-    # Virtual audio cable / mixers
-    'voicemeter*', 'vb-audio*', 'vb_cable*',
-    # TeamSpeak
-    'ts3client*', 'ts3*', 'teamspeak*', '2017speak*',
-    # Steam / Blizzard / console-party voice
-    'steamvoice', 'steamwebhelper', 'blizzardvoice', 'battlenet*',
-    'xboxapp*', 'gamebar*', 'gamebarpresencewriter',
-# General purpose comms
-    'mumble*', 'curses*', 'curseforge', 'overwolf*', 'galaxyclient',
-    'teams*', 'ms-teams*', 'googlemeet', 'meet', 'webexmta', 'ciscowebex*',
-    'zoom*', 'skype*', 'skypeapp', 'whatsapp*', 'telegram*', 'slack*',
-    'microsoftteams', 'teamspeak3_win32',
-    # Game-specific party/community voice
-    'vrchat*', 'eslt*', 'discord-rpc', 'party', 'gamechat',
-    'oculusclient*', 'vrc*', 'spatial*'
 )
 
 function Test-MatchAny {
@@ -720,7 +719,6 @@ function Test-LowSpecHardware {
 # 6. Per-process boost driven by the game's profile
 # ------------------------------------------------------------
 $script:PriorityCapable = $true
-$script:PriorityCapWarned = $false
 
 function Invoke-ProcessBoost {
     param(
@@ -773,8 +771,8 @@ function Invoke-ProcessBoost {
 
 # ------------------------------------------------------------
 # Background-app silencing used by the Steam/Competitive profiles.
-# Voice-chat apps (see $script:VoiceAppPatterns + extra names from
-# Config.ps1) are ALWAYS skipped so microphone audio stays clean.
+# Anti-cheat services are always skipped; leaning on the profile's
+# Deprioritize list keeps the change minimal and reversible.
 # ------------------------------------------------------------
 function Update-BackgroundSilence {
     param(
@@ -782,7 +780,6 @@ function Update-BackgroundSilence {
         [int]$ExceptPid,
         [hashtable]$State,           # pid -> info of processes currently silenced
         [hashtable]$Journal,         # recovery journal (optional)
-        [string[]]$ProtectedPatterns = @(),
         [switch]$Activate            # off = restore everything in $State to Normal
     )
 
@@ -808,12 +805,6 @@ function Update-BackgroundSilence {
             if ($t.Id -eq $ExceptPid -or $t.Id -eq $PID) { continue }
             # Never touch anti-cheat services, whatever happens
             if ($t.ProcessName -in @('vgc','vgtray','vgk','BEService','EasyAntiCheat')) { continue }
-            # Never touch voice/chat apps - they carry the microphone
-            $isVoice = $false
-            foreach ($pat in $ProtectedPatterns) {
-                if ($t.ProcessName -like $pat) { $isVoice = $true; break }
-            }
-            if ($isVoice) { continue }
             if (-not $State.ContainsKey($t.Id)) {
                 $t.PriorityClass = 'BelowNormal'
                 $State[$t.Id] = @{ Name = $t.ProcessName; Priority = 'BelowNormal' }
@@ -823,114 +814,6 @@ function Update-BackgroundSilence {
                 }
                 Write-Log ("Silenced background app '{0}' (PID {1}) while gaming" -f $t.ProcessName, $t.Id) 'INFO'
             }
-        } catch { }
-    }
-}
-
-# ------------------------------------------------------------
-# Voice-chat support: while a game runs, give Discord & friends a
-# modest AboveNormal bump so voice encoding/capture never starves
-# behind the boosted game - clear mic for other players even on
-# weak CPUs. Original priorities are journaled and restored.
-# ------------------------------------------------------------
-function Update-VoiceChatSupport {
-    param(
-        [Parameter(Mandatory)][string[]]$Patterns,
-        [int]$ExceptPid,
-        [hashtable]$State,           # pid -> @{ Name; Prev }
-        [hashtable]$Journal,
-        # Highest priority voice apps may be raised to while a game runs. The
-        # caller caps this relative to the game's own priority so voice threads
-        # can never preempt the game on a weak CPU.
-        [string]$MaxVoicePriority = 'AboveNormal',
-        [switch]$Activate
-    )
-
-    if (-not $Patterns -or @($Patterns).Count -eq 0) { return }
-
-    if (-not $Activate) {
-        foreach ($procId in @($State.Keys)) {
-            try {
-                $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-                if ($p -and ($p.PriorityClass -eq 'AboveNormal' -or $p.PriorityClass -eq 'High')) {
-                    $prev = $State[$procId]['Prev']
-                    $p.PriorityClass = $(if ($prev) { $prev } else { 'Normal' })
-                }
-            } catch { }
-            $null = $State.Remove($procId)
-            if ($Journal -and $Journal['voiceBoosted'].ContainsKey($procId)) {
-                $null = $Journal['voiceBoosted'].Remove($procId)
-            }
-        }
-        return
-    }
-
-    $targets = @(Get-Process -Name @($Patterns) -ErrorAction SilentlyContinue)
-    # Plain hashtable, NOT [ordered]@{}: OrderedDictionary treats an INT key as
-    # a positional index and throws "index out of range", which was silently
-    # swallowed here and made voice boosting never apply.
-    $candidatePids = @{}
-    $childById = $null
-    foreach ($t in $targets) {
-        try {
-            if ($t.Id -eq $ExceptPid -or $t.Id -eq $PID) { continue }
-            $candidatePids[$t.Id] = $t.ProcessName
-            # Voice apps (Discord, TeamSpeak, etc.) run their actual audio/voice
-            # threads in CHILD processes. Boosting only the parent leaves the
-            # real encoder starved -> party audio still stutters on weak CPUs.
-            # Walk the whole descendant tree so every voice subprocess is lifted.
-            # The process table is enumerated ONCE per activation and reused for
-            # every candidate (it was per-candidate before - multiple expensive
-            # Win32_Process walks per poll on low-spec machines).
-            if ($null -eq $childById) {
-                $childById = @{}
-                foreach ($wp in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -and $_.ParentProcessId })) {
-                    $childById[[string]$wp.ProcessId] = [int]$wp.ParentProcessId
-                }
-            }
-            $toCheck = [System.Collections.Generic.Queue[int]]::new()
-            $toCheck.Enqueue([int]$t.Id)
-            while ($toCheck.Count -gt 0) {
-                $cur = $toCheck.Dequeue()
-                foreach ($other in $childById.GetEnumerator()) {
-                    if ($other.Value -eq $cur) {
-                        $cid = [int]$other.Key
-                        $cp = Get-Process -Id $cid -ErrorAction SilentlyContinue
-                        if ($cp -and $cp.Id -ne $ExceptPid -and $cp.Id -ne $PID -and -not $candidatePids.Contains($cp.Id)) {
-                            $candidatePids[$cp.Id] = $cp.ProcessName
-                        }
-                        $toCheck.Enqueue($cid)
-                    }
-                }
-            }
-        } catch { }
-    }
-
-    foreach ($pid in @($candidatePids.Keys)) {
-        try {
-            $t = Get-Process -Id $pid -ErrorAction SilentlyContinue
-            if (-not $t) { continue }
-            if ($State.ContainsKey($t.Id)) { continue }
-            $prev = [string]$t.PriorityClass
-            if ($prev -eq 'RealTime') { continue }
-
-            # Voice apps get a modest bump (capped by the caller) so their
-            # encode/audio threads outrank background hogs - but NEVER the game
-            # itself (see -MaxVoicePriority).
-            $want = $MaxVoicePriority
-            if ($prev -ne $want) {
-                try { $t.PriorityClass = $want } catch { }
-            }
-
-            # Track state in the journal regardless of whether the OS accepted
-            # the write, so the watcher's cleanup always restores/clears it
-            # (never leaves a stale journal entry on an unclean stop).
-            $State[$t.Id] = @{ Name = $t.ProcessName; Prev = $prev }
-            if ($Journal) {
-                $Journal['voiceBoosted'][$t.Id] = @{ Name = $t.ProcessName; Prev = $prev }
-                Save-WatcherJournal -State $Journal
-            }
-            Write-Log ("Voice app '{0}' (PID {1}) -> {2} for stutter-free mic" -f $t.ProcessName, $t.Id, $want) 'INFO'
         } catch { }
     }
 }
@@ -1073,6 +956,30 @@ function Undo-FsoCompatFlags {
 # ------------------------------------------------------------
 # Foreground game selection
 # ------------------------------------------------------------
+function Add-ForegroundWindowType {
+    <# Compiles the foreground-window interop lazily, on first real use. #>
+    if ('Suite.ForegroundWindow' -as [type]) { return }
+    Add-Type -Namespace Suite -Name ForegroundWindow -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+[DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+public struct MONITORINFO
+{
+    public uint cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public uint dwFlags;
+}
+'@
+}
+
 function Get-ActiveWindowProcessId {
     <#
         Returns the process owning the foreground window, or 0 when the
@@ -1080,18 +987,47 @@ function Get-ActiveWindowProcessId {
         must not prevent headless game detection.
     #>
     try {
-        if (-not ('Suite.ForegroundWindow' -as [type])) {
-            Add-Type -Namespace Suite -Name ForegroundWindow -MemberDefinition @'
-[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-'@
-        }
+        Add-ForegroundWindowType
         $window = [Suite.ForegroundWindow]::GetForegroundWindow()
         if ($window -eq [IntPtr]::Zero) { return 0 }
         $pid = [uint32]0
         [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$pid)
         return [int]$pid
     } catch { return 0 }
+}
+
+function Test-ImmersiveForegroundWindow {
+    <#
+        Returns $true when the foreground window covers at least $Threshold of
+        its own monitor - the signature of a game or video running in
+        borderless-fullscreen / maximized ("windowed") mode. Geometry is read
+        against the window's OWN monitor so multi-monitor setups classify
+        correctly. Used by UniversalWatch to catch ANY game/video without a
+        hardcoded process name.
+    #>
+    param([double]$Threshold = 0.90)
+    try {
+        Add-ForegroundWindowType
+        $hwnd = [Suite.ForegroundWindow]::GetForegroundWindow()
+        if ($hwnd -eq [IntPtr]::Zero) { return $false }
+        $r = New-Object Suite.ForegroundWindow+RECT
+        if (-not [Suite.ForegroundWindow]::GetWindowRect($hwnd, [ref]$r)) { return $false }
+        if ($r.Right -le $r.Left -or $r.Bottom -le $r.Top) { return $false }
+
+        # Window's own monitor bounds (right for secondary screens / scaling).
+        $mon = [Suite.ForegroundWindow]::MonitorFromWindow($hwnd, 2)   # MONITOR_DEFAULTTONEAREST
+        if ($mon -eq [IntPtr]::Zero) { return $false }
+        $mi = New-Object Suite.ForegroundWindow+MONITORINFO
+        $mi.cbSize = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.ForegroundWindow+MONITORINFO])
+        if (-not [Suite.ForegroundWindow]::GetMonitorInfo($mon, [ref]$mi)) { return $false }
+
+        $w = [double]($r.Right - $r.Left)
+        $h = [double]($r.Bottom - $r.Top)
+        $mw = [double]($mi.rcMonitor.Right - $mi.rcMonitor.Left)
+        $mh = [double]($mi.rcMonitor.Bottom - $mi.rcMonitor.Top)
+        if ($w -le 0 -or $h -le 0 -or $mw -le 0 -or $mh -le 0) { return $false }
+        return ((($w * $h) / ($mw * $mh)) -ge $Threshold)
+    } catch { return $false }
 }
 
 function Test-ActiveGameProcess {
@@ -1123,9 +1059,8 @@ function Start-GameWatcher {
         [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
         [hashtable]$LegacySettings     = @{},
-        [hashtable]$NetworkSettings    = @{ Enabled = $true },
-        [hashtable]$VoiceSettings      = @{},
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
+        [hashtable]$UniversalSettings  = @{ Enabled = $true; ImmersiveWindowThreshold = 0.90 },
         [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
@@ -1197,31 +1132,29 @@ function Start-GameWatcher {
     if ($skipScale)  { Write-Log 'Resolution switching is DISABLED for this session.' 'INFO' }
     if ($fsoDisable) { Write-Log 'Fullscreen optimizations will be disabled for detected games.' 'INFO' }
 
-    # ---- resolve network + voice settings ------------------------------
-    $netOn = $true
-    if ($NetworkSettings -and $NetworkSettings.ContainsKey('Enabled')) { $netOn = [bool]$NetworkSettings['Enabled'] }
-
-    $micMmcss = $true
-    if ($VoiceSettings -and $VoiceSettings.ContainsKey('MmcssAudioPriority')) { $micMmcss = [bool]$VoiceSettings['MmcssAudioPriority'] }
-
-    # Windows' built-in input signal enhancements keep background noise out of
-    # party/team chat. Registry-only, near-zero cost - unlike the old VoiceDSP
-    # module. Config.ps1 > VoiceClarity > EnableMicNoiseSuppression gates it.
-    $micNoise = $true
-    if ($VoiceSettings -and $VoiceSettings.ContainsKey('EnableMicNoiseSuppression')) { $micNoise = [bool]$VoiceSettings['EnableMicNoiseSuppression'] }
-
-    $protectedExtra = @()
-    if ($VoiceSettings -and $VoiceSettings.ContainsKey('ExtraProtectedProcessNames')) {
-        $protectedExtra = @($VoiceSettings['ExtraProtectedProcessNames']) | ForEach-Object { "$_*" }
+    # ---- resolve universal watch settings -------------------------------
+    # UniversalWatch targets ANY foreground window that fills its monitor
+    # (borderless-fullscreen games, maximized video players) in addition to
+    # the configured game list. When ON the watcher optimizes titles that
+    # were never added to GameProcesses - new/known games, windowed games,
+    # media players. The threshold is the fraction of the window's own
+    # monitor it must cover to count as a game/video session.
+    $universalOn      = $true
+    $immersivePercent = 0.90
+    if ($UniversalSettings) {
+        if ($UniversalSettings.ContainsKey('Enabled'))                   { $universalOn      = [bool]$UniversalSettings['Enabled'] }
+        if ($UniversalSettings.ContainsKey('ImmersiveWindowThreshold'))  {
+            try { $immersivePercent = [double]$UniversalSettings['ImmersiveWindowThreshold'] } catch { }
+        }
     }
-    # For background SILENCING we protect voice apps + user extras, so none
-    # of them are ever deprioritized.
-    $protectedNames = @($script:VoiceAppPatterns) + $protectedExtra
-    # For VOICE BOOSTING we only ever touch real voice/chat apps.
-    $voiceOnlyProtected = @($script:VoiceAppPatterns) + $protectedExtra
-
-    $boostVoice = $true
-    if ($VoiceSettings -and $VoiceSettings.ContainsKey('BoostVoiceAppsDuringGame')) { $boostVoice = [bool]$VoiceSettings['BoostVoiceAppsDuringGame'] }
+    # Clamp: below ~40% every app counts; above ~99.5% even fullscreen is skipped.
+    if ($immersivePercent -le 0 -or $immersivePercent -ge 1 -or [double]::IsNaN($immersivePercent)) {
+        $immersivePercent = 0.90
+    }
+    $immersivePercent = [Math]::Max(0.40, [Math]::Min(0.995, $immersivePercent))
+    if ($universalOn) {
+        Write-Log ("Universal watch ON: any immersive foreground game/video (>= {0:P0} of its monitor) is optimized in addition to the configured game list." -f $immersivePercent) 'INFO'
+    }
 
     # Recovery journal - written through at EVERY state change so any
     # kind of death (kill, console close, crash, power loss) is fully
@@ -1230,68 +1163,30 @@ function Start-GameWatcher {
         scaledActive = $false
         nativeMode   = $null
         silenced     = @{}
-        voiceBoosted = @{}
         fsoFlags     = @()
         fgToolPid    = 0
-        net          = $null
-        micNoise     = @{}
     }
     function Save-Journal { Save-WatcherJournal -State $journal }
 
-    # ---- PRE-GAME OPTIMIZATION: apply network/multimedia BEFORE
-    #     any game is detected, so tweaks are in place when the
-    #     first game opens its sockets (eliminates launch stutter
-    #     caused by applying network tweaks after connection).
+    # ---- PRE-GAME OPTIMIZATION: apply the cheap, system-wide FPS tweaks
+    #     BEFORE any game is detected so they are in place when the first
+    #     game appears (eliminates launch stutter). Network tuning is no
+    #     longer part of the suite.
     if ($PreGameOptimization) {
-        Write-Log 'Pre-game optimizations: applying power/network/multimedia tweaks...' 'ACTION'
-        try {
-            if ($netOn) {
-                Enable-GameNetworkProfile -Settings $NetworkSettings -JournalState $journal
-                Save-Journal
-            }
-        } catch {
-            Write-Log "Network optimization unavailable: $_" 'WARN'
-            $netOn = $false
-        }
-        try {
-            if ($micMmcss) { Set-MicClarityTweaks -IncludeMmcss $micMmcss }
-        } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
-        # Built-in mic noise suppression (keeps voice chat clean in loud rooms)
-        if ($micNoise) {
-            try { Enable-MicNoiseSuppression -JournalState $journal['micNoise']; Save-Journal }
-            catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
-        }
-    } else {
-        # Apply network profile BEFORE games connect (legacy path)
-        if ($netOn) {
-            try { Enable-GameNetworkProfile -Settings $NetworkSettings -JournalState $journal; Save-Journal }
-            catch {
-                Write-Log "Network optimization unavailable: $_" 'WARN'
-                $netOn = $false
-            }
-        }
-        if ($micMmcss) {
-            try { Set-MicClarityTweaks -IncludeMmcss $micMmcss } catch { Write-Log "Mic clarity tweak skipped: $_" 'WARN' }
-        }
-        if ($micNoise) {
-            try { Enable-MicNoiseSuppression -JournalState $journal['micNoise']; Save-Journal }
-            catch { Write-Log "Mic noise suppression skipped: $_" 'WARN' }
-        }
+        Write-Log 'Pre-game optimizations: applying system-wide FPS tweaks before games launch...' 'ACTION'
+        try { Disable-GameDVR } catch { Write-Log "Game DVR tweak skipped: $_" 'WARN' }
+        try { Set-MultimediaTweaks -EnableHags:([bool]$LegacySettings['EnableHags']) } catch { Write-Log "Multimedia tweak skipped: $_" 'WARN' }
     }
 
     Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching active games only: {2}" -f `
         $PollSeconds, [Math]::Max($PollSeconds, $IdlePollSeconds), $ActiveGameOnly) 'ACTION'
     Write-Log 'Games are auto-classified (Emulator / Steam / Competitive / Android / Default) on launch.' 'INFO'
-    if ($protectedNames.Count -gt 0) {
-        Write-Log ("Voice apps protected from silencing: {0}" -f (($protectedNames | ForEach-Object { $_.TrimEnd('*') }) -join ', ')) 'INFO'
-    }
     if ($StopEvent) { Write-Log 'Background mode: stop via Stop-GamingSuite.bat.' 'INFO' }
     else            { Write-Log 'Press Ctrl+C to stop the watcher.' 'INFO' }
 
     $boosted       = @{}   # pid -> profile name
     $scalePctByPid = @{}   # pid -> resolution tier percent chosen on detect
     $silenced      = @{}   # pid -> info (background apps we deprioritized)
-    $voiceBoosted  = @{}   # pid -> info (voice apps bumped for mic clarity)
     $fsoDone       = @{}   # exe paths we flagged for FSO-off this session
     $fgByUs        = $false
     $fgPid         = 0
@@ -1404,6 +1299,36 @@ function Start-GameWatcher {
                 }
             }
 
+            # ---- universal watch: any immersive foreground app counts -----
+            # Games/playlists not on the configured list (new indies, windowed
+            # titles, media players) rarely appear in GameProcesses. If the
+            # foreground window fills its own monitor it IS the game/video the
+            # user is focused on - optimize it with the Default profile unless
+            # it is a shell/productivity/browser tool. Registration only
+            # happens while the window is immersive AND foreground (an alt-tab
+            # to a spreadsheet won't start a session), but once registered it
+            # stays boosted until the process exits - no flip-flop on alt-tab.
+            if ($universalOn -and $matchedGames.Count -eq 0) {
+                try {
+                    $fgPidNow = Get-ActiveWindowProcessId
+                    if ($fgPidNow -gt 0) {
+                        $fgProc = Get-Process -Id $fgPidNow -ErrorAction SilentlyContinue
+                        if ($fgProc -and -not $fgProc.HasExited -and -not $boosted.ContainsKey($fgProc.Id)) {
+                            $fgn = ''
+                            try { $fgn = $fgProc.ProcessName } catch { }
+                            if ($fgn -and -not ($neverWatch -contains $fgn.ToLowerInvariant()) -and
+                                -not ($script:UniversalBlocklist -contains $fgn.ToLowerInvariant()) -and
+                                (Test-ImmersiveForegroundWindow -Threshold $immersivePercent)) {
+                                $matchedGames.Add($fgProc)
+                                Write-Log ("Universal watch: foreground '{0}' (PID {1}) fills its monitor - treating as game/video session." -f $fgn, $fgProc.Id) 'INFO'
+                            }
+                        }
+                    }
+                } catch {
+                    Write-Log "Universal-watch scan failed: $_" 'WARN'
+                }
+            }
+
             # Prefer the game owning the foreground window, but do not treat
             # an overlay, launcher, or transient desktop window as proof that
             # the game ended. During combat this could otherwise restore the
@@ -1482,25 +1407,7 @@ function Start-GameWatcher {
                         if (-not $lowSpecSkipSilence) {
                             Update-BackgroundSilence -Names @($prof.Deprioritize) `
                                 -ExceptPid $game.Id -State $silenced -Journal $journal `
-                                -ProtectedPatterns $protectedNames -Activate
-                        }
-
-                        # Voice apps are only lifted as HIGH AS the game's own
-                        # priority allows. Raising Discord/Riot Voice ABOVE a
-                        # Competitive game (both would be AboveNormal) lets voice
-                        # threads preempt the game -> the very party-comms FPS
-                        # drops / audio cutouts / network-loop stutter this is
-                        # meant to prevent, on CPUs with few cores. High-priority
-                        # profiles (Emulator/Steam/Android at High) still grant a
-                        # one-step voice bump; Competitive/Default merely stop
-                        # voice apps slipping to BelowNormal. On low-spec machines
-                        # the bump is skipped entirely to spare the CPU.
-                        if ($boostVoice) {
-                            $voiceMax = 'Normal'
-                            if (-not $isLowSpec -and $prof.Priority -eq 'High') { $voiceMax = 'AboveNormal' }
-                            Update-VoiceChatSupport -Patterns $voiceOnlyProtected `
-                                -ExceptPid $game.Id -State $voiceBoosted -Journal $journal `
-                                -MaxVoicePriority $voiceMax -Activate
+                                -Activate
                         }
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
@@ -1541,10 +1448,6 @@ function Start-GameWatcher {
                     Update-BackgroundSilence -State $silenced -Journal $journal
                     Write-Log 'Background app priorities restored.' 'OK'
                 }
-                if ($voiceBoosted.Count -gt 0) {
-                    Update-VoiceChatSupport -Patterns $voiceOnlyProtected -State $voiceBoosted -Journal $journal
-                    Write-Log 'Voice chat priorities restored.' 'OK'
-                }
                 if ($removedAny) {
                     Restore-NativeResolution          # back to full native sharpness
                     if ($scaledApplied) {
@@ -1578,7 +1481,7 @@ function Start-GameWatcher {
 
                 # COMPLETE SHUTDOWN after a real game session: undo steps above
                 # already restored the system; break out so the finally block
-                # reverts the network profile, clears the recovery journal and
+                # restores the remaining state, clears the recovery journal and
                 # removes the pid file, then this watcher process exits.
                 # We rely on $hadSession (a game was actually boosted this run),
                 # not on $removedAny, so a session that closes while the exit
@@ -1756,7 +1659,6 @@ function Start-GameWatcher {
                 $reassertCounter++
                 if (($reassertCounter % $reassertEveryCycles) -eq 0) {
                     foreach ($bid in @($boosted.Keys)) {
-                        if (-not $boosted.ContainsKey($bid)) { continue }
                         $bprof = $script:GameProfiles[$boosted[$bid]]
                         try {
                             $bproc = Get-Process -Id $bid -ErrorAction SilentlyContinue
@@ -1841,21 +1743,14 @@ function Start-GameWatcher {
         }
     } finally {
         Update-BackgroundSilence -State $silenced -Journal $journal
-        Update-VoiceChatSupport -Patterns $voiceOnlyProtected -State $voiceBoosted -Journal $journal
         Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
         $journal['fgToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
-        if ($netOn) {
-            try { Undo-GameNetworkProfile -JournalState $journal['net'] } catch { }
-        }
-        if ($micNoise) {
-            try { Undo-MicNoiseSuppression -JournalState $journal['micNoise'] } catch { }
-        }
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair
-        Write-Log 'Game watcher stopped, priorities/timer/resolution/network restored.' 'INFO'
+        Write-Log 'Game watcher stopped, priorities/timer/resolution restored.' 'INFO'
     }
 }
 
