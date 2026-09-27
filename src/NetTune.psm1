@@ -1,50 +1,17 @@
 # ============================================================
 #  NetTune.psm1 - in-game network latency & packet-loss profile
 #
-#  Goal: remove the LOCAL causes of RTT spikes and packet loss
-#  while a game is running, then put every setting back exactly
-#  as it was. Windows built-ins only - no installs, no drivers,
-#  no extra services, nothing resident after the session.
+#  Goal: report local adapter errors/discards and provide opt-in,
+#  reversible settings for controlled troubleshooting. Network
+#  conditions and driver behavior vary; this module cannot guarantee
+#  lower RTT or repair loss beyond the local adapter.
 #
 #  WHAT THIS CAN AND CANNOT DO (read this before judging results)
 #  -----------------------------------------------------------
-#  Your RTT *baseline* (that steady ~30ms) is set by the physical
-#  path: router -> ISP -> route -> the game servers. No script can
-#  shorten it. What a local tool CAN do is remove the reasons your
-#  RTT suddenly jumps to 100-300ms, and the reasons packets go
-#  missing while you play:
-#
-#    1. Adapter/NIC power saving - Windows parks a wireless or
-#       copper NIC between bursts and wakes it on a timer. The
-#       wake-up costs milliseconds and stalls in-flight traffic;
-#       on Wi-Fi it is the most common source of "packet loss
-#       that the router swears isn't there".
-#    2. Background downloads - a Steam/Store/Delivery-Optimization
-#       transfer fills the link queue and the resulting buffer
-#       bloom shows up as 100-300ms RTT spikes. Uploads are worse
-#       still: one large upload can add 50-200ms to every other
-#       packet, indefinitely.
-#    3. Adapter aggregation/offload - Receive Segment Coalescing
-#       and Large Send Offload let the driver hold small packets
-#       to build big ones. That is pure added latency, and on some
-#       drivers small UDP game packets are dropped outright.
-#    4. Windows multimedia/QoS throttling - NetworkThrottlingIndex
-#       deliberately delays packets while "multimedia" plays, and
-#       the QoS NonBestEffortLimit caps reserved bandwidth.
-#    5. A collapsed TCP receive window - left behind by an older
-#       "game booster" that set TcpAutotuningLevel. This is a pure
-#       software cause of phantom packet loss; it is detected and
-#       repaired.
-#    6. Aggressive Wi-Fi roaming - the card hopping to a weaker
-#       access point mid-match moves the RTT by tens of ms.
-#
-#  HONEST NOTE ON TCP SETTINGS: the only per-connection latency
-#  knobs Windows exposes are TCP-only (Nagle / delayed ACK), and
-#  Valorant's in-match traffic is UDP, so those values change
-#  nothing for your RTT. They are kept because they still matter
-#  for the TCP traffic around a session (launchers, stores,
-#  updates), and every one of them is switched individually in
-#  Config.ps1 > NetworkOptimization.
+#  RTT and game packet loss require end-to-end measurement. NIC
+#  counters are local clues only. TCP registry options do not affect
+#  UDP game traffic, and driver offloads are not universal latency
+#  switches; all system/driver changes are opt-in in Config.ps1.
 #
 #  SAFETY / ANTI-CHEAT: nothing here inspects, injects, filters,
 #  spoofs or reorders game traffic, and no game or anti-cheat
@@ -128,7 +95,13 @@ function Get-RegRawValue {
     try {
         $p = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
         return [int]$p.$Name
-    } catch { return $script:AbsentMarker }
+    } catch {
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -or
+            $_.FullyQualifiedErrorId -match 'PropertyNotFound') {
+            return $script:AbsentMarker
+        }
+        throw
+    }
 }
 
 function Set-RegDwordValue {
@@ -138,6 +111,15 @@ function Set-RegDwordValue {
     # and the undo step would then have nothing to restore.
     if (-not (Test-Path $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+}
+
+function Save-NetworkJournal {
+    param([AllowNull()]$JournalState)
+    if ($null -eq $JournalState) { return }
+    if (-not (Get-Command Save-WatcherJournal -ErrorAction SilentlyContinue)) {
+        throw 'The recovery-journal writer is unavailable; network changes were not applied.'
+    }
+    Save-WatcherJournal -State $JournalState
 }
 
 function Remove-RegValue {
@@ -156,12 +138,14 @@ function Add-RegRecord {
         [Parameter(Mandatory)][hashtable]$Record,
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][int]$Value
+        [Parameter(Mandatory)][int]$Value,
+        [AllowNull()]$JournalState
     )
     $key = "$Path|$Name"
     if (-not $Record.ContainsKey($key)) {
         $Record[$key] = (Get-RegRawValue -Path $Path -Name $Name)
     }
+    Save-NetworkJournal -JournalState $JournalState
     Set-RegDwordValue -Path $Path -Name $Name -Value $Value
 }
 
@@ -322,9 +306,8 @@ function Get-NetworkLinkStatus {
     <#
         One-shot link report for the status screen: connection type, the
         connected adapters with their negotiated speed, and the NIC
-        error/discard counters. Those counters are the only honest LOCAL
-        packet-loss evidence available - clean counters while the game
-        reports loss means the loss happens somewhere after this PC.
+        error/discard counters. Those counters are useful local clues,
+        but clean counters do not rule out loss elsewhere on the link or route.
         Cached for 20s; never throws.
     #>
     param([switch]$Refresh, [int]$TtlSeconds = 20)
@@ -415,9 +398,9 @@ function Update-PacketLossWatch {
         $was = $script:LossBaseline[$key]
         $script:LossBaseline[$key] = $now
         if ($null -eq $was) { continue }
-        $dRxErr = $now.RxErrors   - $was.RxErrors
-        $dRxDis = $now.RxDiscards - $was.RxDiscards
-        $dTxDis = $now.TxDiscards - $was.TxDiscards
+        $dRxErr = [long]$now.RxErrors   - [long]$was.RxErrors
+        $dRxDis = [long]$now.RxDiscards - [long]$was.RxDiscards
+        $dTxDis = [long]$now.TxDiscards - [long]$was.TxDiscards
         if ($dRxErr -le 0 -and $dRxDis -le 0 -and $dTxDis -le 0) { continue }
         $parts = @()
         if ($dRxErr -gt 0) { $parts += "$dRxErr RX errors" }
@@ -428,7 +411,7 @@ function Update-PacketLossWatch {
 
     if ($notes.Count -eq 0) { return '' }
     return ('LOCAL packet loss on the network adapter - ' + ($notes -join '; ') +
-        '. This is the link/driver dropping packets, not the game server. Check the cable, the Wi-Fi band/signal or the driver.')
+        '. Adapter counters are a local diagnostic clue, not an end-to-end loss test. Check the cable, Wi-Fi signal/band, and driver, then compare with gateway and game-server tests.')
 }
 
 # ------------------------------------------------------------
@@ -454,6 +437,9 @@ public static extern uint PowerActiveScheme(IntPtr UserRootPowerKey, out IntPtr 
 
 [DllImport("powrprof.dll", SetLastError = true)]
 public static extern uint PowerReadACValueIndex(IntPtr RootPowerKey, ref POWER_READ_AC_VALUE_INDEX AcValueIndex);
+
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern IntPtr LocalFree(IntPtr hMem);
 '@
 }
 
@@ -483,8 +469,8 @@ function Get-WirelessPowerIndex {
             if ([Suite.NativePower]::PowerReadACValueIndex([IntPtr]::Zero, [ref]$entry) -ne 0) { return $null }
             return [int]$entry.AcValueIndex
         } finally {
-            # PowerActiveScheme hands back a LocalAlloc'd GUID.
-            [void][Runtime.InteropServices.Marshal]::Release($schemePtr)
+            # PowerActiveScheme returns a LocalAlloc'd GUID, not a COM object.
+            [void][Suite.NativePower]::LocalFree($schemePtr)
         }
     } catch { return $null }
 }
@@ -496,8 +482,10 @@ function Set-WirelessPowerIndex {
         $pc = Get-Command powercfg -ErrorAction SilentlyContinue
         if (-not $pc) { return $false }
         & $pc /setacvalueindex 'SCHEME_CURRENT' $script:WirelessSubgroup $script:WirelessPowerMode $Index | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
         # A value-index write only takes effect once the plan is re-applied.
         & $pc /setactive 'SCHEME_CURRENT' | Out-Null
+        if ($LASTEXITCODE -ne 0) { return $false }
         return $true
     } catch { return $false }
 }
@@ -664,22 +652,28 @@ function Merge-AdapterRec {
 # ------------------------------------------------------------
 function Set-BackgroundDownloadState {
     <#
-        Delivery Optimization (DoSvc) shares the upload bandwidth with
-        strangers on the LAN and can saturate the link in the background -
-        the classic cause of "ping jumps to 200ms while I am not even
-        downloading anything". It is stopped for the session, and its exact
-        startup mode + running state are recorded so it comes back
-        untouched.
+        Delivery Optimization can use network bandwidth. When explicitly
+        enabled, it is stopped for the session and its startup mode and
+        running state are recorded for restoration.
     #>
-    param([Parameter(Mandatory)][hashtable]$Record)
+    param(
+        [Parameter(Mandatory)][hashtable]$Record,
+        [AllowNull()]$JournalState,
+        [Parameter(Mandatory)][hashtable]$ProfileRecord
+    )
     try {
         $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='DoSvc'" -ErrorAction Stop
-        if (-not $svc) { return $false }
+        if (-not $svc) {
+            Write-Log 'Delivery Optimization service was not found; no service change was made.' 'INFO'
+            return $false
+        }
         $wasRunning = ([string]$svc.State -eq 'Running')
         # Recorded BEFORE the first change: a crash between here and the
         # undo step must not leave the service disabled with no journal.
         $Record['StartMode']  = [string]$svc.StartMode
         $Record['WasRunning'] = $wasRunning
+        $ProfileRecord.DeliveryOpt = $Record
+        Save-NetworkJournal -JournalState $JournalState
         try {
             if ($wasRunning) { Stop-Service -Name 'DoSvc' -Force -ErrorAction Stop }
             Set-Service -Name 'DoSvc' -StartupType Disabled -ErrorAction Stop
@@ -689,7 +683,10 @@ function Set-BackgroundDownloadState {
             Write-Log ("Delivery Optimization: could not be disabled (" + $_.Exception.Message + ') - it may keep running this session.') 'WARN'
         }
         return $true
-    } catch { return $false }
+    } catch {
+        Write-Log ("Delivery Optimization state could not be read: {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
 }
 
 function Restore-BackgroundDownloadState {
@@ -703,10 +700,13 @@ function Restore-BackgroundDownloadState {
         $target = 'Manual'
         if ("$startMode" -eq 'Auto')     { $target = 'Automatic' }
         if ("$startMode" -eq 'Disabled') { $target = 'Disabled' }
-        Set-Service -Name 'DoSvc' -StartupType $target -ErrorAction SilentlyContinue
-        if ($wasRunning) { Start-Service -Name 'DoSvc' -ErrorAction SilentlyContinue }
+        Set-Service -Name 'DoSvc' -StartupType $target -ErrorAction Stop
+        if ($wasRunning) { Start-Service -Name 'DoSvc' -ErrorAction Stop }
         return $true
-    } catch { return $false }
+    } catch {
+        Write-Log ("Delivery Optimization could not be fully restored: {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
 }
 
 function Remove-ManagedNetDefaults {
@@ -737,8 +737,7 @@ function Remove-ManagedNetDefaults {
 
     $simple = @(
         @{ Path = $script:SysProfile;   Name = 'NetworkThrottlingIndex'; Value = -1 },
-        @{ Path = $script:QosPolicyKey; Name = 'NonBestEffortLimit';     Value = 0  },
-        @{ Path = $script:TcpParams;    Name = 'TcpAutotuningLevel';     Value = -1 }
+        @{ Path = $script:QosPolicyKey; Name = 'NonBestEffortLimit';     Value = 0  }
     )
     foreach ($s in $simple) {
         try {
@@ -884,19 +883,22 @@ function Enable-NetworkLatencyProfile {
     # mutation is already covered: a crash halfway through this function
     # still leaves the repair step a complete list of what to undo.
     $rec = @{
-        ConnectionType = $connType
-        Reg            = @{}
-        Adapters       = @{}
-        AdvancedProps  = @{}
-        WirelessPower  = $null
-        DeliveryOpt    = $null
+        ConnectionType        = $connType
+        RestartChangedAdapters = (Get-TweakBool $Settings 'RestartChangedAdapters' $false)
+        Reg                   = @{}
+        Adapters              = @{}
+        AdvancedProps         = @{}
+        WirelessPower         = $null
+        DeliveryOpt           = $null
     }
     if ($null -ne $JournalState) { $JournalState['netLatency'] = $rec }
 
     if ($adapters.Count -eq 0) {
-        Write-Log 'Network profile: no connected physical adapter found - nothing to tune.' 'WARN'
+        if ($null -ne $JournalState) { $null = $JournalState.Remove('netLatency') }
+        Write-Log 'Network profile: no connected physical adapter found - monitoring is unavailable.' 'WARN'
         return
     }
+    Save-NetworkJournal -JournalState $JournalState
     Write-Log ("Network profile: connection is {0}{1}." -f $connType,
         $(if ($hasWireless) { ' (wireless adapter present)' } else { '' })) 'INFO'
 
@@ -905,83 +907,55 @@ function Enable-NetworkLatencyProfile {
     $restartAdapters = @()
 
     # ---- 1. Windows multimedia network throttling ---------------------
-    if (Get-TweakBool $Settings 'DisableNetworkThrottling' $true) {
+    if (Get-TweakBool $Settings 'DisableNetworkThrottling' $false) {
         try {
-            Add-RegRecord -Record $rec.Reg -Path $script:SysProfile -Name 'NetworkThrottlingIndex' -Value -1
+            Add-RegRecord -Record $rec.Reg -Path $script:SysProfile -Name 'NetworkThrottlingIndex' -Value -1 -JournalState $JournalState
             $applied += 'multimedia network throttling off'
         } catch { $skipped += "throttling: $($_.Exception.Message)" }
     }
 
     # ---- 2. QoS reserved-bandwidth limit ------------------------------
-    if (Get-TweakBool $Settings 'RemoveBandwidthLimit' $true) {
+    if (Get-TweakBool $Settings 'RemoveBandwidthLimit' $false) {
         try {
-            Add-RegRecord -Record $rec.Reg -Path $script:QosPolicyKey -Name 'NonBestEffortLimit' -Value 0
+            Add-RegRecord -Record $rec.Reg -Path $script:QosPolicyKey -Name 'NonBestEffortLimit' -Value 0 -JournalState $JournalState
             $applied += 'QoS bandwidth limit removed'
         } catch { $skipped += "QoS: $($_.Exception.Message)" }
     }
 
-    # ---- 3. TCP receive-window health ---------------------------------
-    # A previous "game booster" often left TcpAutotuningLevel at 0
-    # (disabled) or 1/2 (limited). A limited receive window collapses
-    # under load and is one of the most common SOFTWARE causes of
-    # phantom packet loss, so it goes back to Normal. A fixed
-    # GlobalMaxTcpWindowSize is deliberately NOT forced any more: 1 MB is
-    # SMALLER than a healthy autotuned window on a modern link, so
-    # hard-coding it caps throughput and becomes its own kind of stall.
-    if (Get-TweakBool $Settings 'RepairTcpWindow' $true) {
+    # ---- 3. Per-interface TCP latency (TCP traffic only) --------------
+    if (Get-TweakBool $Settings 'TcpLowLatency' $false) {
         try {
-            $current = Get-RegRawValue -Path $script:TcpParams -Name 'TcpAutotuningLevel'
-            if ("$current" -ne $script:AbsentMarker -and [int]$current -ne -1) {
-                Add-RegRecord -Record $rec.Reg -Path $script:TcpParams -Name 'TcpAutotuningLevel' -Value -1
-                $applied += "TCP auto-tuning restored to Normal (was $current)"
-            } else {
-                $applied += 'TCP auto-tuning already Normal'
+            $activeIf = @{}
+            foreach ($adapter in $adapters) {
+                if ($adapter['IfIndex'] -gt 0) { $activeIf[[string]$adapter['IfIndex']] = $adapter }
             }
-        } catch { $skipped += "TCP auto-tune: $($_.Exception.Message)" }
-    }
-
-    # ---- 4. Per-interface TCP latency (TCP traffic only) --------------
-    if (Get-TweakBool $Settings 'TcpLowLatency' $true) {
-        try {
-            $activeIf = @($adapters | Where-Object { $_['IfIndex'] -gt 0 } | ForEach-Object { $_['IfIndex'] })
             $tuned = 0
             foreach ($k in @(Get-ChildItem -Path $script:TcpIpIfBase -ErrorAction SilentlyContinue)) {
                 try {
-                    # Only adapters that are actually connected: every Tcpip
-                    # interface key carries the matching ifIndex.
-                    if ($activeIf.Count -gt 0) {
-                        $kProp = Get-ItemProperty -Path $k.PSPath -ErrorAction Stop
-                        if ($kProp.PSObject.Properties['ifIndex'] -and "$($kProp.ifIndex)" -match '^\d+$') {
-                            if ($activeIf -notcontains [int]$kProp.ifIndex) { continue }
-                        }
-                    }
+                    $kProp = Get-ItemProperty -Path $k.PSPath -ErrorAction Stop
+                    if (-not $kProp.PSObject.Properties['ifIndex'] -or "$($kProp.ifIndex)" -notmatch '^\d+$') { continue }
+                    $ifKey = [string][int]$kProp.ifIndex
+                    if (-not $activeIf.ContainsKey($ifKey)) { continue }
                     $path = ConvertTo-NativeRegPath $k.Name
-                    Add-RegRecord -Record $rec.Reg -Path $path -Name 'TCPNoDelay' -Value 1
-                    if ($connType -eq 'Ethernet') {
-                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpAckFrequency' -Value 1
-                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpDelAckTicks'    -Value 0
+                    Add-RegRecord -Record $rec.Reg -Path $path -Name 'TCPNoDelay' -Value 1 -JournalState $JournalState
+                    if (-not $activeIf[$ifKey]['IsWireless']) {
+                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpAckFrequency' -Value 1 -JournalState $JournalState
+                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpDelAckTicks'    -Value 0 -JournalState $JournalState
                     } else {
-                        # Wireless: acknowledge every 2nd segment. Forcing
-                        # value 1 on Wi-Fi floods the radio with ACKs and
-                        # CAUSES packet loss - the mistake the old profile
-                        # made on Wi-Fi machines.
-                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpAckFrequency' -Value 2
-                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpDelAckTicks'    -Value 2
+                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpAckFrequency' -Value 2 -JournalState $JournalState
+                        Add-RegRecord -Record $rec.Reg -Path $path -Name 'TcpDelAckTicks'    -Value 2 -JournalState $JournalState
                     }
                     $tuned++
-                } catch { }
+                } catch { $skipped += "TCP interface '$($k.PSChildName)': $($_.Exception.Message)" }
             }
             if ($tuned -gt 0) {
-                $applied += "TCP no-delay/ACK tuned on $tuned connected interface(s) [$connType profile]"
+                $applied += "TCP no-delay/ACK tuned on $tuned connected interface(s)"
             }
         } catch { $skipped += "TCP interface tuning: $($_.Exception.Message)" }
     }
 
-    # ---- 5. NIC power saving ------------------------------------------
-    # The biggest local cause of "packet loss that is not the router's
-    # fault" on wireless, and of millisecond hitches on copper: Windows
-    # otherwise parks the adapter between bursts and wakes it on a timer.
-    if (Get-TweakBool $Settings 'DisableNicPowerSaving' $true) {
+    # ---- 4. NIC power saving ------------------------------------------
+    if (Get-TweakBool $Settings 'DisableNicPowerSaving' $false) {
         foreach ($a in $adapters) {
             try {
                 $classPath = Get-NicClassKeyPath -InterfaceGuid $a['InterfaceGuid']
@@ -991,16 +965,16 @@ function Enable-NetworkLatencyProfile {
                 }
                 # 0x18 = never let Windows power this adapter down.
                 if ((Get-RegRawValue -Path $classPath -Name 'PnPCapabilities') -ne 24) {
-                    Add-RegRecord -Record $rec.Reg -Path $classPath -Name 'PnPCapabilities' -Value 24
+                    Add-RegRecord -Record $rec.Reg -Path $classPath -Name 'PnPCapabilities' -Value 24 -JournalState $JournalState
                     $restartAdapters += $a['Name']
                     $applied += "adapter power-down disabled on $($a['Name'])"
                 }
-            } catch { }
+            } catch { $skipped += "adapter power saving on '$($a['Name'])': $($_.Exception.Message)" }
         }
     }
 
-    # ---- 6. Wireless adapter power plan -------------------------------
-    if ($hasWireless -and (Get-TweakBool $Settings 'WirelessMaxPerformance' $true)) {
+    # ---- 5. Wireless adapter power plan -------------------------------
+    if ($hasWireless -and (Get-TweakBool $Settings 'WirelessMaxPerformance' $false)) {
         try {
             $orig = Get-WirelessPowerIndex
             if ($null -eq $orig) {
@@ -1009,9 +983,12 @@ function Enable-NetworkLatencyProfile {
                     $script:WirelessProbeWarned = $true
                 }
             } elseif ($orig -ne 0) {
+                $rec.WirelessPower = @{ OriginalIndex = $orig }
+                Save-NetworkJournal -JournalState $JournalState
                 if (Set-WirelessPowerIndex -Index 0) {
-                    $rec.WirelessPower = @{ OriginalIndex = $orig }
                     $applied += 'wireless adapter power mode = Maximum performance (AC)'
+                } else {
+                    $skipped += 'wireless power plan: powercfg rejected the setting'
                 }
             } else {
                 $applied += 'wireless adapter already at Maximum performance'
@@ -1019,55 +996,70 @@ function Enable-NetworkLatencyProfile {
         } catch { $skipped += "wireless power plan: $($_.Exception.Message)" }
     }
 
-    # ---- 7. Receive Segment Coalescing off ----------------------------
-    if (Get-TweakBool $Settings 'DisableReceiveSegmentCoalescing' $true) {
+    # ---- 6. Receive Segment Coalescing off ----------------------------
+    if (Get-TweakBool $Settings 'DisableReceiveSegmentCoalescing' $false) {
         foreach ($a in $adapters) {
             try {
                 $state = Get-AdapterOffloadState -AdapterName $a['Name'] -Kind 'Rsc'
                 if (-not $state -or $state -eq 'NotSupported' -or $state -eq 'Disabled') { continue }
+                $rec.Adapters = Merge-AdapterRec $rec.Adapters $a 'Rsc' $state
+                Save-NetworkJournal -JournalState $JournalState
                 if (Set-AdapterOffloadState -AdapterName $a['Name'] -Kind 'Rsc' -Value 'Disabled') {
-                    $rec.Adapters = Merge-AdapterRec $rec.Adapters $a 'Rsc' $state
                     $restartAdapters += $a['Name']
                     $applied += "RSC off on $($a['Name'])"
+                } else {
+                    $null = $rec.Adapters[[string]$a['IfIndex']].Remove('Rsc')
+                    if ($rec.Adapters[[string]$a['IfIndex']].Count -eq 1) { $null = $rec.Adapters.Remove([string]$a['IfIndex']) }
+                    Save-NetworkJournal -JournalState $JournalState
+                    $skipped += "RSC was not changed on '$($a['Name'])'"
                 }
-            } catch { }
+            } catch { $skipped += "RSC on '$($a['Name'])': $($_.Exception.Message)" }
         }
     }
 
-    # ---- 8. Large Send Offload off ------------------------------------
-    if (Get-TweakBool $Settings 'DisableLargeSendOffload' $true) {
+    # ---- 7. Large Send Offload off ------------------------------------
+    if (Get-TweakBool $Settings 'DisableLargeSendOffload' $false) {
         foreach ($a in $adapters) {
             try {
                 $state = Get-AdapterOffloadState -AdapterName $a['Name'] -Kind 'Lso'
                 if (-not $state -or $state -eq 'NotSupported' -or $state -eq 'Disabled') { continue }
+                $rec.Adapters = Merge-AdapterRec $rec.Adapters $a 'Lso' $state
+                Save-NetworkJournal -JournalState $JournalState
                 if (Set-AdapterOffloadState -AdapterName $a['Name'] -Kind 'Lso' -Value 'Disabled') {
-                    $rec.Adapters = Merge-AdapterRec $rec.Adapters $a 'Lso' $state
                     $restartAdapters += $a['Name']
                     $applied += "large-send offload off on $($a['Name'])"
+                } else {
+                    $null = $rec.Adapters[[string]$a['IfIndex']].Remove('Lso')
+                    if ($rec.Adapters[[string]$a['IfIndex']].Count -eq 1) { $null = $rec.Adapters.Remove([string]$a['IfIndex']) }
+                    Save-NetworkJournal -JournalState $JournalState
+                    $skipped += "LSO was not changed on '$($a['Name'])'"
                 }
-            } catch { }
+            } catch { $skipped += "LSO on '$($a['Name'])': $($_.Exception.Message)" }
         }
     }
 
-    # ---- 9. Wi-Fi roaming ---------------------------------------------
-    # 0 = lowest roaming aggressiveness: the card stays on the access
-    # point it already has instead of hopping to a weaker one mid-round,
-    # and a roaming event can move the RTT by tens of milliseconds.
-    if ($hasWireless -and (Get-TweakBool $Settings 'WifiStayOnStrongest' $true)) {
+    # ---- 8. Wi-Fi roaming ---------------------------------------------
+    if ($hasWireless -and (Get-TweakBool $Settings 'WifiStayOnStrongest' $false)) {
         foreach ($a in $adapters) {
             if (-not $a['IsWireless']) { continue }
             try {
                 $state = Get-NicAdvancedPropertyState -AdapterName $a['Name'] -RegistryKeyword '*RoamingAggressiveness'
                 if ($null -eq $state) { continue }
+                $key = "{0}|*RoamingAggressiveness" -f $a['Name']
+                $rec.AdvancedProps[$key] = $state
+                Save-NetworkJournal -JournalState $JournalState
                 if (Set-NicAdvancedProperty -AdapterName $a['Name'] -RegistryKeyword '*RoamingAggressiveness' `
                         -RegistryValue '0' -DisplayName 'Lowest') {
-                    $rec.AdvancedProps[("{0}|*RoamingAggressiveness" -f $a['Name'])] = $state
                     # Queued driver property: the adapter restart below is
                     # what actually makes the new value take effect.
                     $restartAdapters += $a['Name']
                     $applied += "Wi-Fi roaming set to lowest on $($a['Name'])"
+                } else {
+                    $null = $rec.AdvancedProps.Remove($key)
+                    Save-NetworkJournal -JournalState $JournalState
+                    $skipped += "Wi-Fi roaming was not changed on '$($a['Name'])'"
                 }
-            } catch { }
+            } catch { $skipped += "Wi-Fi roaming on '$($a['Name'])': $($_.Exception.Message)" }
         }
     }
 
@@ -1080,21 +1072,26 @@ function Enable-NetworkLatencyProfile {
             try {
                 $state = Get-NicAdvancedPropertyState -AdapterName $a['Name'] -RegistryKeyword '*InterruptModeration'
                 if ($null -eq $state) { continue }
+                $key = "{0}|*InterruptModeration" -f $a['Name']
+                $rec.AdvancedProps[$key] = $state
+                Save-NetworkJournal -JournalState $JournalState
                 if (Set-NicAdvancedProperty -AdapterName $a['Name'] -RegistryKeyword '*InterruptModeration' `
                         -RegistryValue '0' -DisplayName 'Disabled') {
-                    $rec.AdvancedProps[("{0}|*InterruptModeration" -f $a['Name'])] = $state
                     $restartAdapters += $a['Name']
                     $applied += "interrupt moderation off on $($a['Name'])"
+                } else {
+                    $null = $rec.AdvancedProps.Remove($key)
+                    Save-NetworkJournal -JournalState $JournalState
+                    $skipped += "interrupt moderation was not changed on '$($a['Name'])'"
                 }
-            } catch { }
+            } catch { $skipped += "interrupt moderation on '$($a['Name'])': $($_.Exception.Message)" }
         }
     }
 
     # ---- 11. Background downloads -------------------------------------
-    if (Get-TweakBool $Settings 'PauseBackgroundDownloads' $true) {
+    if (Get-TweakBool $Settings 'PauseBackgroundDownloads' $false) {
         $do = @{}
-        if (Set-BackgroundDownloadState -Record $do) {
-            $rec.DeliveryOpt = $do
+        if (Set-BackgroundDownloadState -Record $do -JournalState $JournalState -ProfileRecord $rec) {
             $applied += 'Delivery Optimization (background P2P downloads) paused'
         }
     }
@@ -1103,18 +1100,19 @@ function Enable-NetworkLatencyProfile {
     # now - while the profile is applied before the game starts, or after
     # it closed - and only for the adapters we actually changed, so VMs,
     # VPNs and virtual switches are never bounced.
-    if ($restartAdapters.Count -gt 0 -and (Get-TweakBool $Settings 'RestartChangedAdapters' $true)) {
+    if ($restartAdapters.Count -gt 0 -and (Get-TweakBool $Settings 'RestartChangedAdapters' $false)) {
         $unique = @($restartAdapters | Select-Object -Unique)
         Write-Log ('Reapplying adapter driver settings (network blips for a few seconds on: ' + ($unique -join ', ') + ').') 'INFO'
         foreach ($name in $unique) {
-            try { Restart-NetAdapter -Name $name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+            try { Restart-NetAdapter -Name $name -Confirm:$false -ErrorAction Stop | Out-Null }
+            catch { $skipped += "adapter restart '$name': $($_.Exception.Message)" }
         }
     }
 
     if ($applied.Count -gt 0) {
         Write-Log ("Network latency profile ACTIVE ($connType): " + ($applied -join '; ') + '.') 'OK'
     } else {
-        Write-Log 'Network profile: nothing to change on this machine.' 'INFO'
+        Write-Log 'Network profile: no optional network changes enabled; local diagnostics remain available.' 'INFO'
     }
     if ($skipped.Count -gt 0) {
         Write-Log ('Network profile skipped: ' + ($skipped -join '; ') + '.') 'WARN'
@@ -1212,6 +1210,8 @@ function Undo-NetworkLatencyProfile {
     if ($null -ne $do) {
         if (Restore-BackgroundDownloadState -Original $do) {
             $restored += 'Delivery Optimization restored'
+        } else {
+            Write-Log 'Recovery could not restore Delivery Optimization state.' 'WARN'
         }
     }
 
@@ -1229,9 +1229,12 @@ function Undo-NetworkLatencyProfile {
         }
     }
 
-    if ($restartAdapters.Count -gt 0) {
+    $restartSaved = Get-StateField $net 'RestartChangedAdapters'
+    $wantRestart = if ($null -eq $restartSaved) { $true } else { [bool]$restartSaved }
+    if ($restartAdapters.Count -gt 0 -and $wantRestart) {
         foreach ($name in @($restartAdapters | Select-Object -Unique)) {
-            try { Restart-NetAdapter -Name $name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+            try { Restart-NetAdapter -Name $name -Confirm:$false -ErrorAction Stop | Out-Null }
+            catch { Write-Log ("Network recovery could not restart adapter '$name': {0}" -f $_.Exception.Message) 'WARN' }
         }
     }
 

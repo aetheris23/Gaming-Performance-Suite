@@ -284,7 +284,7 @@ function Get-OsStatusLine {
 function Show-Banner {
     Clear-Host
     Write-Host '=====================================================' -ForegroundColor DarkCyan
-    Write-Host '        GAMING PERFORMANCE SUITE  v3.0'                -ForegroundColor Cyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v3.2'                -ForegroundColor Cyan
     Write-Host '  FPS stability | Dynamic res | Universal windowed mode' -ForegroundColor Cyan
     Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
     Write-Host '=====================================================' -ForegroundColor DarkCyan
@@ -357,16 +357,21 @@ function Invoke-NetworkProfileApply {
         When a watcher is alive it owns that journal and the network profile
         for the whole session, so nothing is written over its back.
     #>
+    if (Test-WatcherAlive) {
+        Write-Log 'Watcher is running and owns the network profile for the session - no separate profile applied.' 'INFO'
+        return $true
+    }
+    if (Get-WatcherJournal) {
+        Write-Log 'Repairing the previous session before applying network settings.' 'RECOVER'
+        Repair-OrphanedWatcherState | Out-Null
+    }
+
     $state = @{}
     Enable-NetworkLatencyProfile -Settings $netCfg -JournalState $state
     $rec = $state['netLatency']
     if (-not $rec) {
         Write-Log 'Network profile not applied (disabled in Config.ps1, or no connected adapter).' 'INFO'
         return $false
-    }
-    if (Test-WatcherAlive) {
-        Write-Log 'Watcher is running and owns the network profile for the session - no separate journal written.' 'INFO'
-        return $true
     }
     Save-WatcherJournal -State $state
     Write-Log 'Network profile applied and journalled. Option 7 reverts it; a watcher start/stop also repairs it automatically.' 'OK'

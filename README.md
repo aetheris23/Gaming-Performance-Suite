@@ -1,703 +1,168 @@
-# Gaming Performance Suite v3.1
+# Gaming Performance Suite v3.2
 
-Zero-install performance toolkit for gaming on **Windows 10/11** (PowerShell 5.1+,
-nothing to install). Stabilizes FPS, cuts GPU load dynamically, identifies every GPU in
-your system, removes the **local** causes of RTT spikes and packet loss during a match,
-and adapts to older hardware. Almost any game or video in windowed or
-borderless-fullscreen mode is detected and optimized automatically - no need to add
-its process name first - and launch stutter is eliminated.
+A portable Windows toolkit for game-process monitoring, display scaling, and
+performance diagnostics. It is built with PowerShell 5.1 and Windows components;
+there are no package installs or third-party runtime dependencies.
 
-**Windows-only build.** Linux, macOS and Android/Termux support have been removed so
-the watcher no longer carries cross-platform code paths (sysproc `/proc` scans,
-`xrandr`/`displayplacer` calls, `sysctl`/`iw` tuning, stop-marker polling). Every
-scan now stays native to Windows and much lighter on the CPU.
+> **Network expectations:** this suite cannot reduce the physical round-trip time
+> (RTT) to an internet game server, guarantee lower ping, or repair packet loss on
+> an ISP route or server. Network settings vary by adapter and driver, so this
+> version leaves them unchanged by default and reports local adapter counters as
+> diagnostic clues instead.
 
-## What's new in v3.1
+## Requirements
 
-- **Network latency & packet-loss profile is back** (`src/NetTune.psm1`, rebuilt from
-  scratch). It targets the *local* reasons a steady 30 ms RTT suddenly becomes
-  100-300 ms, and the reasons packets vanish while you play: NIC/Wi-Fi power saving,
-  background downloads (bufferbloat), RSC/LSO packet aggregation, Windows
-  multimedia/QoS throttling, a TCP receive window left collapsed by another "booster",
-  and aggressive Wi-Fi roaming. Applied **once per session, before the game connects**,
-  then reverted exactly - including by crash recovery. Every switch is independent in
-  `Config.ps1 > NetworkOptimization`.
-- **Honest about limits.** No local setting can lower your RTT *baseline* - that ~30 ms
-  is the physical path (router → ISP → route → server), and in-match Valorant traffic is
-  UDP, so the TCP-only knobs (Nagle/delayed ACK) cannot change in-match RTT either. What
-  the profile removes is the *spikes* and the *local* loss. A new **local packet-loss
-  watch** samples the NIC error/discard counters about once a minute while a game runs:
-  clean counters while the game reports loss means the loss is upstream of this PC.
-- **The old Wi-Fi ACK mistake is fixed.** The removed v2.x profile forced
-  `TcpAckFrequency=1` on wireless, which floods the radio with ACKs and *causes* loss.
-  Ethernet gets `1`/`0`, Wi-Fi gets `2`/`2`, and the fixed 1 MB `GlobalMaxTcpWindowSize`
-  is no longer forced (it is smaller than a healthy autotuned window and caps
-  throughput).
-- **The dead code that broke the watcher is fixed.** `$pid` is a read-only automatic
-  variable, so `Get-ActiveWindowProcessId` was throwing and silently disabling the
-  entire universal-window path; the frame-generation bridge failed to bind because its
-  parameters were typed `[ref][bool]`; `PreferIntegerScale` was passed but never
-  honored; `Invoke-ProcessBoost -Profile` collided with the automatic `$Profile`; and
-  the never-called `Get-SuiteRoot` is gone.
+- Windows 10 or Windows 11
+- Windows PowerShell 5.1 or later
+- Administrator approval to run the optimization launcher and change system settings
+- Administrator rights are **not** required to build the ZIP
 
-## What's new in v3.0
+Linux, macOS, and Android/Termux are not supported.
 
-- **Universal windowed-mode optimization.** The watcher no longer needs your game on
-  the list. Whenever a foreground window fills its own monitor (≥ `ImmersiveWindowThreshold`
-  in `Config.ps1`, default 90%) it is treated as a game/video session - any game running
-  borderless-fullscreen or maximized, and any maximized video player. The window's *own*
-  monitor is used for the coverage ratio, so multi-monitor setups classify correctly, and
-  a built-in blocklist (Windows shell, consoles, browsers, stores/launchers, office,
-  productivity) keeps everyday maximized windows out. Once detected a window stays
-  boosted until its process exits - no flip-flop when you alt-tab. Unknown immersive
-  titles get the **Default** profile (`AboveNormal` + Medium resolution tier).
-- ~~**Network tuning and voice/audio features removed.**~~ *(network tuning restored,
-  rebuilt, in v3.1 - see above)*. The voice/audio features remain removed: the suite
-  no longer touches mic noise suppression or voice/party-app priorities, and voice
-  apps are not protected from background silencing (the default `Deprioritize` lists
-  don't include comms apps anyway).
-- **Adaptive purge can no longer cost a frame on a single transient dip.** A standby
-  purge stalls the whole memory manager, and it used to fire the moment free RAM slipped
-  under the 10% floor — during ability effects and heavy map spots. It now requires the
-  floor to be crossed on **two consecutive checks** before purging (then keeps the
-  tightening cooldown), so a brief combat/map spike never causes a mid-render hitch
-  while genuinely sustained low-RAM pressure is still recovered.
-- **Dead code & duplicate entries removed.** Unused watcher bookkeeping
-  (`$lastSilenceUtc`, `$silenceThrottleSec`, `$wasIdle`), the deprecated
-  `FreeRamThresholdMB` parameter/config key, the voice-app pattern list, voice-chat
-  support, the never-read `$script:PriorityCapWarned` and `$script:StretchActive`
-  flags, a duplicate `ryujinx` entry, and a redundant journal-key check in the boost
-  loop are all gone. The foreground-window interop is compiled once via a shared
-  helper and doubled as an immersive-window geometry probe. No behavior change to the
-  remaining features.
+## Build and install
 
-## What's new in v2.9
+1. Download or clone this repository.
+2. Run `build.bat` from the project folder, or run:
 
-- **Adaptive tuning is now ON by default** (`AdaptiveTuning.Enabled = $true`). Fixed a
-  gating bug so the adaptive mid-game purge actually runs: it previously required
-  `AllowMidGamePurge` (default OFF), which made the adaptive path inert on out-of-box
-  configs — the exact situation where skill/effect bursts and large-map loads spike RAM
-  and drop FPS. The classic purge stays opt-in (it can hitch a frame), while the
-  adaptive path fires only under a RAM-relative floor with its own tightening cooldown.
-- **Uneven combat/map FPS drops addressed** for Valorant & friends. Adaptive
-  `AdaptivePurgeFloor` and `PressureCooldownSec` are now validated/clamped in code
-  (1–90 % and ≥5 s), so a bad config value can no longer disable or over-tighten
-  the burst purger.
-- **Cleanup - dead code removed.** Cross-platform leftovers that were never called
-  (`Test-SuitePlatformWindows`, `Get-PlatformInfo`, `Test-WatcherLockHeld`,
-  `Test/Set/Clear-StopRequest`) are gone from `src/Common.psm1`, and duplicate entries
-  were dropped from game-process lists and never-watch lists. No behavior change.
-- **Removed in v3.0, restored in v3.1:** the network-profile refresh described below
-  no longer existed in v3.0; it is back in v3.1 as a rebuilt, fully reversible
-  latency/packet-loss profile. The voice-clarity feature is still gone.
+   ```bat
+   powershell -NoProfile -ExecutionPolicy Bypass -File src\Build-Suite.ps1
+   ```
 
-## What's new in v2.7
+3. The build creates `GamingPerformanceSuite.zip` in the project folder. Extract
+   it to a location of your choice.
+4. Run one of the generated launchers:
+   - `Start-GamingSuite.bat` opens the interactive menu.
+   - `Start-Watcher-Hidden.bat` starts the background game watcher.
+   - `Stop-GamingSuite.bat` stops the watcher and restores journaled settings.
 
-- **Network packet-loss fixes.** *(Removed in v3.0, rebuilt and restored in v3.1.)*
-  Connection detection no longer parses localized
-  `netsh` text (which misread non-English installs and forced Ethernet ACK settings
-  onto WiFi). It reads the routing table + adapter object model, cached for
-  60 s, and TCP tuning only touches adapters that are actually connected.
-  Virtual adapters (VPN, Hyper-V/WSL, loopback, Bluetooth, tunnels) are skipped
-  entirely.
-- **Background noise removed from party/team chat.** *(Removed in v3.0 - mic/audio
-  features are gone.)* The Windows built-in per-mic input signal enhancements were
-  enabled at game start and reverted on stop.
-- **WinDetect module removed - lighter startup.** The background watcher no longer
-  probes powercfg/netsh/WMI/registry on every start. Build detection is now a single
-  registry read for the status line, and power-plan facts are probed once, only when
-  option 1 (full optimization) actually needs them.
-- **Battery-aware power plan.** The 100% minimum-CPU floor and PCIe power-management
-  off now apply **only on AC** by default, so laptops don't drain battery while the
-  aggressive values still remove FPS dips on mains. Override via
-  `Config.ps1 > PowerOptimization`.
-- **Performance / bug fixes.** Watcher startup performs zero WinDetect work in the hot
-  path.
+The launchers request Administrator approval when needed. The ZIP is a runtime
+package: it contains the launchers, `src/`, `README.md`, and `.gitignore`; it does
+not contain `build.bat` or `src/Build-Suite.ps1`.
 
-> Note: v2.6's "auto-detect every Windows flavor / debloated build" feature
-> (`src/WinDetect.psm1`) was **removed** in v2.7 - the diagnostic value did not justify
-> its startup cost. It leaves no traces: the old WinDetect import is gone from every
-> module.
+## Features
 
-## What's new in v2.8
+- Detects configured game processes and immersive foreground windows.
+- Applies per-game process profiles and optional display-resolution tiers.
+- Includes low-spec detection and configurable polling/memory-pressure behavior.
+- Tracks changed state in a recovery journal and restores it when a session ends
+  or a later launch repairs an interrupted session.
+- Displays adapter link information and samples local adapter error/discard
+  counters while a monitored game is running.
 
-- **Competitive shooters now stay at NATIVE resolution by default** (Valorant, CS2,
-  Dota 2). The old `Competitive = Low` tier dropped the display to ~540p on a 1080p
-  panel and upscaled it back: distant enemies became mushy and blended into the
-  environment, effective aim changed, and the fullscreen mode switch added hitches
-  around round start. These titles already run fine at native on low-spec hardware,
-  so they keep every win *that doesn't touch the display* (priority, timer,
-  purge). Re-enable the aggressive drop per game via `GameTierOverrides` in
-  `src/Config.ps1` (e.g. `'cs2' = 'Low'`).
-- **The display scaler can no longer drop your refresh rate.** `Select-ScaledMode`
-  only selects a lower resolution when that mode keeps the panel's native Hz (e.g.
-  144Hz); modes that only exist at 60Hz are rejected and the screen stays native. A
-  144→60Hz drop while the game runs was a major source of the *"lag / missed shots"*
-  feeling during effects, flashes and large-map rendering, even as the game ran fine.
-- **Lighter polling under load.** The memory-pressure RAM probe only runs on cycles
-  where a purge could legally fire; the watcher stays off the CPU during map renders
-  and effect bursts.
+The suite does not inject into, filter, spoof, or reorder game traffic. Some
+optional performance settings can change system-wide or driver behavior; review
+the configuration before enabling them.
 
-## What's new in v2.6
+## Network behavior and troubleshooting
 
-- **Auto-detects every Windows flavor — official and custom builds.** The suite now
-  reads the registry to identify *exactly* which Windows is running: major version +
-  build (10 vs 11), edition (Home/Pro/Server/LTSC), feature release (21H2…24H2) and any
-  custom build marker. Debloated gaming builds like **ReviOS, AtlasOS, Ghost Spectre,
-  Tiny11/12 and Windows Server** are recognized automatically and shown on the banner
-  and the status screen.
-- **Power plans tailored to debloated builds.** On builds that strip the stock
-  "High performance" / "Ultimate performance" schemes (or even `powercfg` itself), the
-  suite no longer fails: it clones the active scheme, or skips the plan switch cleanly
-  and continues every other optimization. No whitelist to maintain — it just probes
-  powercfg and works around whatever is missing.
-- **Never-boost safety list.** Anti-cheat, kernel services and launcher helper
-  processes (`vgc`, `BEService`, `EasyAntiCheat`, `Battle.net`, …) are never touched,
-  even temporarily. The list is built-in and safely extensible via
-  `NeverWatchProcesses` in `Config.ps1`.
-- **Shallower CLI polling.** Watcher cadence auto-slows when no game is running to cut
-  idle CPU load (still catches launches instantly), and `ActiveGameOnly` keeps boosting
-  focused on the foreground window.
+### Safe defaults
 
-## What's new in v2.5
+Network monitoring is enabled by default, but registry, service, power-plan, and
+network-driver changes are **disabled by default** in `src/Config.ps1`. This
+avoids forcing Wi-Fi roaming behavior, disabling adapter offloads, stopping
+Windows services, or restarting an active adapter without evidence that a
+specific change helps that machine.
 
-- **Windows-only, lighter scanning.** All Linux/macOS/Android branches were stripped
-  out, and the game-poll matcher was rewritten: the 100+ game names are compiled once
-  into a `HashSet` (O(1) lookups), with wildcard `-like` matching reserved for the few
-  patterns that actually contain `?`/`*`. A single native process snapshot per poll now
-  uses a `List<Process>` instead of a pipeline filter - near-zero watcher CPU while
-  idle, and no stutter that accumulates during long sessions on weak CPUs.
-- **Watcher auto-stops on game close.** The background watcher now exits completely
-  when your game session ends instead of idling resident in memory, so there is no
-  lingering overhead, priority/timer/resolution state is fully restored, and nothing
-  keeps polling for another game.
-- **Removed recording / OBS support entirely.** The obsolete recording-software
-  detection, config, menu entries and dependencies have been stripped out - fully
-  focused on frame time over the capture stack.
-- **Competitive enemy-highlight presets.** *(Removed in v3.0 - the unused
-  `EnemyHighlight` config block was deleted.)* This described `src/Config.ps1` presets
-  for Valorant's enemy-highlight color setting. The suite never applied a whole-desktop
-  gamma/color matrix (it could tint menus, add scanout work on low-spec hardware, and
-  conflict with anti-cheat). If distant enemies are hard to spot, keep the game at
-  **native resolution** - v2.8 no longer downsamples competitive shooters (a blurry
-  upscaled image is what made long-range targets blend into the environment).
-- **Less watcher overhead during hot gameplay.** Standby-memory pressure is now probed
-  only when a purge could legally run (cooldown-gated), eliminating useless per-poll
-  memory reads; process affinity is only re-applied when it has actually drifted, so no
-  redundant scheduler re-balance can hitch a frame mid-render (effect bursts / shooting
-  / big maps).
-- **Active-game-only watching.** Launchers and generic helper processes are no longer
-  watched by default. The watcher selects the game owning the foreground window, with a
-  safe process-list fallback when the desktop cannot report one. Add a title's process
-  name to `GameProcesses` for additional games.
-- **Automatic log cleanup.** Diagnostic `suite_*.log` files are removed when a session
-  exits and stale files are cleared at the next startup.
+The local packet-loss watch samples Windows adapter error/discard counters about
+once per minute during a game session. A counter increase can help identify a
+local adapter, driver, cable, or Wi-Fi problem. These counters are not a complete
+end-to-end packet-loss measurement; unchanged counters do **not** prove that
+packets reached the game server, and they do not measure game RTT.
 
-## What's new in v2.4
+Menu option **6** shows adapter status and available counters. Option **7**
+reverts network settings recorded in the recovery journal. Stop the watcher
+normally with `Stop-GamingSuite.bat` to restore its session settings cleanly.
 
-- **Fixed false "Watcher is not running" reports.** The background-watcher liveness
-  probe now checks the live instance signal correctly (named mutex + strict
-  PID/name validation), and a crash-recovery no longer deletes the new watcher's PID
-  file while it is running.
-- **Lower idle resource use:** one native process snapshot per poll serves the whole
-  game lookup (no repeated `Get-Process` scans), plus cross-process watchdog
-  coordination that clears hardware even after kills.
-- **Per-game resolution tiers (Low / Medium / High / Native).** Instead of one global
-  percentage, the watcher now assigns a quality tier per game profile - Steam,
-  Riot/esports, PS2/console emulators and Android emulators each get a resolution that
-  suits them, tunable via `ResolutionTiers`, `ProfileTiers` and per-game
-  `GameTierOverrides` in `src/Config.ps1`.
-- **Tier-correct display scaling.** `Select-ScaledMode` now picks the actual mode
-  closest to the requested tier instead of always snapping to *exactly half* resolution
-  (e.g. 1280&times;720 no longer jumps straight to 640&times;360 for a Medium game - it
-  lands on ~960&times;540). Integer-ratio modes are still preferred for a crisp
-  upscale, so low-spec PCs get a real, blur-free FPS gain without over-shrinking.
-- **Fixed a watcher crash on the idle heartbeat.** A `[datetime]::MinValue` sentinel
-  made the first idle-heartbeat math overflow `Int32` (~6.4e13 ms) and throw, silently
-  killing a watcher that had been left running with no game open; the heartbeat is now
-  overflow-safe.
+### If RTT is unstable or above 133 ms
 
-## Installation & usage (Windows)
+1. Check the game's selected region/server and choose the closest suitable one.
+2. Compare latency to your default gateway and the game server while idle and
+   while playing. Find the gateway with `ipconfig`, then run:
 
-Prerequisite: Windows 10/11 with built-in PowerShell 5.1+ - nothing to install.
+   ```powershell
+   ping -n 60 <default-gateway>
+   ping -n 60 <game-server-IP>
+   tracert <game-server-IP>
+   ```
 
-1. **Download** - `git clone <repository-url>`, or download the repository as a ZIP
-   and extract it.
-2. **Build** - generate `GamingPerformanceSuite.zip` once:
-   - double-click **`build.bat`**, or
-   - run `powershell -NoProfile -ExecutionPolicy Bypass -File src\Build-Suite.ps1`
-3. **Install** - extract the ZIP anywhere - `D:\`, a USB stick, or your home folder.
-   Copyable to any PC; nothing is registered system-wide.
-4. **Run**
-   - **Background watcher (recommended):** double-click **`Start-Watcher-Hidden.bat`**
-     and accept the UAC prompt. Play your game normally - the watcher detects it, boosts
-     it and drops the render resolution, then restores everything and shuts itself down
-     when you close the game. Use **`Stop-GamingSuite.bat`** to stop it at any time.
-- **Interactive menu:** double-click **`Start-GamingSuite.bat`** for one-click
-     optimization, starting/stopping the watcher, status (including live network link
-     and packet-loss counters), and a network-revert action.
-   - **Stop:** double-click **`Stop-GamingSuite.bat`** - restores native resolution,
-      priorities, timer and network settings.
+   Some game servers do not answer ICMP, so a missing ping reply is not by itself
+   proof of packet loss. Prefer the game's network graph and provider diagnostics
+   when available.
+3. If gateway latency/loss changes too, test Ethernet, check the cable and router,
+   improve Wi-Fi signal, and try a less congested Wi-Fi band/channel.
+4. Pause downloads or uploads in the application that is using the connection.
+   For persistent queueing under load, check whether the router supports
+   Smart Queue Management (SQM), CAKE, or FQ-CoDel.
+5. If the gateway is stable but the game path is not, save the timestamps and
+   results and contact the ISP or game provider. A local registry tweak cannot
+   repair a congested route or a distant server.
 
-> **What the build produces:** the ZIP is a **runtime-only** package. It ships the
-> Windows launchers (`Start-GamingSuite.bat`, `Start-Watcher-Hidden.bat`,
-> `Stop-GamingSuite.bat`), the `src/` suite, `README.md` and `.gitignore`. The build
-> tooling (`build.bat` / `src/Build-Suite.ps1`) is deliberately **excluded**, so
-> extracting the ZIP can never duplicate or overwrite the builder. Rebuild only from
-> the source repository (step 2).
+### Optional network settings
 
-### Portable operation and low-resource behavior
-
-The runtime package is drive-letter independent. After extraction or after moving
-the folder, the launchers and PowerShell modules resolve the suite root from their
-own location rather than from a fixed `C:\` or `D:\` path. This remains true when
-the folder is placed on another internal drive, an external drive, or a USB stick.
-The suite does not install services, drivers, scheduled tasks, registry startup
-entries, or system-wide files; its diagnostic logs and recovery journal stay under
-the package's own `logs/` directory.
-
-The optimizer is also designed to stay lightweight on older PCs and laptops:
-
-- Low-spec mode is auto-detected and uses longer polling intervals, a
-  `BelowNormal` watcher priority, throttled scans, and gentler optional actions.
-- The watcher uses one native process snapshot per poll, avoids repeated WMI work
-  in the hot loop, and exits when the monitored game session ends.
-- Expensive actions are staged around game launch and guarded by cooldowns so they
-  do not continuously consume CPU, memory, or power during gameplay.
-- Moving the package between an HDD and SSD does not change runtime behavior or
-  require reconfiguration. An SSD can improve startup and log I/O latency, but the
-  suite's in-game CPU, memory, and polling footprint is the same.
-
-Peak FPS still depends on the game, drivers, thermals, and available hardware;
-portability guarantees the suite can run from the new location, while the
-low-spec controls minimize the suite's own overhead.
-
-## What happens when you start a game
-
-The watcher polls cheaply - every 15 s while a game runs (low-spec default), every
-35 s while idle (both tunable in `src/Config.ps1`). On detection of a game or an
-immersive windowed video/game it:
-
-| When | Action |
-|---|---|
-| **Watcher start** | Network latency profile applied (before any game connects) and pre-game FPS tweaks queued: power plan, multimedia scheduling + HAGS, Game DVR off - applied BEFORE the game process appears (eliminates launch stutter) |
-| **Instantly** | Classifies the title (Emulator / Steam / Competitive / Android / Default); priority boosted; steered off core 0; frame pacing timer engaged |
-| **~0.5 s** | Standby-memory purge (BEFORE game fully loads - eliminates launch stutter) |
-| **~1 s later** | Legacy FSO flag + optional frame-generation companion app |
-| **~8 s later** | Secondary standby purge during loading screen |
-| **~12 s later** | Display switches to the game's resolution tier (Low / Medium / High / Native) -> GPU load drops hard |
-| **~every 60 s** | Optional local packet-loss watch: logs only genuine NIC-level loss |
-
-Heavy steps are **staged with optimized timing** to eliminate the stutter/frame-drop
-burst that used to hit when launching games. The pre-game pass ensures the system-wide
-scheduling/DVR tweaks are in place BEFORE the game process appears.
-
-> **Resolution tiers (auto per game):** instead of one global percentage, every
-> detected game is assigned a quality tier based on its **profile**, so the right
-> resolution is picked for Steam, Riot/esports, PS2/console emulators (PCSX2, PPSSPP,
-> Dolphin, RetroArch, DuckStation...), Android emulators on PC (Bluestacks, LDPlayer,
-> NOX, MuMu...), and anything else. Competitive shooters default to **Native** (no
-> display switch) so aim and long-range visibility are never degraded.
-
-| Tier | Target width | Typical use |
-|---|---|---|
-| **Low** | 55% of native | Opt-in aggressive drop for weak GPUs (set via `GameTierOverrides`) |
-| **Medium** | 75% of native | Balanced default for Steam & emulators |
-| **High** | 88% of native | Nearly-native sharpness, still a solid gain |
-| **Native** | 100% (no switch) | Competitive shooters (Valorant/CS2/Dota) - keeps aim + Hz |
-
-Any scaled mode is only ever selected if it **keeps the panel's native refresh
-rate**; if the monitor only offers the lower resolution at 60Hz, the suite stays at
-native instead of downclocking your display mid-game.
-
-Supported games run at 480p, 720p, 900p, 1080p etc. - `Select-ScaledMode` picks the
-closest **same-aspect-ratio** mode to the tier's target, preferring exact 1/2 integer
-scaling when available (crisp, never stretched or blurry). With `StretchedResolution`
-enabled, a different-aspect lower mode is chosen and scaled to fill the whole panel
-via `dmDisplayFixedOutput = DMDFO_STRETCH` - the classic FPS "stretched" look. You can
-adjust every tier, every profile default, and even add per-game overrides in
-`src/Config.ps1` (`ResolutionTiers`, `ProfileTiers`, `GameTierOverrides`).
-
-> **Session-scoped:** the moment the last monitored game closes, the watcher undoes
-> every change (native resolution, priorities, timer, **network settings**) and exits
-> completely.
-> It is a single-session optimizer, not a resident service - it will not keep polling
-> on a low-spec machine waiting to detect a "next game". To play again later, just
-> start it again. (For the old always-on behavior set `ExitWhenGameSessionEnds = $false`
-> in `src/Config.ps1`.)
-
-## Universal windowed-mode optimization
-
-Alongside FPS stability, the watcher works for **almost any game or
-video**, even titles that were never added to the game list.
-
-While the configured `GameProcesses` list still covers 100+ names, the watcher also
-runs a **universal path**: when the foreground window covers at least
-`ImmersiveWindowThreshold` of its *own* monitor (default `0.90`/90%), it is treated
-as a game/video session. This catches:
-
-- Games running **borderless-fullscreen** or **maximized** in a window
-- **Video players** (any maximized player - no hardcoded media-app list needed)
-- New or obscure titles you haven't added to `GameProcesses`
-
-Unknown immersive titles get the **Default** profile (`AboveNormal` priority +
-**Medium** resolution tier). Once a window is registered it stays boosted until its
-process exits - switching away (alt-tab, second monitor work) never drops the boost
-mid-session.
-
-The coverage ratio uses the window's own monitor via
-`MonitorFromWindow`/`GetMonitorInfo`, so multi-monitor rigs classify correctly.
-`ImmersiveWindowThreshold` is validated/clamped to 40–99.5% in code.
-
-A built-in blocklist keeps everyday maximized windows out of the gaming path:
-
-- Windows shell / system (`explorer`, `dwm`, `cmd`, `taskmgr`, `control`, …)
-- Consoles and terminals (`conhost`, prompt apps, terminal emulators)
-- Browsers (`chrome`, `msedge`, `firefox`, `opera`, `brave`, …)
-- Stores & launchers (covered by `NeverWatchProcesses` too)
-- Office & productivity (`winword`, `excel`, `code`, `notion`, `slack`, `acrobat`, …)
-
-Note: the anti-cheat / store-launcher safety list (`NeverWatchProcesses`) is merged
-into the universal path, so `vgc`, `BEService`, `EasyAntiCheat`, browsers and the
-like can never be boosted or downscaled.
-
-Configure in `src/Config.ps1`:
-
-```powershell
-UniversalWatch            = $true    # detect ANY immersive foreground game/video, not just the list
-ImmersiveWindowThreshold  = 0.90     # fraction of the window's OWN monitor it must fill (0.40-0.995)
-```
-
-## Network latency & packet-loss profile
-
-The watcher applies a low-latency network profile **once per session, before the game
-connects**, and reverts every setting exactly when the session ends, when the watcher is
-stopped, or when an unclean shutdown is repaired.
-
-### What it actually fixes
-
-If your RTT is a steady 30 ms in an empty match and then randomly jumps to 100-300 ms
-while you play, the cause is almost always **local**, and these are the usual ones:
-
-| Local cause | What the profile does |
-|---|---|
-| **Adapter/NIC power saving** - Windows parks a wireless or copper NIC between bursts and wakes it on a timer (the classic "packet loss the router swears isn't there") | Disables adapter power-down (`PnPCapabilities=0x18`) and sets the wireless power-plan mode to **Maximum performance** (AC only) |
-| **Background downloads** - a Steam/Store/Delivery-Optimization transfer fills the link queue; one large *upload* adds 50-200 ms to every other packet | Stops and disables **Delivery Optimization** for the session, then restores its exact startup mode + running state |
-| **Packet aggregation offloads** - RSC/LSO let the driver hold small packets back to build large ones (added latency; on some drivers dropped small UDP) | Turns **Receive Segment Coalescing** and **Large Send Offload** off for connected adapters |
-| **Windows multimedia/QoS throttling** - `NetworkThrottlingIndex` deliberately delays packets while "multimedia" plays; `NonBestEffortLimit` caps reserved bandwidth | Sets throttling to disabled and the QoS limit to unlimited |
-| **A TCP receive window left collapsed** by another "game booster" (`TcpAutotuningLevel` 0/1/2) | Repairs it to **Normal** - and never forces a fixed window size, which used to cap throughput |
-| **Aggressive Wi-Fi roaming** mid-round (the card hops to a weaker access point, moving RTT by tens of ms) | Roaming aggressiveness → **Lowest** |
-| TCP session traffic (launchers, stores, updates) stalling on Nagle/delayed-ACK | `TCPNoDelay=1` on connected interfaces; Ethernet `TcpAckFrequency=1`/`TcpDelAckTicks=0`, **Wi-Fi `2`/`2`** (forcing `1`/`0` on Wi-Fi floods the radio with ACKs and *causes* loss) |
-
-### What it deliberately cannot do
-
-- **It cannot lower your RTT baseline.** That steady ~30 ms is the physical path -
-  router → ISP → route → game server. No registry value, driver setting or script makes
-  a 30 ms hop 5 ms. The profile removes *spikes* and *local loss*, not distance.
-- **The TCP settings do not change in-match RTT.** Valorant's in-match traffic is UDP;
-  Windows' only per-connection latency knobs are TCP-only. They are kept because they
-  still de-stall the TCP traffic *around* a session, and each is a separate switch.
-- **It is not a "ping reducer".** Nothing here bypasses routing, tunnels to a game
-  server, or masks packets from the game.
-
-### Anti-cheat safety
-
-Nothing in the profile inspects, injects, filters, spoofs or reorders game traffic, and
-no game or anti-cheat process (Vanguard, BattlEye, EAC) is ever touched. Only documented
-Windows system / adapter / driver / service settings are read or written, and only on
-adapters that are **actually connected** - virtual adapters (VPN, Hyper-V/WSL, loopback,
-Bluetooth, tunnels) are filtered out and never touched.
-
-### Lifecycle & side effects
-
-- Applied when the **watcher starts** (before any game exists), not when a game is
-  detected: driver-level changes need an adapter reload, and that reload blips the link
-  for a few seconds. Doing it while the watcher starts - instead of while the game is
-  already connecting - is the entire point.
-- **Only adapters that were actually changed are restarted** (never VMs, VPNs or
-  virtual switches). Set `RestartChangedAdapters = $false` to skip the reload entirely
-  and accept that driver-level changes land at the next reboot.
-- Reverted on: last game closed, watcher stopped (`Stop-GamingSuite.bat`), or the next
-  watcher start after a kill/crash/power loss.
-- Values that did **not** exist before the profile ran are **removed** again, not left
-  behind; nothing is overwritten with a guessed original.
-
-### Configuration
+The switches below are in `src/Config.ps1` under `NetworkOptimization`. Keep
+them disabled unless controlled before/after tests show a repeatable benefit.
+Change one switch at a time, record results, and revert it if latency or loss
+gets worse. Driver behavior differs; changes are not universal fixes.
 
 ```powershell
 NetworkOptimization = @{
-    Enabled                          = $true   # master switch
-    DisableNetworkThrottling         = $true   # multimedia packet-delay off
-    RemoveBandwidthLimit             = $true   # QoS reserved-bandwidth cap removed
-    RepairTcpWindow                  = $true   # fix a collapsed TcpAutotuningLevel
-    TcpLowLatency                    = $true   # TCP-only (no in-match RTT effect)
-    DisableNicPowerSaving            = $true   # never park the NIC
-    WirelessMaxPerformance           = $true   # wireless power mode -> max perf (AC)
-    DisableReceiveSegmentCoalescing  = $true   # RSC off
-    DisableLargeSendOffload          = $true   # LSO off
-    WifiStayOnStrongest              = $true   # roaming aggressiveness -> lowest
-    PauseBackgroundDownloads         = $true   # Delivery Optimization paused
-    DisableInterruptModeration       = $false  # lower jitter, costs CPU all match
-    RestartChangedAdapters           = $true   # reload changed drivers now
-    WatchLocalPacketLoss             = $true   # log REAL local loss during play
+    Enabled                          = $true
+    DisableNetworkThrottling         = $false
+    RemoveBandwidthLimit             = $false
+    TcpLowLatency                    = $false
+    DisableNicPowerSaving            = $false
+    WirelessMaxPerformance           = $false
+    DisableReceiveSegmentCoalescing  = $false
+    DisableLargeSendOffload          = $false
+    WifiStayOnStrongest              = $false
+    PauseBackgroundDownloads        = $false
+    DisableInterruptModeration       = $false
+    RestartChangedAdapters           = $false
+    WatchLocalPacketLoss             = $true
 }
 ```
 
-### Using it from the menu
+TCP options affect TCP traffic only; they do not tune game traffic carried over
+UDP. RSC and LSO are driver offload features and are not general-purpose UDP
+latency switches. The `WifiStayOnStrongest` name is retained for older configs:
+it selects the driver's lowest roaming aggressiveness, which may delay a handoff
+to a stronger access point and is therefore opt-in. Disabling power saving can
+increase power use. Pausing Delivery Optimization affects Windows Update
+downloads. Driver changes may require an adapter restart, which briefly
+disconnects the network; `RestartChangedAdapters` is off by default.
 
-- **Option 1** (full one-click optimization) applies the network profile and records the
-  original values in the crash-recovery journal, so a closed console or a power cut is
-  still repaired.
-- **Option 6** shows the live link: connection type (Wi-Fi/Ethernet), each connected
-  adapter with its negotiated speed, the NIC error/discard counters, and whether the
-  profile is currently active.
-- **Option 7** reverts the network settings: exact restore from the recovery journal,
-  and if no journal exists it removes the values this profile manages. With the
-  **watcher** running, option 1 is skipped (the watcher owns the session's profile);
-  option 7 still works, but note it reloads the adapters it changed - a few seconds of
-  network blip, so prefer stopping the watcher (`Stop-GamingSuite.bat`) instead of
-  reverting in the middle of a match.
+The old `TcpAutotuningLevel` registry write has been removed. It was not a safe
+or reliable way to configure Windows TCP auto-tuning. The suite does not claim
+that a TCP tweak lowers the in-game RTT baseline.
 
-### Reading the packet-loss watch
+## Configuration
 
-While a game runs, the watcher samples the NIC counters about once a minute and logs
-**only** when they move:
+Edit `src/Config.ps1` to adjust the game-process list, watcher timing,
+`UniversalWatch`, resolution tiers, low-spec behavior, adaptive tuning, and
+`NetworkOptimization`. Use the existing values as the supported configuration
+surface; back up the file before making changes.
 
-```
-[WARN] LOCAL packet loss on the network adapter - Wi-Fi: 412 RX discards. This is the
-link/driver dropping packets, not the game server. Check the cable, the Wi-Fi band/signal
-or the driver.
-```
+## Safety and recovery
 
-That line is the honest diagnostic split: **non-zero counters = this PC's link/driver is
-dropping packets.** If the game reports loss but the counters stay at zero, the packets
-left this machine fine and the problem is upstream (Wi-Fi interference beyond the PC,
-ISP, route, or the server).
+- Network changes are only attempted when individually enabled.
+- The recovery journal records original values before each network mutation.
+- A normal watcher stop restores the session state. On the next start or stop,
+  an interrupted session is repaired from the journal.
+- Avoid force-killing the watcher. If the PC loses power, run
+  `Stop-GamingSuite.bat` after restarting Windows to trigger recovery.
+- Review the log and journal under `logs/` if a restoration reports an error.
 
-## Low-spec / legacy PC support
+## Project layout
 
-For older or low-spec hardware (e.g. **Intel i3 7th Gen, 8-16GB RAM, Intel HD/UHD
-Graphics**).
-
-> **New: low-spec mode is AUTO-DETECTED by default.** At startup the suite checks
-> your actual hardware - legacy iGPU/dGPU, low CPU core/thread count and low CPU clock
-> - and **enables low-spec mode automatically** on weak machines (like an i3-7020U
-> 2-core/4-thread + HD Graphics 620 + 16GB laptop). No `Config.ps1` edit is needed; it
-> also stays **light on strong machines** because the reduced polling/throttled scans
-> only tighten the suite's own footprint further.
-
-Configure with `Mode` in `src/Config.ps1`:
-
-```powershell
-LowSpecMode = @{
-    Mode                  = 'Auto'   # 'Auto' auto-detect | 'On' force | 'Off' force off
-    Enabled               = $null    # manual override ($null = follow Mode; $true/$false force)
-    SkipResolutionSwitch  = $false   # Keep display scaling (helps FPS on weak GPUs)
-    SkipStandbyPurge      = $false   # Keep memory purging (helps with 8-16GB)
-    SkipBackgroundSilence = $false   # Keep background silencing
-    SkipFrameGenBridge    = $true    # Skip frame-gen (no compatible GPU)
-    ReducedPolling        = $true    # Use 15s/35s intervals (less CPU overhead)
-    SkipHags              = $true    # Skip HAGS (unsupported on Intel HD)
-    AggressiveTimer       = $false   # Use 2ms timer (1ms causes too many interrupts)
-}
-```
-
-What low-spec mode does:
-- **Auto-detection**: weak CPU (≤4 threads or low clock) + legacy GPU → enabled
-  for you automatically; strong machines stay at full strength
-- **Polling intervals**: 15s gaming / 35s idle - less CPU overhead
-- **BelowNormal watcher priority**: yields to everything else on the system
-- **No HAGS**: Hardware-Accelerated GPU Scheduling is unsupported on pre-Xe Intel
-- **Gentler standby purges**: only when RAM critically low, with cooldown gates
-- **Throttled exit checks**: process exit scans every other cycle during gaming
-
-## GPU detection - integrated AND discrete
-
-`src/GpuDetect.psm1` builds a full graphics-adapter inventory at startup and tags
-every chip as **Integrated** or **Discrete** (virtual/software adapters are flagged
-too). Sources, in order of reliability: **DXGI** adapter enumeration (what games
-actually see), **display-class registry keys** (catch disabled adapters + true VRAM),
-and **Win32_VideoController via CIM** as last resort. Results are cached once -
-zero overhead inside the polling loop ("no WMI in the hot loop").
-
-| Vendor | Integrated | Discrete |
-|---|---|---|
-| Intel | HD Graphics 620, UHD/Iris, "Arc Graphics" iGPU | Arc A380/A750/B580, Iris Xe MAX |
-| AMD | Radeon(TM) Graphics, Vega 8, 680M/780M/890M | RX 460->RX 9070, R5-R9, Fury/VII |
-| NVIDIA | *(no consumer iGPUs)* | GeForce GTX/RTX all series, Quadro, TITAN |
-
-Older / integrated chips are additionally flagged as **legacy** (pre-Pascal GeForce,
-pre-RX Radeon, Intel HD 620 and earlier, all GMA chips) so the suite relaxes aggressive
-tweaks that can misbehave on that hardware. DXGI EnumAdapters1 is called via raw vtable
-(P/Invoke) and compiled lazily, so weak machines don't pay a startup C#-compile cost.
-
-## Supported games
-
-The suite detects and optimizes for **100+ game processes** across all major PC stores:
-
-### Game sources supported
-- **Steam** - all Steam games (auto-detected via `\steamapps\common\` path)
-- **Riot Games** - Valorant, League of Legends
-- **Epic Games** - Fortnite and others
-- **EA** - EA Desktop, Battlefield, Need for Speed
-- **Ubisoft** - Ubisoft Connect games
-- **Blizzard** - Battle.net, Overwatch, WoW, Diablo
-- **Xbox/Microsoft Store** - Game Services, Xbox titles
-- **GOG** - Galaxy client games
-- **itch.io** - Indie games
-
-### Emulators supported
-- **PlayStation**: PCSX2, AetherSX2, DuckStation, Play!
-- **Nintendo**: Yuzu, Suyu, Ryujinx, Sudachi, Citron, Dolphin, Cemu
-- **Multi-system**: RetroArch, MAME, Mednafen, BizHawk, SNES9x, FCEUX, ePSXe
-- **PSP**: PPSSPP
-- **Xbox**: xemu, QEMU
-- **Arcade**: MAME, MAME64
-
-### Android emulators on PC
-- **LDPlayer** - LDPlayer, LDBoxHeadless
-- **NoxPlayer** - Nox, NoxHandle, NoxVMHandle
-- **BlueStacks** - BlueStacks, HD-Player, BstkVMM
-- **MuMu** - MuMuPlayer, MuMuVMMHeadless
-- **MEmu** - MEmu, MEmuHeadless
-
-### Game profiles
-Each detected game is auto-classified:
-| Profile | Priority | Silenced | Examples |
-|---|---|---|---|
-| **Emulator** | High | none | PCSX2, RetroArch, Dolphin |
-| **Steam** | High | steamwebhelper | GTA5, RDR2, Elden Ring |
-| **Competitive** | AboveNormal | browsers, Spotify | Valorant, CS2, Dota 2 |
-| **Android** | High | none | BlueStacks, LDPlayer |
-| **Default** | AboveNormal | none | Unknown games |
-
-Override any classification in `Config.ps1` `ProfileOverrides`.
-
-## Launch stutter elimination
-
-Previous versions caused stutter when launching games because heavy operations
-(standby purge, display switch, pre-game tweaks) ran AFTER the game was detected.
-v2.2 introduced pre-game optimization; v2.4 re-checks that no deferred step can ever
-stall a game's launch loop:
-
-1. **Pre-game phase** (before any game detected):
-   - Power plan switched to High Performance
-   - Multimedia scheduling raised + HAGS enabled (per config)
-   - Game DVR disabled
-
-2. **Pre-launch phase** (0.5s after detection):
-   - Standby memory purge (BEFORE game fully loads)
-   - Game's loading screen absorbs any brief stall
-
-3. **Staged ramp-up** (during loading):
-   - FSO flags at ~1s
-   - Secondary purge at ~8s
-   - Display switch at ~12s
-
-The result: **zero visible stutter** when launching games, even on weak hardware.
-
-## Adaptive mid-game tuning - no FPS drops on skill effects or large maps
-
-This build adds an in-game adaptation layer that keeps FPS smooth during the exact
-moments that used to cause drops - **skill/effect bursts** (particle storms, ability
-spam) and **maps of every scale** (small arenas to huge open worlds), which spike
-memory and CPU load.
-
-- **RAM-relative pressure floor.** Instead of one fixed value, the watcher treats a
-  percentage of your **total** RAM as the "under pressure" threshold (default 10%), so
-  it scales correctly whether you have 8 GB or 64 GB and whether the current map is
-  tiny or enormous. When free RAM drops under the floor, a cooldown-gated standby purge
-  reclaims memory without ever stalling a frame in the middle of a render.
-- **Two-check gate (v3.0).** A standby purge briefly pauses the whole memory manager,
-  so it only runs after free RAM stays under the floor on **two consecutive checks**.
-  One transient dip (a single ability splash, a short effect burst, one map corner)
-  can no longer cost a frame mid-combat; only genuinely sustained pressure triggers
-  a purge.
-- **Tightening cooldown under stress.** While memory pressure *persists* (a long skill
-  fight or a huge map still loading), the purge cooldown shortens automatically (down
-  to half) so recurring bursts are caught sooner - and it relaxes back to normal the
-  moment memory is healthy, so it never over-purges.
-- **Priority re-assertion.** Skill effects and big map loads can let the OS or a
-  background hog steal CPU from the game. The watcher periodically re-applies the
-  game's priority/affinity during play (cheap, throttled) so heavy moments don't
-  translate into hitches.
-- These sit **on top** of the existing per-game resolution tiers, so the GPU load is
-  already low before adaptive tuning kicks in.
-
-Configure in `src/Config.ps1` under `AdaptiveTuning`:
-
-```powershell
-AdaptiveTuning = @{
-    Enabled              = $true    # ON so ability/effect bursts and large maps are handled out-of-the-box
-    AdaptivePurgeFloor   = 10      # % of total RAM treated as "under pressure"
-    PressureCooldownSec  = 60      # min seconds between adaptive purges (needs 2 consecutive sub-floor checks)
-    ReassertPriorities   = $true   # periodically re-apply game priority/affinity
-    ReassertEveryCycles  = 3       # re-check every N poll cycles during play
-}
-```
-
-Standby purges remain session-safe: still never repeated mid-frame on a timer, still
-gated by a cooldown, and any change is journaled so an unclean stop is fully restored.
-
-## Background reliability & crash recovery
-
-Every change is mirrored to a recovery journal (`logs/runtime/watcher_state.json`) at
-the moment it is made - including every registry value, driver property, service mode
-and offload state the network profile touches, recorded with the value it had *before*
-the change (or marked as "did not exist"). Unclean shutdowns (kill, crash, power loss)
-are repaired automatically on next start or stop. Cross-process shutdown uses a named
-kernel event (instant wake) and single-instance protection uses a named mutex - no
-lock-file polling, no stop-marker files.
-
-## File layout
-
-```
-build.bat                     one-click rebuild of GamingPerformanceSuite.zip
-Start-GamingSuite.bat         (generated by build) interactive menu
-Start-Watcher-Hidden.bat      (generated by build) background watcher
-Stop-GamingSuite.bat          (generated by build) stops watcher, restores everything
+```text
+build.bat
 src/
-  Main.ps1                    menu + hidden background mode (-BackgroundWatch)
-  Config.ps1                  game list, thresholds, scale %, low-spec mode,
-                              universal-watch, adaptive-tuning & network settings
-  Common.psm1                 logging, privileges, platform detection,
-                              stop-signal / single-instance + recovery journal
-  GameBoost.psm1              FPS stability engine + watcher loop + universal
-                              immersive-window detection (stutter-free, low-spec)
-  DisplayScale.psm1           dynamic display-mode switching + native restore (user32)
-  GpuDetect.psm1              GPU inventory: iGPUs AND dGPUs, legacy detection
-                              (DXGI / registry / CIM)
-  NetTune.psm1                network latency / packet-loss profile: adapter
-                              inventory, journaling, driver+registry+service
-                              changes and exact revert
-  Build-Suite.ps1             generates .bat launchers + repacks ZIP
-logs/
-  runtime/watcher.pid         background watcher PID (removed on clean stop)
-  runtime/watcher_state.json  crash-recovery journal (removed on clean stop)
-  suite_YYYYMMDD.log          timestamped operation log
+  Build-Suite.ps1    Generates launchers and packages the runtime ZIP
+  Main.ps1           Interactive menu and watcher entry point
+  Config.ps1         User configuration
+  Common.psm1        Logging, coordination, and recovery journal
+  GameBoost.psm1     Game watcher and process profiles
+  DisplayScale.psm1  Display-mode selection and restoration
+  GpuDetect.psm1     GPU inventory and classification
+  NetTune.psm1       Network diagnostics and opt-in settings
 ```
-
-> The ZIP only ships the runtime layout (the three launchers + `src/` + `README.md` +
-> `.gitignore`). `build.bat` and `src/Build-Suite.ps1` are build tooling and live only
-> in the source repository, never inside the ZIP.
-
-## Portable install
-
-The suite is fully portable. Copy the folder (or extracted ZIP) anywhere - `C:\`,
-`D:\`, `E:\`, `F:\`, another drive letter, an HDD, an SSD, or a USB stick - and run.
-Everything resolves relative to its own folder; no drive letter is embedded in the
-runtime. Nothing is registered system-wide, and deleting the folder removes the
-suite's files completely.
-
-## Notes & safety
-
-- All actions use standard OS APIs/registry values; no installs, no downloads.
-- Anti-cheat processes (Vanguard, EAC, BattlEye) are never touched, and the universal
-  watch never boosts the shell, browsers, stores or office apps.
-- Every tweak is journaled and reverted exactly on stop.
-- **Network tuning cannot lower your ping baseline.** It removes the local causes of
-  spikes and local packet loss; the ~30 ms round trip to the game servers is distance,
-  not a setting. If a jump persists with clean NIC counters, the problem is your Wi-Fi
-  environment, ISP or route - not this suite.
-- If an action fails, check `logs/` - most failures mean the script wasn't elevated
-  (run as Administrator).

@@ -281,10 +281,22 @@ function Get-WatcherJournalPath { Join-Path $script:RuntimeDir 'watcher_state.js
 
 function Save-WatcherJournal {
     param([Parameter(Mandatory)][hashtable]$State)
+    $path = Get-WatcherJournalPath
+    $tempPath = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = "$tempPath.bak"
     try {
-        ConvertTo-Json -InputObject $State -Depth 8 |
-            Set-Content -Path (Get-WatcherJournalPath) -Encoding UTF8 -Force
-    } catch { }
+        $json = ConvertTo-Json -InputObject $State -Depth 8 -ErrorAction Stop
+        [System.IO.File]::WriteAllText($tempPath, $json, [System.Text.UTF8Encoding]::new($false))
+        if ([System.IO.File]::Exists($path)) {
+            [System.IO.File]::Replace($tempPath, $path, $backupPath)
+            if ([System.IO.File]::Exists($backupPath)) { [System.IO.File]::Delete($backupPath) }
+        } else {
+            [System.IO.File]::Move($tempPath, $path)
+        }
+    } finally {
+        if ([System.IO.File]::Exists($tempPath)) { [System.IO.File]::Delete($tempPath) }
+        if ([System.IO.File]::Exists($backupPath)) { [System.IO.File]::Delete($backupPath) }
+    }
 }
 
 function Get-WatcherJournal {

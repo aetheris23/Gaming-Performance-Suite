@@ -1272,6 +1272,7 @@ function Start-GameWatcher {
     # (4 polls at the default 15s cadence), never on every poll.
     $netLossCounter      = 0
     $netLossEveryCycles  = [int][Math]::Max(1, [Math]::Ceiling(60.0 / [Math]::Max(1.0, [double]$PollSeconds)))
+    $netLossSessionActive = $false
 
     # ---- idle tracking: ultra-low resource mode ---------------------------
     $idleSinceUtc     = [datetime]::UtcNow   # when we last transitioned to idle
@@ -1406,6 +1407,19 @@ function Start-GameWatcher {
                 } else {
                     foreach ($game in $matchedGames) { $running.Add($game) }
                 }
+            }
+
+            if ($netApplied -and $netWatchLoss) {
+                if ($running.Count -gt 0 -and -not $netLossSessionActive) {
+                    $null = Update-PacketLossWatch -Reset
+                    try { $null = Update-PacketLossWatch }
+                    catch { Write-Log ("Could not establish a local adapter-counter baseline: {0}" -f $_.Exception.Message) 'WARN' }
+                    $netLossCounter = 0
+                } elseif ($running.Count -eq 0 -and $netLossSessionActive) {
+                    $null = Update-PacketLossWatch -Reset
+                    $netLossCounter = 0
+                }
+                $netLossSessionActive = ($running.Count -gt 0)
             }
 
             foreach ($game in $running) {
@@ -1753,7 +1767,9 @@ function Start-GameWatcher {
                     try {
                         $lossNote = Update-PacketLossWatch
                         if ($lossNote) { Write-Log $lossNote 'WARN' }
-                    } catch { }
+                    } catch {
+                        Write-Log ("Local packet-loss sampling failed: {0}" -f $_.Exception.Message) 'WARN'
+                    }
                 }
             }
 
