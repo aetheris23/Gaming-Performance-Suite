@@ -20,6 +20,7 @@ Import-Module (Join-Path $root 'Common.psm1')    -Force
 Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
+Import-Module (Join-Path $root 'NetTune.psm1')    -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -62,6 +63,10 @@ if ($cfg.ContainsKey('UniversalWatch')) { $universalCfg['Enabled'] = [bool]$cfg[
 if ($cfg.ContainsKey('ImmersiveWindowThreshold')) { $universalCfg['ImmersiveWindowThreshold'] = [double]$cfg['ImmersiveWindowThreshold'] }
 $lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Mode = 'Auto' } }
 $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      else { @{ Enabled = $false } }
+# Network latency / packet-loss profile. Absent (or disabled) means the
+# suite never touches the network stack - see Config.ps1 for what each
+# switch does and what it deliberately cannot do.
+$netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
 
 # ---------------- low-spec auto-detection + resolution ----------------
 function Resolve-LowSpecSettings {
@@ -224,6 +229,7 @@ function Invoke-Watcher {
             -LegacySettings $leg -LowSpecSettings $lowSpecEff `
             -UniversalSettings $universalCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
+            -NetworkSettings $netCfg `
             -NeverWatchProcesses $neverWatch `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
@@ -320,10 +326,74 @@ function Show-Menu {
     Write-Host '  4) Start watcher in THIS window (Ctrl+C to stop)'
     Write-Host '  5) STOP background watcher'
     Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
-    Write-Host '  6) Show watcher / display / GPU status'
+    Write-Host '  6) Show watcher / display / GPU / network status'
+    Write-Host ' --- NETWORK ---------------------------------------------' -ForegroundColor Yellow
+    Write-Host '  7) Revert network tuning (option 1 / watcher settings)'
     Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
     Write-Host '  Q) Quit'
     Write-Host ''
+}
+
+function Get-JournaledNetworkState {
+    <#
+        The `netLatency` node of the recovery journal as a hashtable, or
+        $null when the network profile is not currently applied. The journal
+        is shared with the watcher, so it is only ever read here - writing
+        is left to whoever owns the session.
+    #>
+    $raw = Get-WatcherJournal
+    if (-not $raw) { return $null }
+    $j = ConvertTo-HashtableDeep $raw
+    return (Get-StateField $j 'netLatency')
+}
+
+function Invoke-NetworkProfileApply {
+    <#
+        Applies the network latency profile from the menu and records the
+        original values in the SAME recovery journal the watcher uses, so an
+        unclean exit (closed console, killed process, power loss) is repaired
+        by the next watcher start or by Stop-GamingSuite.bat.
+
+        When a watcher is alive it owns that journal and the network profile
+        for the whole session, so nothing is written over its back.
+    #>
+    $state = @{}
+    Enable-NetworkLatencyProfile -Settings $netCfg -JournalState $state
+    $rec = $state['netLatency']
+    if (-not $rec) {
+        Write-Log 'Network profile not applied (disabled in Config.ps1, or no connected adapter).' 'INFO'
+        return $false
+    }
+    if (Test-WatcherAlive) {
+        Write-Log 'Watcher is running and owns the network profile for the session - no separate journal written.' 'INFO'
+        return $true
+    }
+    Save-WatcherJournal -State $state
+    Write-Log 'Network profile applied and journalled. Option 7 reverts it; a watcher start/stop also repairs it automatically.' 'OK'
+    return $true
+}
+
+function Invoke-NetworkProfileRevert {
+    <# Reverts the menu-applied network profile, exactly, from its journal. #>
+    $raw = Get-WatcherJournal
+    $net = $null
+    $j = $null
+    if ($raw) {
+        $j = ConvertTo-HashtableDeep $raw
+        $net = Get-StateField $j 'netLatency'
+    }
+    if ($net) {
+        Undo-NetworkLatencyProfile -JournalState $j
+        if ($j -is [hashtable]) { $null = $j.Remove('netLatency') }
+        # A live watcher still owns the rest of the journal - keep it.
+        if (Test-WatcherAlive) { Save-WatcherJournal -State $j }
+        else { Clear-WatcherJournal }
+        return
+    }
+    # No journal: either nothing was applied, or it was applied by an older
+    # build. Fall back to removing exactly the values this profile manages.
+    Undo-NetworkLatencyProfile -JournalState $null -Settings $netCfg -RemoveKnownDefaults
+    if (-not (Test-WatcherAlive)) { Clear-WatcherJournal }
 }
 
 function Invoke-FullOptimization {
@@ -341,6 +411,11 @@ function Invoke-FullOptimization {
     if (-not ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipStandbyPurge'])) {
         Clear-StandbyMemory
     }
+    # Network latency/packet-loss profile: applied here for a machine that
+    # does NOT run the watcher. With the watcher running, option 3 already
+    # handles this per session, so this only fills in the rest of the tweaks.
+    try { Invoke-NetworkProfileApply | Out-Null }
+    catch { Write-Log "Network profile skipped: $($_.Exception.Message)" 'WARN' }
     if ($leg.EnableHags) {
         Write-Log '=== FULL OPTIMIZATION complete. Reboot once for HAGS. ===' 'OK'
     } else {
@@ -446,6 +521,40 @@ function Show-Status {
         Write-Log 'Adaptive mid-game tuning: disabled in Config.ps1' 'INFO'
     }
 
+    # ---- network link + latency profile status -------------------
+    $netOn = $false
+    if ($netCfg -and $netCfg.ContainsKey('Enabled')) { $netOn = [bool]$netCfg['Enabled'] }
+    try {
+        $link = Get-NetworkLinkStatus -Refresh
+        $kind = [string](Get-StateField $link 'ConnectionType')
+        Write-Log ("Network: {0} link" -f $kind) 'INFO'
+        foreach ($a in @(Get-StateField $link 'Adapters')) {
+            $name = [string](Get-StateField $a 'Name')
+            $speed = [string](Get-StateField $a 'LinkSpeed')
+            $marks = @()
+            if (Get-StateField $a 'IsWireless') { $marks += 'wireless' }
+            if (Get-StateField $a 'IsDefault')   { $marks += 'default route' }
+            $err = [long](Get-StateField $a 'RxErrors')
+            $dis = [long](Get-StateField $a 'RxDiscards')
+            $tdis = [long](Get-StateField $a 'TxDiscards')
+            $bad = ''
+            if ($err -gt 0 -or $dis -gt 0 -or $tdis -gt 0) {
+                $bad = (' - LOCAL loss: {0} RX errors / {1} RX discards / {2} TX discards since boot' -f $err, $dis, $tdis)
+            }
+            Write-Log ("  [{0}] {1} ({2}){3}" -f $(if ($marks) { $marks -join ', ' } else { 'up' }), $name, $(if ($speed) { $speed } else { 'link speed unknown' }), $bad) 'INFO'
+        }
+        $netRec = Get-JournaledNetworkState
+        if ($netRec) {
+            Write-Log ("Network latency profile: ACTIVE{0} - reverted when the session ends or option 7 runs." -f $(if (Get-StateField $netRec 'ConnectionType') { " ($([string](Get-StateField $netRec 'ConnectionType')))" } else { '' })) 'OK'
+        } elseif ($netOn) {
+            Write-Log 'Network latency profile: not applied (applied per session by the watcher, or with option 1).' 'INFO'
+        } else {
+            Write-Log 'Network latency profile: DISABLED in Config.ps1.' 'INFO'
+        }
+    } catch {
+        Write-Log "Network status unavailable: $($_.Exception.Message)" 'WARN'
+    }
+
     # ---- platform info ------------------------------------------
     Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
     try {
@@ -494,6 +603,7 @@ try {
         '4' { try { Invoke-Watcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '5' { try { Stop-BackgroundWatcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         '6' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '7' { try { Invoke-NetworkProfileRevert } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
         { $_ -in 'Q','q' } { break menu }
         default { }
     }

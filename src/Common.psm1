@@ -150,10 +150,6 @@ public struct TOKENPRIVILEGES
     }
 }
 
-function Get-SuiteRoot {
-    Split-Path -Parent (Split-Path -Parent $PSCommandPath)
-}
-
 function Get-LogPath {
     $script:LogFile
 }
@@ -274,10 +270,10 @@ function Test-WatcherRunning {
 # Recovery journal.
 #
 # The watcher records every system change it makes (display mode,
-# silenced processes, FSO flags...) to this file
-# the moment it makes it. If the watcher dies without cleanup -
-# killed console, forced kill, power loss, crash - the NEXT start
-# (or Stop-GamingSuite.bat) replays the undo side of the journal
+# silenced processes, FSO flags, the network latency profile...)
+# to this file the moment it makes it. If the watcher dies without
+# cleanup - killed console, forced kill, power loss, crash - the NEXT
+# start (or Stop-GamingSuite.bat) replays the undo side of the journal
 # and puts everything back. This is what makes background stops
 # and closes safe no matter how they happen.
 # ------------------------------------------------------------
@@ -334,10 +330,10 @@ function Repair-OrphanedWatcherState {
     <#
         Undoes every change recorded in a leftover recovery journal:
         restores native resolution, background-app priorities,
-        fullscreen-optimization flags and kills an orphaned frame-gen
-        tool. Called automatically when a watcher starts over a dead
-        previous session, and as the final fallback of
-        Stop-GamingSuite.bat.
+        fullscreen-optimization flags, the network latency profile and
+        kills an orphaned frame-gen tool. Called automatically when a
+        watcher starts over a dead previous session, and as the final
+        fallback of Stop-GamingSuite.bat.
     #>
     $raw = Get-WatcherJournal
     if (-not $raw) { return $false }
@@ -399,6 +395,19 @@ function Repair-OrphanedWatcherState {
             }
         }
     } catch { }
+
+    # ---- 5. Network latency profile -------------------------------
+    # The journal's `netLatency` node holds the original value of every
+    # registry/driver/service change NetTune.psm1 made. Reverting it here
+    # is what makes a killed watcher (or a power loss mid-match) safe:
+    # without a journal entry the machine could keep RSC/LSO disabled, the
+    # adapter out of power saving and Delivery Optimization stopped.
+    try {
+        if (Get-StateField $j 'netLatency') {
+            Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -Force
+            Undo-NetworkLatencyProfile -JournalState $j
+        }
+    } catch { Write-Log "Recovery: network profile revert failed: $_" 'ERROR' }
 
     Clear-WatcherJournal
 
@@ -462,7 +471,7 @@ function Stop-BackgroundWatcher {
 # Platform detection helpers
 # ------------------------------------------------------------
 Export-ModuleMember -Function Write-Log, Test-Administrator, Assert-AdminOrThrow, Enable-Privilege,
-    Remove-SuiteLogs, Get-SuiteRoot, Get-LogPath,
+    Remove-SuiteLogs, Get-LogPath,
     Get-WatcherStopEventName, Get-WatcherMutexName, Get-WatcherPidFile,
     New-WatcherStopEvent, Open-OrCreateStopEvent, Test-WatcherPidAlive, Test-WatcherRunning,
     New-WatcherInstanceGuard, Wait-StopOrTimeout,

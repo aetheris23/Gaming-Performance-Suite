@@ -330,6 +330,83 @@
         ToolPath = ''                  # e.g. 'C:\Program Files\Lossless Scaling\LosslessScaling.exe'
     }
 
+    # ---- Network latency & packet loss (menu option 1 / watcher) ----
+    # Applied ONCE per session - before the game connects - and reverted
+    # when the session ends, the watcher stops, or a crash is repaired
+    # (see NetTune.psm1). Every switch is independent.
+    #
+    # WHAT THIS FIXES vs. WHAT IT CANNOT:
+    #   Fixes  : local RTT SPIKES (30ms -> 100-300ms) and phantom packet
+    #            loss caused by NIC/Wi-Fi power saving, background
+    #            downloads (bufferbloat), adapter offload aggregation,
+    #            Windows multimedia/QoS throttling, a TCP receive window
+    #            left collapsed by another tool, and aggressive Wi-Fi
+    #            roaming.
+    #   Cannot : lower your RTT BASELINE. That ~30ms is the physical path
+    #            (router -> ISP -> route -> server). No local setting moves
+    #            it, and no script can make a 30ms hop into a 5ms one.
+    #
+    # Anti-cheat safe: only documented Windows settings are changed. No
+    # packet is injected, filtered, spoofed or reordered, and no game or
+    # anti-cheat process (Vanguard/BattlEye/EAC) is touched.
+    NetworkOptimization = @{
+        # Master switch. $false makes the suite skip network tuning
+        # entirely (no admin prompt, no adapter restart).
+        Enabled                  = $true
+
+        # Windows deliberately delays packets while "multimedia" apps
+        # play (NetworkThrottlingIndex) and caps reserved bandwidth with
+        # the QoS NonBestEffortLimit. Both are pure local latency.
+        DisableNetworkThrottling = $true
+        RemoveBandwidthLimit     = $true
+
+        # Repairs a TcpAutotuningLevel that another "booster" left at
+        # 0/1/2 - a disabled or capped receive window shows up as phantom
+        # packet loss under load. Never sets a fixed window size.
+        RepairTcpWindow          = $true
+        # TCP-ONLY knobs (Nagle / delayed ACK). Your in-match RTT is UDP
+        # and is NOT changed by these; they only de-stall launchers, stores
+        # and updates around a session. Ethernet gets 1/0, Wi-Fi 2/2 -
+        # forcing 1/0 on Wi-Fi floods the radio with ACKs and CAUSES loss.
+        TcpLowLatency            = $true
+
+        # The single biggest local cause of "packet loss the router swears
+        # isn't there" on wireless, and of millisecond hitches on copper.
+        DisableNicPowerSaving    = $true
+        # Wireless adapter "Power Saving Mode" -> Maximum performance (AC).
+        # On battery the plan is left alone unless you change it there.
+        WirelessMaxPerformance   = $true
+
+        # RSC/LSO let the driver hold small game packets back to build
+        # large ones: added latency, and on some drivers dropped UDP.
+        DisableReceiveSegmentCoalescing = $true
+        DisableLargeSendOffload         = $true
+
+        # Roaming aggressiveness -> Lowest, so the card does not hop to a
+        # weaker access point mid-round (that moves RTT by tens of ms).
+        WifiStayOnStrongest      = $true
+
+        # Delivery Optimization (P2P downloads) can saturate the link in
+        # the background - the classic "ping 200ms while I am not even
+        # downloading anything". Stopped for the session, then restored.
+        PauseBackgroundDownloads = $true
+
+        # Interrupt moderation off lowers jitter but costs CPU all match -
+        # a bad trade on the low-spec machines this suite targets, so it
+        # ships OFF. One line to enable.
+        DisableInterruptModeration = $false
+
+        # Driver-level changes only take effect after the adapter reloads.
+        # Applied while no game is running, and only for adapters that
+        # were actually changed (never VMs/VPNs/virtual switches).
+        RestartChangedAdapters = $true
+
+        # While a game runs, watch the NIC error/discard counters and log
+        # ONLY genuine local packet loss. Clean counters while the game
+        # reports loss means the loss happens after this PC (ISP/route).
+        WatchLocalPacketLoss   = $true
+    }
+
     # ---- Power profile (menu option 1 / full optimization) -----
     # The gaming power plan forces min processor state 100% and PCIe link
     # power-management OFF to remove FPS dips. On a laptop those aggressive

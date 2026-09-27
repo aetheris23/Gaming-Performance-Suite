@@ -103,7 +103,7 @@ $batStop = @'
 @echo off
 :: ============================================================
 ::  Stops the background Game Watcher instantly (kernel event)
-::  and restores native resolution / priorities / timer.
+::  and restores native resolution / priorities / timer / network settings.
 :: ============================================================
 title Stop Gaming Performance Suite
 
@@ -139,7 +139,8 @@ $srcFiles = @(
     'src\Config.ps1',
     'src\DisplayScale.psm1',
     'src\GameBoost.psm1',
-    'src\GpuDetect.psm1'
+    'src\GpuDetect.psm1',
+    'src\NetTune.psm1'
 )
 
 $missing = @($srcFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })

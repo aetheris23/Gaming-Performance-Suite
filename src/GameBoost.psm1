@@ -723,7 +723,10 @@ $script:PriorityCapable = $true
 function Invoke-ProcessBoost {
     param(
         [Parameter(Mandatory)][Diagnostics.Process]$Process,
-        [Parameter(Mandatory)][hashtable]$Profile,
+        # Named -GameProfile, not -Profile: $PROFILE is a PowerShell automatic
+        # variable (path to the profile script), so a parameter of that name
+        # shadows it inside the function.
+        [Parameter(Mandatory)][hashtable]$GameProfile,
         [int]$MaxCores = 0
     )
 
@@ -731,7 +734,7 @@ function Invoke-ProcessBoost {
         if ($Process.HasExited) { return }
 
         # Realtime is deliberately never used - it starves input threads
-        $wantPri = [string]$Profile.Priority
+        $wantPri = [string]$GameProfile.Priority
         if ($script:PriorityCapable) {
             try {
                 if ($Process.PriorityClass -ne $wantPri) {
@@ -749,7 +752,7 @@ function Invoke-ProcessBoost {
         # computed mask: a redundant affinity update on an already-pinned game
         # forces a scheduler re-balance, which can cause a visible micro-stutter
         # at the very moment it is applied mid-render (effect bursts, shooting).
-        $avoid = @($Profile.AvoidCores)
+        $avoid = @($GameProfile.AvoidCores)
         $total = [Environment]::ProcessorCount
         if ($MaxCores -gt 0 -and $MaxCores -lt $total) { $total = $MaxCores }
         if ($total -gt 2 -and $avoid.Count -gt 0 -and $avoid.Count -lt $total) {
@@ -829,8 +832,14 @@ function Update-BackgroundSilence {
 function Invoke-FrameGenerationTool {
     param(
         [hashtable]$Settings,
-        [ref][bool]$LaunchedByUs,
-        [ref][int]$ToolPid
+        # Plain [ref] parameters on purpose. A typed `[ref][bool]` parameter
+        # makes PowerShell demand a ref-to-exactly-bool argument, and the
+        # caller's `([ref]$fgByUs)` (a PSReference built from a plain $true/$false
+        # variable) fails to bind with "Reference type is expected in argument" -
+        # the tool was then never launched and the empty catch in the staged
+        # ramp hid it. Untyped refs accept whatever the caller holds.
+        [ref]$LaunchedByUs,
+        [ref]$ToolPid
     )
 
     if (-not $Settings -or -not $Settings['Enabled']) { return }
@@ -990,9 +999,15 @@ function Get-ActiveWindowProcessId {
         Add-ForegroundWindowType
         $window = [Suite.ForegroundWindow]::GetForegroundWindow()
         if ($window -eq [IntPtr]::Zero) { return 0 }
-        $pid = [uint32]0
-        [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$pid)
-        return [int]$pid
+        # NOTE: the out-variable must NOT be called $pid - $PID is a read-only
+        # automatic variable, so assigning to it throws "Cannot overwrite
+        # variable PID". The try/catch swallowed that, this function then always
+        # returned 0, and BOTH consumers silently degraded: ActiveGameOnly fell
+        # back to "boost everything" and UniversalWatch could never register an
+        # immersive window (it requires a foreground PID > 0).
+        $ownerPid = [uint32]0
+        [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$ownerPid)
+        return [int]$ownerPid
     } catch { return 0 }
 }
 
@@ -1062,6 +1077,7 @@ function Start-GameWatcher {
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$UniversalSettings  = @{ Enabled = $true; ImmersiveWindowThreshold = 0.90 },
         [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
+        [hashtable]$NetworkSettings      = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [bool]$ExitWhenGameSessionEnds = $true,
@@ -1127,6 +1143,30 @@ function Start-GameWatcher {
 
     Write-GpuInventory
 
+    # ---- resolve the network latency profile (optional module) ------
+    # NetTune.psm1 lives next to this file and is imported by Main.ps1; the
+    # lazy import keeps the watcher working when GameBoost is loaded on its
+    # own. Disabled by config = the suite never touches the network stack.
+    $netOn = $false
+    if ($NetworkSettings -and $NetworkSettings.ContainsKey('Enabled')) {
+        $netOn = [bool]$NetworkSettings['Enabled']
+    }
+    $netWatchLoss = $true
+    if ($NetworkSettings -and $NetworkSettings.ContainsKey('WatchLocalPacketLoss')) {
+        $netWatchLoss = [bool]$NetworkSettings['WatchLocalPacketLoss']
+    }
+    $netAvailable = $false
+    if ($netOn) {
+        if (-not (Get-Command Enable-NetworkLatencyProfile -ErrorAction SilentlyContinue)) {
+            try { Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -ErrorAction Stop } catch { }
+        }
+        $netAvailable = [bool](Get-Command Enable-NetworkLatencyProfile -ErrorAction SilentlyContinue)
+        if (-not $netAvailable) {
+            Write-Log 'Network profile is enabled in Config.ps1 but NetTune.psm1 could not be loaded - network tuning skipped.' 'WARN'
+        }
+    }
+    $netApplied = $false
+
     $skipScale  = [bool]$LegacySettings['SkipResolutionSwitch'] -or $lowSpecSkipRes
     $fsoDisable = [bool]$LegacySettings['DisableFullscreenOptimizations']
     if ($skipScale)  { Write-Log 'Resolution switching is DISABLED for this session.' 'INFO' }
@@ -1170,12 +1210,29 @@ function Start-GameWatcher {
 
     # ---- PRE-GAME OPTIMIZATION: apply the cheap, system-wide FPS tweaks
     #     BEFORE any game is detected so they are in place when the first
-    #     game appears (eliminates launch stutter). Network tuning is no
-    #     longer part of the suite.
+    #     game appears (eliminates launch stutter).
     if ($PreGameOptimization) {
         Write-Log 'Pre-game optimizations: applying system-wide FPS tweaks before games launch...' 'ACTION'
         try { Disable-GameDVR } catch { Write-Log "Game DVR tweak skipped: $_" 'WARN' }
         try { Set-MultimediaTweaks -EnableHags:([bool]$LegacySettings['EnableHags']) } catch { Write-Log "Multimedia tweak skipped: $_" 'WARN' }
+    }
+
+    # ---- NETWORK LATENCY PROFILE: applied here, BEFORE the game exists -
+    #     Driver-level changes (RSC/LSO, adapter power management) need an
+    #     adapter reload, and that reload blips the link for a few seconds.
+    #     Doing it while the watcher starts - not while the game is already
+    #     connecting - is the whole point. Everything is journalled and
+    #     reverted at the end of the session (or by crash recovery).
+    if ($netOn -and $netAvailable) {
+        Write-Log 'Network latency profile: applying before the game connects...' 'ACTION'
+        try {
+            Enable-NetworkLatencyProfile -Settings $NetworkSettings -JournalState $journal
+            $netApplied = [bool](Get-StateField $journal 'netLatency')
+            if ($netApplied) { Save-Journal }
+        } catch {
+            Write-Log "Network profile skipped: $($_.Exception.Message)" 'WARN'
+            $netApplied = $false
+        }
     }
 
     Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching active games only: {2}" -f `
@@ -1211,6 +1268,10 @@ function Start-GameWatcher {
     Add-NativeBoostType
     try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
     $reassertCounter     = 0                      # throttles per-game priority re-assertion
+    # Local packet-loss sampling runs about once a minute while a game runs
+    # (4 polls at the default 15s cadence), never on every poll.
+    $netLossCounter      = 0
+    $netLossEveryCycles  = [int][Math]::Max(1, [Math]::Ceiling(60.0 / [Math]::Max(1.0, [double]$PollSeconds)))
 
     # ---- idle tracking: ultra-low resource mode ---------------------------
     $idleSinceUtc     = [datetime]::UtcNow   # when we last transitioned to idle
@@ -1373,7 +1434,7 @@ function Start-GameWatcher {
                             Set-TimerResolution -UseAggressive:([bool]$lowSpecAggressiveTimer)
                             $timerOn = $true
                         }
-                        Invoke-ProcessBoost -Process $game -Profile $prof -MaxCores $lowSpecMaxCores
+                        Invoke-ProcessBoost -Process $game -GameProfile $prof -MaxCores $lowSpecMaxCores
 
                         # ---- PRE-LAUNCH PURGE: run BEFORE game fully loads ----
                         #     to prevent launch stutter. The game's own loading
@@ -1415,7 +1476,7 @@ function Start-GameWatcher {
                         try { $needBoost = ($game.PriorityClass -ne [string]$prof.Priority) } catch { }
                         if ($needBoost -and $script:PriorityCapable) {
                             # Re-assert if something knocked it back down
-                            Invoke-ProcessBoost -Process $game -Profile $prof -MaxCores $lowSpecMaxCores
+                            Invoke-ProcessBoost -Process $game -GameProfile $prof -MaxCores $lowSpecMaxCores
                         }
                     }
                 } catch {
@@ -1462,6 +1523,13 @@ function Start-GameWatcher {
                     if ($fsoDone.Count -gt 0) {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
+                    }
+                    if ($netApplied) {
+                        Undo-NetworkLatencyProfile -JournalState $journal
+                        $null = $journal.Remove('netLatency')
+                        $netApplied = $false
+                        Save-Journal
+                        Write-Log 'Network latency profile reverted for this session.' 'OK'
                     }
                     if ($ExitWhenGameSessionEnds) {
                         Write-Log 'Game session ended. Watcher shutting down completely - nothing keeps polling for another game.' 'ACTION'
@@ -1666,11 +1734,26 @@ function Start-GameWatcher {
                                 $needBoost = $false
                                 try { $needBoost = ($bproc.PriorityClass -ne [string]$bprof.Priority) } catch { $needBoost = $true }
                                 if ($needBoost -and $script:PriorityCapable) {
-                                    Invoke-ProcessBoost -Process $bproc -Profile $bprof -MaxCores $lowSpecMaxCores
+                                    Invoke-ProcessBoost -Process $bproc -GameProfile $bprof -MaxCores $lowSpecMaxCores
                                 }
                             }
                         } catch { }
                     }
+                }
+            }
+
+            # ---- local packet-loss watch (optional, ~1/min while playing) --
+            # Samples the NIC error/discard counters and logs ONLY genuine
+            # LOCAL loss. This is the honest diagnostic split: clean NIC
+            # counters while the game reports loss means the packets left
+            # this PC fine and the loss is upstream (ISP / route / server).
+            if ($netApplied -and $netWatchLoss -and $running.Count -gt 0) {
+                $netLossCounter++
+                if (($netLossCounter % $netLossEveryCycles) -eq 0) {
+                    try {
+                        $lossNote = Update-PacketLossWatch
+                        if ($lossNote) { Write-Log $lossNote 'WARN' }
+                    } catch { }
                 }
             }
 
@@ -1748,9 +1831,19 @@ function Start-GameWatcher {
         Restore-NativeResolution           # never leave the screen scaled down
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
+        # Revert the network profile LAST: it may bounce an adapter, and
+        # doing that before the screen/timer are back would add a visible
+        # hiccup to the end of the session.
+        if ($netApplied) {
+            try {
+                Undo-NetworkLatencyProfile -JournalState $journal
+                $null = $journal.Remove('netLatency')
+            } catch { Write-Log "Network profile revert failed: $($_.Exception.Message)" 'WARN' }
+            $netApplied = $false
+        }
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair
-        Write-Log 'Game watcher stopped, priorities/timer/resolution restored.' 'INFO'
+        Write-Log 'Game watcher stopped, priorities/timer/resolution/network restored.' 'INFO'
     }
 }
 

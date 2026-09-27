@@ -230,7 +230,13 @@ function Get-GpuViaCim {
     try {
         $ctrls = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)
     } catch {
-        try   { $ctrls = @(Get-WmiObject -Class Win32_VideoController -ErrorAction Stop) }
+        # Get-WmiObject is the Windows PowerShell 5.1 fallback (removed in
+        # PowerShell 7+), so only reach for it when it actually exists -
+        # otherwise a PowerShell 7 host pays a CommandNotFoundException on
+        # a path that could never succeed.
+        $legacyWmi = Get-Command Get-WmiObject -ErrorAction SilentlyContinue
+        if (-not $legacyWmi) { return $null }
+        try   { $ctrls = @(& $legacyWmi -Class Win32_VideoController -ErrorAction Stop) }
         catch { return $null }
     }
     foreach ($c in $ctrls) {

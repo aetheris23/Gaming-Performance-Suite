@@ -163,7 +163,8 @@ function Select-ScaledMode {
     <#
         Chooses the best lower-resolution mode. Without -Stretch this is the
         same-aspect mode whose width is closest to ScalePercent% of native,
-        preferring exact integer-ratio modes (crisp upscale). With -Stretch
+        preferring exact integer-ratio modes (crisp upscale) when -PreferInteger
+        is set. With -Stretch
         the aspect-ratio guard is relaxed: any mode that is smaller than the
         panel (width < native, height <= native) is eligible, and modes whose
         aspect DIFFERS from native win ties - so a 4:3 mode on a 16:9 panel is
@@ -220,11 +221,16 @@ function Select-ScaledMode {
     }
 
     # Choose the ACTUAL mode that is closest to the requested ScalePercent
-    # target, while preferring exact integer-ratio modes (whose dimensions
+    # target. With -PreferInteger, exact integer-ratio modes (whose dimensions
     # evenly divide native -> crisp GPU upscale, no blur, less upscale cost)
-    # whenever one exists near the target. In stretch mode a mode whose aspect
-    # ratio differs from the panel's is preferred at equal distance because
-    # that is what produces the visible stretched look.
+    # win over a marginally-closer non-integer mode; without it the mode
+    # closest to the tier target simply wins, so the "always prefer 1/2 native"
+    # behaviour is opt-out via Config.ps1 > PreferIntegerScale instead of being
+    # hard-coded (the switch used to be accepted and then ignored entirely,
+    # which made PreferIntegerScale = $false a no-op).
+    # In stretch mode a mode whose aspect ratio differs from the panel's is
+    # preferred at equal distance because that is what produces the visible
+    # stretched look.
     $targetW       = [math]::Round($Native.Width * ($ScalePercent / 100.0))
     $nativeAspect  = $Native.Width / [double]$Native.Height
 
@@ -243,11 +249,9 @@ function Select-ScaledMode {
         }
     }
 
-    $sort = @(
-        @{Expression='Dist';Ascending=$true},
-        @{Expression='Integer';Ascending=$false}
-    )
-    if ($Stretch) { $sort += @{Expression='Stretch';Ascending=$false} }
+    $sort = @(@{Expression='Dist';Ascending=$true})
+    if ($PreferInteger) { $sort += @{Expression='Integer';Ascending=$false} }
+    if ($Stretch)       { $sort += @{Expression='Stretch';Ascending=$false} }
     $sort += @{Expression='Freq';Ascending=$true}
 
     $best = $scored | Sort-Object $sort | Select-Object -First 1
