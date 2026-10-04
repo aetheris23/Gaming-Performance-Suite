@@ -601,6 +601,8 @@ function Get-GameScalePercent {
           3. the global ScalePercent fallback (legacy single value)
         Tier values come from ResolutionTiers (Low/Medium/High/Native).
         Returns 0 for 'Native' (keep the panel resolution - no switch).
+        PreferIntegerScale is a tie-breaker, not an override: at equal
+        distance to the tier target it picks an integer-ratio mode.
         Never throws.
     #>
     param(
@@ -947,11 +949,13 @@ function Undo-FsoCompatFlags {
 #
 #    SESSION-SCOPED LIFE (ExitWhenGameSessionEnds, default on):
 #    - before any game appears it waits patiently (no heavy load)
-#    - when the last monitored game exits it undoes every change
-#      and EXITS completely instead of staying resident, so no
-#      background process keeps polling for a "next game" on a
-#      low-spec machine. Stop-GamingSuite.bat / menu option 5
-#      still stop it instantly at any time.
+#    - when the last monitored game exits it undoes every session
+#      change (priorities, silenced apps, resolution, timer, FSO
+#      flags, network profile) and EXITS completely instead of
+#      staying resident, so no background process keeps polling for
+#      a "next game" on a low-spec machine. Persistent registry
+#      tweaks (Game DVR, MMCSS, HAGS) are not session state.
+#      Stop-GamingSuite.bat / menu option 5 still stop it instantly.
 #    Set ExitWhenGameSessionEnds = $false in Config.ps1 for the
 #    old always-on behavior.
 #
@@ -1342,6 +1346,11 @@ function Start-GameWatcher {
                 Write-Log ("Process snapshot failed: {0}" -f $_.Exception.Message) 'WARN'
                 $allProc = @()
             }
+            # Process objects created by per-PID probes during this cycle.
+            # They are not part of $allProc, so they are tracked here and
+            # disposed with it - otherwise every poll cycle leaks a kernel
+            # handle per boosted pid until the GC finalizer catches up.
+            $transientProcs = [System.Collections.Generic.List[Diagnostics.Process]]::new()
             $matchedGames = [System.Collections.Generic.List[Diagnostics.Process]]::new()
             foreach ($p in $allProc) {
                 $n = ''
@@ -1382,6 +1391,7 @@ function Start-GameWatcher {
                                 -not ($script:UniversalBlocklist -contains $fgn.ToLowerInvariant()) -and
                                 (Test-ImmersiveForegroundWindow -Threshold $immersivePercent)) {
                                 $matchedGames.Add($fgProc)
+                                $transientProcs.Add($fgProc)   # not in $allProc - must be disposed separately
                                 Write-Log ("Universal watch: foreground '{0}' (PID {1}) fills its monitor - treating as game/video session." -f $fgn, $fgProc.Id) 'INFO'
                             }
                         }
@@ -1506,14 +1516,31 @@ function Start-GameWatcher {
             if ($exitCheckCounter -ge $exitCheckInterval) {
                 $exitCheckCounter = 0
                 foreach ($procId in @($boosted.Keys)) {
-                    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) {
+                    $pchk = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    $gone = ($null -eq $pchk)
+                    # Match lifecycle of transient process handles: dispose
+                    # the probe result immediately instead of holding it for
+                    # the GC. The checked-alive process object gets re-created
+                    # by the boost loop's own snapshot anyway.
+                    if ($pchk) { $pchk.Dispose() }
+                    if ($gone) {
                         Write-Log ("'{0}' session ended (PID {1})." -f $boosted[$procId], $procId) 'INFO'
                         $null = $boosted.Remove($procId)
                         $null = $scalePctByPid.Remove($procId)
+                        $null = $extrasQueued.Remove($procId)   # recycled PIDs must not skip the new session's extras
                         $removedAny = $true
                     }
                 }
             }
+
+            # A game that is gone can no longer absorb staged work: drop any
+            # pending ramp stages. Otherwise a 'resscale' queued ~10s after
+            # detection would fire AFTER we already restored native (game
+            # exited during those 10s) and re-scale the display while no
+            # game runs. Evaluated every cycle, not only on the throttled
+            # exit-scan cadence, because the race window is exactly the
+            # deferred-removal gap.
+            if ($running.Count -eq 0) { $ramp.Clear() }
 
             # Last game closed -> undo every session change, then shut the
             # watcher down completely (final cleanup runs in the finally block).
@@ -1628,18 +1655,22 @@ function Start-GameWatcher {
                             [void][int]::TryParse("$([string]$item.Pid)", [ref]$xpid)
                             if ($xpid -gt 0) {
                                 $xp = Get-Process -Id $xpid -ErrorAction SilentlyContinue
-                                if ($xp -and -not $xp.HasExited) {
-                                    if ($fsoDisable) {
-                                        Invoke-FsoCompatFlag -Process $xp -State $fsoDone -Journal $journal
-                                    }
-                                    if (-not $lowSpecSkipFrameGen) {
-                                        Invoke-FrameGenerationTool -Settings $FrameGenSettings `
-                                            -LaunchedByUs ([ref]$fgByUs) -ToolPid ([ref]$fgPid)
-                                        if ($fgByUs) {
-                                            $journal['fgToolPid'] = $fgPid
-                                            Save-Journal
+                                try {
+                                    if ($xp -and -not $xp.HasExited) {
+                                        if ($fsoDisable) {
+                                            Invoke-FsoCompatFlag -Process $xp -State $fsoDone -Journal $journal
+                                        }
+                                        if (-not $lowSpecSkipFrameGen) {
+                                            Invoke-FrameGenerationTool -Settings $FrameGenSettings `
+                                                -LaunchedByUs ([ref]$fgByUs) -ToolPid ([ref]$fgPid)
+                                            if ($fgByUs) {
+                                                $journal['fgToolPid'] = $fgPid
+                                                Save-Journal
+                                            }
                                         }
                                     }
+                                } finally {
+                                    if ($xp) { $xp.Dispose() }
                                 }
                             }
                         } catch { }
@@ -1678,10 +1709,13 @@ function Start-GameWatcher {
                         try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
                     }
                     $adaptiveFloorMB = if ($adaptiveTotalMB -gt 0) { [int]($adaptiveTotalMB * $adaptiveFloorPct / 100.0) } else { $CriticalRamFloorMB }
-                    # Under pressure the cooldown tightens (down to half the
-                    # configured value) so recurring bursts are caught sooner;
-                    # it relaxes back out as soon as memory is healthy again.
-                    $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, $adaptiveConsecutive - 1))))
+                    # Under pressure the cooldown tightens (down to ~59% of
+                    # the configured value at 4+ consecutive readings) so
+                    # recurring bursts are caught sooner; it relaxes back out
+                    # as soon as memory is healthy again. Clamp the exponent
+                    # at 0 - before any sub-floor reading the streak is 0 and
+                    # a negative exponent would RATCHET the cooldown up.
+                    $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, [Math]::Max(0, $adaptiveConsecutive - 1)))))
                     $adaptiveEligible = (($nowMs - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs)
                 }
 
@@ -1751,6 +1785,7 @@ function Start-GameWatcher {
                                     Invoke-ProcessBoost -Process $bproc -GameProfile $bprof -MaxCores $lowSpecMaxCores
                                 }
                             }
+                            if ($bproc) { $bproc.Dispose() }
                         } catch { }
                     }
                 }
@@ -1833,6 +1868,11 @@ function Start-GameWatcher {
             foreach ($procSnapshot in @($allProc)) {
                 try { $procSnapshot.Dispose() } catch { }
             }
+            foreach ($tp in @($transientProcs)) {
+                try { $tp.Dispose() } catch { }
+            }
+            $transientProcs.Clear()
+            try { $transientProcs.Dispose() } catch { }
             $allProc = @()
             $stopping = Wait-StopOrTimeout -Milliseconds $waitMs -StopEvent $StopEvent
             if ($stopping) {

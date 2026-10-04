@@ -48,9 +48,79 @@ function Remove-SuiteLogs {
 
 Remove-SuiteLogs
 $logPathForExit = $script:LogFile
-Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
-    Remove-Item -LiteralPath $logPathForExit -Force -ErrorAction SilentlyContinue
-} | Out-Null
+$script:LogWriteCount = 0
+# Repeated Import-Module -Force calls recreate this module's session
+# state, so a $script guard cannot help - stack the flag in the global
+# scope instead, otherwise every -Force import adds one more Exiting
+# subscription (each spawning its own async event job).
+if (-not $Global:GamingPerfSuite_ExitHook) {
+    $Global:GamingPerfSuite_ExitHook = $true
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+        try { Close-SuiteLogWriter } catch { }
+        Remove-Item -LiteralPath $logPathForExit -Force -ErrorAction SilentlyContinue
+    } | Out-Null
+}
+
+# The log file is opened ONCE per session and cached, instead of
+# Add-Content re-creating a file handle on every line. Handle create/
+# destroy churn on every informational message is real I/O work on an
+# HDD/weak machine. AutoFlush keeps lines durable for a crash; the
+# low-end fix is the single open handle, not a buffering queue.
+function Close-SuiteLogWriter {
+    $w = $Global:GamingPerfSuite_LogWriter
+    if ($w) {
+        try { $w.Flush(); $w.Dispose() } catch { }
+    }
+    $Global:GamingPerfSuite_LogWriter = $null
+    $Global:GamingPerfSuite_LogWriterPath = $null
+    $script:LogWriteCount = 0
+}
+
+function Get-SuiteLogWriter {
+    if ($Global:GamingPerfSuite_LogWriter -and
+        $Global:GamingPerfSuite_LogWriterPath -eq $script:LogFile -and
+        (Test-Path -LiteralPath $script:LogFile)) {
+        return $Global:GamingPerfSuite_LogWriter
+    }
+    # File was rotated out (Remove-SuiteLogs at a later -Force import) or
+    # the path moved: reopen against the current path. Dispose first so
+    # handles are never stacked.
+    Close-SuiteLogWriter
+    $fs = [System.IO.File]::Open($script:LogFile, [System.IO.FileMode]::Append,
+        [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $w = New-Object System.IO.StreamWriter($fs, [System.Text.Encoding]::UTF8)
+    $w.AutoFlush = $true
+    $Global:GamingPerfSuite_LogWriter = $w
+    $Global:GamingPerfSuite_LogWriterPath = $script:LogFile
+    $script:LogWriteCount = 0
+    return $w
+}
+
+# Soft cap on the log file. A runaway loop must never fill the disk on a
+# low-end machine: when the file crosses the cap, the tail is kept.
+function Limit-SuiteLogSize {
+    $script:LogWriteCount++
+    if ($script:LogWriteCount % 25 -ne 0) { return }   # cheap: stat every 25 lines only
+    try {
+        $fi = Get-Item -LiteralPath $script:LogFile -ErrorAction SilentlyContinue
+        if (-not $fi -or $fi.Length -lt 2MB) { return }
+        Close-SuiteLogWriter
+        $bytes = [System.IO.File]::ReadAllBytes($script:LogFile)
+        $keepFrom = [Math]::Max(0, $bytes.Length - 1MB)
+        # Keep the tail as complete lines.
+        while ($keepFrom -lt $bytes.Length -and $bytes[$keepFrom] -ne 10) { $keepFrom++ }
+        $tailLen = $bytes.Length - $keepFrom
+        $tail = New-Object byte[] $tailLen
+        [Array]::Copy($bytes, $keepFrom, $tail, 0, $tailLen)
+        $stampHdr = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][INFO] Log truncated (size cap); keeping the most recent lines.`r`n"
+        $hdr = [System.Text.Encoding]::UTF8.GetBytes($stampHdr)
+        $combined = New-Object byte[] ($hdr.Length + $tailLen)
+        [Array]::Copy($hdr, 0, $combined, 0, $hdr.Length)
+        [Array]::Copy($tail, 0, $combined, $hdr.Length, $tailLen)
+        [System.IO.File]::WriteAllBytes($script:LogFile, $combined)
+        $script:LogWriteCount = 0
+    } catch { }
+}
 
 function Write-Log {
     param(
@@ -68,7 +138,14 @@ function Write-Log {
         'RECOVER' { 'Magenta' }
     }
     Write-Host $line -ForegroundColor $color
-    Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
+    try {
+        $w = Get-SuiteLogWriter
+        $w.WriteLine($line)
+        Limit-SuiteLogSize
+    } catch {
+        # The log file must never be able to break a session.
+        try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 } catch { }
+    }
 }
 
 function Test-Administrator {

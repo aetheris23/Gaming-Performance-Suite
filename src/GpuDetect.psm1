@@ -381,9 +381,10 @@ function Resolve-GpuType {
 #
 #   Legacy = pre-WDDM2.x-era drivers where display-mode switches,
 #   fullscreen optimizations and HAGS misbehave or do nothing:
-#     - INTEL : all GMA / Express-Chipset graphics, plus "HD
-#               Graphics" families numbered below 5xxx and the
-#               bare un-numbered "HD Graphics" (Sandy..Haswell)
+#     - INTEL : all GMA / Express-Chipset graphics, the bare
+#               un-numbered "HD Graphics" (Sandy Bridge), and the
+#               classic HD 2000-4999 family (Sandy..Haswell).
+#               HD 500/600 series (Gen9+) counts as Modern.
 #     - NVIDIA: FX, GeForce 4-digit (4xxx-9xxx), GT/GTS/GTX
 #               2xx-8xx (incl. mobile M variants). GTX 9xx/10xx+,
 #               RTX and MX stay Modern.
@@ -422,7 +423,19 @@ function Resolve-GpuEra {
     if ($isIntel) {
         if ($n -match 'graphics media accelerator|\bgma\b|express chipset') { return 'Legacy' }
         if ($n -match '\buhd\b|\biris\b|\barc\b')                  { return 'Modern' }  # Gen9.5+ / Xe / Arc naming
-        if ($n -match '\bhd graphics\b')                           { return 'Legacy' }  # every HD Graphics generation
+        # 'HD Graphics' (Sandy Bridge, unnumbered) and the 2000-4999 family
+        # (Sandy/Ivy/Haswell: HD 2000/2500/3000/4000/4600...) are legacy-era.
+        # The 500/600 series (HD 510/530/620/630) are Gen9/Gen9.5 (Skylake
+        # onward): WDDM 2.x, HAGS-capable on current drivers, and their
+        # mode switching works, so they must NOT be pushed into the
+        # legacy-safe (feature-off) path.
+        if ($n -match '\bhd graphics\s*(\d+)?') {
+            $model = $Matches[1]
+            if (-not $model) { return 'Legacy' }   # bare 'HD Graphics'
+            $num = 0
+            if ([int]::TryParse($model, [ref]$num) -and $num -ge 2000 -and $num -lt 5000) { return 'Legacy' }
+            return 'Modern'
+        }
         return 'Modern'
     }
 

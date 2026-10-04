@@ -129,11 +129,13 @@
 
     # ---- Session lifecycle ----------------------------------
     # When the last monitored game exits, the watcher undoes every
-    # optimization and EXITS completely instead of staying resident
-    # and polling for a "next game". Nothing is left running in the
-    # background on low-spec machines. It still stops instantly via
-    # Stop-GamingSuite.bat or menu option 5. Set $false to keep the
-    # old always-on behavior (watcher waits for future games).
+    # SESSION-scoped change (process priorities, display mode, pacing
+    # timer, silenced apps, FSO flags, network profile) and EXITS
+    # completely instead of staying resident and polling for a "next
+    # game". System-wide registry tweaks set with PreGameOptimization
+    # (Game DVR off, MMCSS games priority, HAGS) are deliberate
+    # persistent optimizer settings and stay applied. Set $false to
+    # keep the old always-on behavior (watcher waits for future games).
     ExitWhenGameSessionEnds = $true
 
     # ---- Standby memory (stutter-safe policy) -----------------
@@ -292,8 +294,9 @@
     # Legacy single-value override: this is the fallback only for a
     # profile/game that resolves to no tier (or uses the old setting).
     ResolutionScalePercent = 75      # target width as % of native (25-99)
-    PreferIntegerScale     = $true   # use exactly 1/2 native when available:
-                                     # pixel-perfect upscale, no blur/pixelation
+    PreferIntegerScale     = $true   # at equal distance to the tier target,
+                                     # prefer an exact integer-ratio mode
+                                     # (e.g. exactly 1/2 native): crisp upscale
 
     # FPS "stretched resolution" look: pick the scaled mode at the tier
     # percent EVEN IF it has a different aspect ratio (e.g. a 4:3 mode on a

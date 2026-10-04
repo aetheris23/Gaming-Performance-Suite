@@ -220,17 +220,17 @@ function Select-ScaledMode {
         }
     }
 
-    # Choose the ACTUAL mode that is closest to the requested ScalePercent
-    # target. With -PreferInteger, exact integer-ratio modes (whose dimensions
-    # evenly divide native -> crisp GPU upscale, no blur, less upscale cost)
-    # win over a marginally-closer non-integer mode; without it the mode
-    # closest to the tier target simply wins, so the "always prefer 1/2 native"
-    # behaviour is opt-out via Config.ps1 > PreferIntegerScale instead of being
-    # hard-coded (the switch used to be accepted and then ignored entirely,
-    # which made PreferIntegerScale = $false a no-op).
-    # In stretch mode a mode whose aspect ratio differs from the panel's is
-    # preferred at equal distance because that is what produces the visible
-    # stretched look.
+    # Choose the ACTUAL mode closest to the requested ScalePercent target.
+    # Tie-breakers, best-intention first after distance:
+    #   Stretch ON   : a mode whose aspect ratio DIFFERS from the panel wins -
+    #                  that is what produces the visible stretched look.
+    #   PreferInteger: an exact integer-ratio mode (dimensions evenly divide
+    #                  native -> crisp GPU upscale, less upscale cost) wins.
+    #   Freq         : the candidate closest to the panel's refresh.
+    # PreferIntegerScale is deliberately a TIE-BREAKER, not an override: it
+    # only picks the integer-ratio mode of equal distance to the tier target,
+    # so choosing the Medium tier for a title still means a Medium-quality
+    # render, not a forced 1/2-resolution drop.
     $targetW       = [math]::Round($Native.Width * ($ScalePercent / 100.0))
     $nativeAspect  = $Native.Width / [double]$Native.Height
 
@@ -250,8 +250,8 @@ function Select-ScaledMode {
     }
 
     $sort = @(@{Expression='Dist';Ascending=$true})
-    if ($PreferInteger) { $sort += @{Expression='Integer';Ascending=$false} }
     if ($Stretch)       { $sort += @{Expression='Stretch';Ascending=$false} }
+    if ($PreferInteger) { $sort += @{Expression='Integer';Ascending=$false} }
     $sort += @{Expression='Freq';Ascending=$true}
 
     $best = $scored | Sort-Object $sort | Select-Object -First 1
@@ -290,10 +290,14 @@ function Enable-LowResolutionMode {
 
     Add-NativeDisplayType
     $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
+    # A candidate that advertises 0 Hz ("driver default") is unknown; never
+    # write 0 into the change request with DM_DISPLAYFREQUENCY set - fall
+    # back to the panel's current frequency so the request stays valid.
+    $reqFreq = if ($target.Frequency -gt 0) { $target.Frequency } else { $native.Frequency }
     $dm.dmPelsWidth       = [uint32]$target.Width
     $dm.dmPelsHeight      = [uint32]$target.Height
     $dm.dmBitsPerPel      = [uint32]$native.Bits
-    $dm.dmDisplayFrequency= [uint32]$target.Frequency
+    $dm.dmDisplayFrequency= [uint32]$reqFreq
     # PELSWIDTH | PELSHEIGHT | BITSPERPEL | DISPLAYFREQUENCY - the missing
     # DISPLAYFREQUENCY bit meant the requested refresh was silently ignored.
     $dm.dmFields = $script:DM_PELSWIDTH -bor $script:DM_PELSHEIGHT -bor $script:DM_BITSPERPEL -bor $script:DM_DISPLAYFREQUENCY
