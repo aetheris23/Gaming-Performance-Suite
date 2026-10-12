@@ -122,7 +122,7 @@
     # cannot report a foreground process, the watcher safely falls back to
     # matching the configured game list.
     ActiveGameOnly         = $true
-    WatcherPollSeconds     = 15      # scan cadence while a game is running
+    WatcherPollSeconds     = 10      # scan cadence while a game is running (reduced from 15s for responsiveness)
     IdlePollSeconds        = 35      # slower cadence while NO game runs (lighter idle load)
     ExtendedIdlePollSeconds= 90      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
     IdleHeartbeatMinutes   = 5       # log "watcher alive" every N minutes while idle (0 = off)
@@ -180,7 +180,7 @@
         ReducedPolling          = $true   # use longer poll intervals (15s/35s)
         SkipHags                = $true   # skip HAGS registry write on old GPUs
         MaxCpuCores             = 0       # 0 = auto-detect; >0 = limit affinity to N cores
-        AggressiveTimer         = $false  # use 1ms timer instead of 2ms (causes more interrupts)
+        AggressiveTimer         = $true   # use 1ms timer for better frame pacing on low-spec
     }
 
     # ---- Adaptive mid-game tuning ---------------------------------
@@ -211,6 +211,19 @@
         PressureCooldownSec  = 60
         ReassertPriorities   = $true
         ReassertEveryCycles  = 3
+    }
+
+    # ---- Frame-time diagnostics ---------------------------------
+    # Lightweight frame-time sampling for measuring actual game smoothness.
+    # Uses high-resolution timer (QueryPerformanceCounter) to measure frame
+    # intervals. Logs percentile stats (avg, 1% low, 0.1% low) periodically.
+    # Enable for troubleshooting; adds minimal overhead (~0.1% CPU).
+    FrameTimeDiagnostics = @{
+        Enabled            = $false   # master switch
+        SampleIntervalMs   = 16       # target frame interval to sample (~60 FPS = 16.67ms)
+        LogIntervalSeconds = 30       # how often to log percentile stats
+        MaxSamples         = 10000    # max samples per log interval (ring buffer)
+        LogPercentiles     = @(50, 99, 99.9)  # percentiles to report (median, 1% low, 0.1% low)
     }
 
     # ---- Universal watch: ANY game or video ------------------

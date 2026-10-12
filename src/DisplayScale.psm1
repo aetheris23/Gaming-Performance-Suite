@@ -125,16 +125,34 @@ $script:ScaledActive   = $false
 function Get-CurrentDisplayMode {
     <# Returns the ACTIVE mode of the primary display as a hashtable. #>
     Add-NativeDisplayType
-    $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
-    if (-not [Suite.NativeDisplay]::EnumDisplaySettingsExW($null, $script:ENUM_CURRENT, [ref]$dm, 0)) {
-        return $null
+    # Retry a few times - sometimes the first call fails on hybrid/laptop GPUs
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $dm = [Suite.NativeDisplay+DEVMODEW]::Create()
+        if ([Suite.NativeDisplay]::EnumDisplaySettingsExW($null, $script:ENUM_CURRENT, [ref]$dm, 0)) {
+            return @{
+                Width     = [int]$dm.dmPelsWidth
+                Height    = [int]$dm.dmPelsHeight
+                Bits      = [int]$dm.dmBitsPerPel
+                Frequency = [int]$dm.dmDisplayFrequency
+            }
+        }
+        Start-Sleep -Milliseconds 10
     }
-    return @{
-        Width     = [int]$dm.dmPelsWidth
-        Height    = [int]$dm.dmPelsHeight
-        Bits      = [int]$dm.dmBitsPerPel
-        Frequency = [int]$dm.dmDisplayFrequency
-    }
+    # Fallback: WMI (works even when user32 calls fail in some contexts)
+    try {
+        $wmi = Get-CimInstance -ClassName Win32_DesktopMonitor -ErrorAction Stop |
+               Where-Object { $_.ScreenWidth -and $_.ScreenHeight } | Select-Object -First 1
+        if ($wmi) {
+            return @{
+                Width     = [int]$wmi.ScreenWidth
+                Height    = [int]$wmi.ScreenHeight
+                Bits      = 32
+                Frequency = 60
+            }
+        }
+    } catch { }
+    Write-Log 'Get-CurrentDisplayMode: EnumDisplaySettingsExW and WMI fallback both failed' 'WARN'
+    return $null
 }
 
 function Get-AvailableDisplayModes {

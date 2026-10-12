@@ -67,6 +67,7 @@ $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      e
 # suite never touches the network stack - see Config.ps1 for what each
 # switch does and what it deliberately cannot do.
 $netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
+$frameDiagCfg = if ($cfg['FrameTimeDiagnostics']) { $cfg['FrameTimeDiagnostics'] } else { @{ Enabled = $false } }
 
 # ---------------- low-spec auto-detection + resolution ----------------
 function Resolve-LowSpecSettings {
@@ -101,7 +102,10 @@ function Resolve-LowSpecSettings {
                     $sig = Test-LowSpecHardware
                     $isLowSpec = [bool]$sig.IsLowSpec
                     if ($isLowSpec) {
-                        Write-Log ("LowSpecMode AUTO-DETECTED: {0} logical CPUs @ ~{1} MHz, RAM {2} MB, legacy GPU present -> enabling low-spec mode automatically." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB) 'WARN'
+                        $gpuReason = @()
+                        if ($sig.LegacyGpu) { $gpuReason += 'legacy GPU' }
+                        if ($sig.WeakModernGpu) { $gpuReason += 'weak modern iGPU (HD 500/600/UHD 600 series)' }
+                        Write-Log ("LowSpecMode AUTO-DETECTED: {0} logical CPUs @ ~{1} MHz, RAM {2} MB, {3} -> enabling low-spec mode automatically." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB, ($gpuReason -join ' + ')) 'WARN'
                     } else {
                         Write-Log ("Hardware check: not low-spec ({0} logical CPUs, {1} MHz, RAM {2} MB) - LowSpecMode stays off." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB) 'INFO'
                     }
@@ -230,6 +234,7 @@ function Invoke-Watcher {
             -UniversalSettings $universalCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
             -NetworkSettings $netCfg `
+            -FrameTimeDiagnosticsSettings $frameDiagCfg `
             -NeverWatchProcesses $neverWatch `
             -PreGameOptimization:([bool]$preGameOpt) `
             -PrePurgeBeforeLaunch:([bool]$prePurge) `
@@ -505,7 +510,12 @@ function Show-Status {
 
     # ---- low-spec mode summary ------------------------------------------
     if ($lowSpecEff['Enabled']) {
-        Write-Log 'Low-spec mode: ACTIVE (auto-detected or forced in Config.ps1)' 'WARN'
+        $sig = Test-LowSpecHardware
+        $gpuReason = @()
+        if ($sig.LegacyGpu) { $gpuReason += 'legacy GPU' }
+        if ($sig.WeakModernGpu) { $gpuReason += 'weak modern iGPU (HD 500/600/UHD 600 series)' }
+        $reason = if ($gpuReason) { $gpuReason -join ' + ' } else { 'config forced' }
+        Write-Log ("Low-spec mode: ACTIVE ({0})" -f $reason) 'WARN'
         Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
         Write-Log ("  Pre-game optimization: {0}" -f $(if ($preGameOpt) { 'enabled' } else { 'disabled' })) 'INFO'
         Write-Log ("  Pre-launch purge: {0}" -f $(if ($prePurge) { 'enabled' } else { 'disabled' })) 'INFO'
@@ -524,6 +534,17 @@ function Show-Status {
         Write-Log ("Adaptive mid-game tuning: ACTIVE (purge floor {0}% RAM, cooldown {1}s, priority re-assert {2})" -f $aFloor, $aCool, $(if ($aRe) { 'on' } else { 'off' })) 'INFO'
     } else {
         Write-Log 'Adaptive mid-game tuning: disabled in Config.ps1' 'INFO'
+    }
+
+    # ---- frame-time diagnostics status ------------------------------
+    $ftdOn = $false
+    if ($frameDiagCfg -and $frameDiagCfg.ContainsKey('Enabled')) { $ftdOn = [bool]$frameDiagCfg['Enabled'] }
+    if ($ftdOn) {
+        $logInt = if ($frameDiagCfg.ContainsKey('LogIntervalSeconds')) { [int]$frameDiagCfg['LogIntervalSeconds'] } else { 30 }
+        $maxSamp = if ($frameDiagCfg.ContainsKey('MaxSamples')) { [int]$frameDiagCfg['MaxSamples'] } else { 10000 }
+        Write-Log ("Frame-time diagnostics: ENABLED (log every {0}s, buffer {1} samples)" -f $logInt, $maxSamp) 'INFO'
+    } else {
+        Write-Log 'Frame-time diagnostics: disabled in Config.ps1' 'INFO'
     }
 
     # ---- network link + latency profile status -------------------

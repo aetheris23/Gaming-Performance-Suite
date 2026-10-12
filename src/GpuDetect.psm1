@@ -466,6 +466,25 @@ function Test-LegacyGpuPresent {
     return $false
 }
 
+function Test-WeakModernGpuPresent {
+    <# True when a PRESENT modern-era iGPU is known to be weak for gaming
+       (Intel HD 500/600 series, UHD 600 series). These are Modern-era
+       (WDDM 2.x, HAGS-capable) but still far below discrete performance. #>
+    param([switch]$Refresh)
+
+    foreach ($g in @(Get-GpuInfo -Refresh:$Refresh)) {
+        if (-not $g.Present -or $g.Type -eq 'Virtual') { continue }
+        if ($g.Type -ne 'Integrated') { continue }
+        if ($g.Vendor -ne 'INTEL') { continue }
+        $name = ($g.Name -as [string]).ToLowerInvariant()
+        # Intel HD 500/600 series (Gen9/Gen9.5): HD 510/515/520/530/540/550/5600/610/615/620/630
+        if ($name -match '\bhd graphics\s*(5\d{2}|6\d{2})\b') { return $true }
+        # Intel UHD Graphics 600/605/610/615/617/620/630 (Gemini Lake, Amber Lake)
+        if ($name -match '\buhd graphics\s*6\d{2}\b') { return $true }
+    }
+    return $false
+}
+
 # ------------------------------------------------------------
 # Public: merged, deduplicated, classified inventory (cached)
 # ------------------------------------------------------------
@@ -572,4 +591,4 @@ function Get-GpuStatusLine {
     }) -join ' + ')
 }
 
-Export-ModuleMember -Function Get-GpuInfo, Get-GpuStatusLine, Resolve-GpuType, Resolve-GpuEra, Test-LegacyGpuPresent
+Export-ModuleMember -Function Get-GpuInfo, Get-GpuStatusLine, Resolve-GpuType, Resolve-GpuEra, Test-LegacyGpuPresent, Test-WeakModernGpuPresent

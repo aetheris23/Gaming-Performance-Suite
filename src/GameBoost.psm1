@@ -69,7 +69,7 @@ function Write-GpuInventory {
 }
 
 # ------------------------------------------------------------
-# Native interop: timer resolution + standby memory purge
+# Native interop: timer resolution + standby memory purge + high-res timing
 # ------------------------------------------------------------
 function Add-NativeBoostType {
     <# Compiles the timer/memory interop lazily, on first real use. #>
@@ -80,6 +80,11 @@ function Add-NativeBoostType {
 
 [DllImport("ntdll.dll")]
 public static extern int NtSetSystemInformation(int InfoClass, ref int Info, int Length);
+
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool QueryPerformanceFrequency(out long lpFrequency);
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool QueryPerformanceCounter(out long lpPerformanceCount);
 
 [StructLayout(LayoutKind.Sequential)]
 public struct MEMORYSTATUSEX
@@ -114,6 +119,127 @@ function Get-FreeRamMB {
     $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX])
     [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
     [int]($ms.ullAvailPhys / 1MB)
+}
+
+# ------------------------------------------------------------
+# High-resolution timer for frame-time diagnostics
+# ------------------------------------------------------------
+$script:PerfFrequency = 0
+function Get-PerfFrequency {
+    if ($script:PerfFrequency -gt 0) { return $script:PerfFrequency }
+    Add-NativeBoostType
+    if (-not ('Suite.NativeBoost' -as [type])) { return 0 }
+    $freq = 0
+    if ([Suite.NativeBoost]::QueryPerformanceFrequency([ref]$freq)) {
+        $script:PerfFrequency = $freq
+        return $freq
+    }
+    return 0
+}
+
+function Get-PerfCounter {
+    Add-NativeBoostType
+    if (-not ('Suite.NativeBoost' -as [type])) { return 0 }
+    $count = 0
+    if ([Suite.NativeBoost]::QueryPerformanceCounter([ref]$count)) { return $count }
+    return 0
+}
+
+function Get-PerfCounterMs {
+    $freq = Get-PerfFrequency
+    if ($freq -le 0) { return 0 }
+    $count = Get-PerfCounter
+    if ($count -le 0) { return 0 }
+    return [double]$count * 1000.0 / $freq
+}
+
+# ------------------------------------------------------------
+# Frame-time diagnostics: ring buffer + percentile reporting
+# ------------------------------------------------------------
+function Initialize-FrameTimeDiagnostics {
+    param(
+        [bool]$Enabled = $false,
+        [int]$MaxSamples = 10000,
+        [int[]]$Percentiles = @(50, 99, 999)
+    )
+    if (-not $Enabled) { return $null }
+    $freq = Get-PerfFrequency
+    if ($freq -le 0) {
+        Write-Log 'Frame-time diagnostics: QueryPerformanceFrequency unavailable.' 'WARN'
+        return $null
+    }
+    $ctx = @{
+        Enabled      = $true
+        Frequency    = $freq
+        MaxSamples   = [Math]::Max(100, $MaxSamples)
+        Percentiles  = @($Percentiles)
+        Buffer       = New-Object 'double[]' $MaxSamples
+        Count        = 0
+        Index        = 0
+        LastSampleMs = 0
+        LastLogUtc   = [datetime]::UtcNow
+    }
+    Write-Log ("Frame-time diagnostics enabled (buffer: {0} samples, freq: {1} Hz)." -f $ctx.MaxSamples, $freq) 'INFO'
+    return $ctx
+}
+
+function Sample-FrameTime {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [int]$TargetIntervalMs = 16
+    )
+    if (-not $Context -or -not $Context.Enabled) { return }
+    $nowMs = Get-PerfCounterMs
+    if ($nowMs -le 0) { return }
+    if ($Context.LastSampleMs -gt 0) {
+        $delta = $nowMs - $Context.LastSampleMs
+        if ($delta -ge 1 -and $delta -le 500) {
+            $Context.Buffer[$Context.Index] = $delta
+            $Context.Index = ($Context.Index + 1) % $Context.MaxSamples
+            if ($Context.Count -lt $Context.MaxSamples) { $Context.Count++ }
+        }
+    }
+    $Context.LastSampleMs = $nowMs
+}
+
+function Log-FrameTimeStats {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [int]$LogIntervalSeconds = 30
+    )
+    if (-not $Context -or -not $Context.Enabled -or $Context.Count -lt 10) { return }
+    $now = [datetime]::UtcNow
+    if (($now - $Context.LastLogUtc).TotalSeconds -lt $LogIntervalSeconds) { return }
+    $Context.LastLogUtc = $now
+
+    $samples = @()
+    if ($Context.Count -eq $Context.MaxSamples) {
+        $samples += $Context.Buffer[$Context.Index..($Context.MaxSamples - 1)]
+        if ($Context.Index -gt 0) { $samples += $Context.Buffer[0..($Context.Index - 1)] }
+    } else {
+        $samples += $Context.Buffer[0..($Context.Count - 1)]
+    }
+    if ($samples.Count -lt 10) { return }
+    [Array]::Sort($samples)
+
+    $stats = @{}
+    foreach ($p in $Context.Percentiles) {
+        $pct = $p / 10.0
+        $idx = [Math]::Floor(($samples.Count - 1) * $pct / 100.0)
+        $idx = [Math]::Max(0, [Math]::Min($samples.Count - 1, $idx))
+        $stats[$pct] = [Math]::Round($samples[$idx], 2)
+    }
+    $avg = [Math]::Round(($samples | Measure-Object -Average).Average, 2)
+    $fpsAvg = if ($avg -gt 0) { [Math]::Round(1000.0 / $avg, 1) } else { 0 }
+    # Percentiles are stored as int*10: 50=5.0 (50%), 99=9.9 (99%), 999=99.9 (99.9%)
+    $p50 = if ($stats.ContainsKey(5.0)) { $stats[5.0] } else { 0 }
+    $p99 = if ($stats.ContainsKey(9.9)) { $stats[9.9] } else { 0 }
+    $p999 = if ($stats.ContainsKey(99.9)) { $stats[99.9] } else { 0 }
+    $fps1Low = if ($p99 -gt 0) { [Math]::Round(1000.0 / $p99, 1) } else { 0 }
+    $fps01Low = if ($p999 -gt 0) { [Math]::Round(1000.0 / $p999, 1) } else { 0 }
+
+    Write-Log ("Frame-time: avg {0}ms ({1} FPS) | 1% low {2}ms ({3} FPS) | 0.1% low {4}ms ({5} FPS) | samples={6}" -f `
+        $avg, $fpsAvg, $p99, $fps1Low, $p999, $fps01Low, $samples.Count) 'INFO'
 }
 
 # ------------------------------------------------------------
@@ -678,17 +804,20 @@ function Test-LowSpecHardware {
     [CmdletBinding()] param()
 
     $signals = @{
-        LegacyGpu = $false
-        LowCores  = $false
-        LowClock  = $false
-        LowRam    = $false
-        Threads   = [Environment]::ProcessorCount
-        ClockMHz  = 0
-        RamMB     = 0
+        LegacyGpu       = $false
+        WeakModernGpu   = $false
+        LowCores        = $false
+        LowClock        = $false
+        LowRam          = $false
+        Threads         = [Environment]::ProcessorCount
+        ClockMHz        = 0
+        RamMB           = 0
     }
 
     # GPU: reuse the legacy-era detector (already cached after first call)
     try { $signals.LegacyGpu = [bool](Test-LegacyGpuPresent) } catch { }
+    # Weak modern iGPU (HD 500/600, UHD 600 series) - Modern era but low gaming performance
+    try { $signals.WeakModernGpu = [bool](Test-WeakModernGpuPresent) } catch { }
 
     # RAM: lightweight probe
     try {
@@ -712,8 +841,9 @@ function Test-LowSpecHardware {
 
     $signals.LowRam = ($signals.RamMB -gt 0 -and $signals.RamMB -lt 6144)
 
-    # Verdict: legacy GPU AND (few cores OR low clock). RAM is informational.
-    $signals.IsLowSpec = ($signals.LegacyGpu -and ($signals.LowCores -or $signals.LowClock))
+    # Verdict: legacy GPU OR weak modern iGPU, AND (few cores OR low clock). RAM is informational.
+    $gpuWeak = ($signals.LegacyGpu -or $signals.WeakModernGpu)
+    $signals.IsLowSpec = ($gpuWeak -and ($signals.LowCores -or $signals.LowClock))
     return $signals
 }
 
@@ -1082,6 +1212,7 @@ function Start-GameWatcher {
         [hashtable]$UniversalSettings  = @{ Enabled = $true; ImmersiveWindowThreshold = 0.90 },
         [hashtable]$AdaptiveTuningSettings = @{ Enabled = $false },
         [hashtable]$NetworkSettings      = @{ Enabled = $false },
+        [hashtable]$FrameTimeDiagnosticsSettings = @{ Enabled = $false },
         [bool]$PreGameOptimization = $true,
         [bool]$PrePurgeBeforeLaunch = $true,
         [bool]$ExitWhenGameSessionEnds = $true,
@@ -1110,7 +1241,12 @@ function Start-GameWatcher {
     $lowSpecAggressiveTimer = [bool]$LowSpecSettings['AggressiveTimer']
 
     if ($isLowSpec) {
-        Write-Log 'Low-spec mode ACTIVE: optimizing for older/weaker hardware.' 'WARN'
+        $sig = Test-LowSpecHardware
+        $gpuReason = @()
+        if ($sig.LegacyGpu) { $gpuReason += 'legacy GPU' }
+        if ($sig.WeakModernGpu) { $gpuReason += 'weak modern iGPU' }
+        $reason = if ($gpuReason) { $gpuReason -join ' + ' } else { 'config forced' }
+        Write-Log ("Low-spec mode ACTIVE ({0}): optimizing for older/weaker hardware." -f $reason) 'WARN'
         if ($lowSpecSkipRes) { Write-Log '  - Resolution switching: DISABLED' 'INFO' }
         if ($lowSpecSkipPurge) { Write-Log '  - Standby memory purge: DISABLED' 'INFO' }
         if ($lowSpecSkipSilence) { Write-Log '  - Background silencing: DISABLED' 'INFO' }
@@ -1285,6 +1421,30 @@ function Start-GameWatcher {
     # overflow Int32 (~6.4e13 ms) and crash the watcher on its first idle poll.
     $lastHeartbeatUtc = [datetime]::UtcNow  # last time we logged "watcher alive"
     $idleHeartbeatMs   = $IdleHeartbeatMinutes * 60 * 1000
+
+    # ---- frame-time diagnostics (optional) --------------------------------
+    $frameDiagEnabled = $false
+    $frameDiagSettings = @{}
+    if ($FrameTimeDiagnosticsSettings -and $FrameTimeDiagnosticsSettings.ContainsKey('Enabled')) {
+        $frameDiagEnabled = [bool]$FrameTimeDiagnosticsSettings['Enabled']
+    }
+    if ($frameDiagEnabled) {
+        $maxSamples = 10000
+        if ($FrameTimeDiagnosticsSettings.ContainsKey('MaxSamples')) { $maxSamples = [int]$FrameTimeDiagnosticsSettings['MaxSamples'] }
+        $logIntervalSec = 30
+        if ($FrameTimeDiagnosticsSettings.ContainsKey('LogIntervalSeconds')) { $logIntervalSec = [int]$FrameTimeDiagnosticsSettings['LogIntervalSeconds'] }
+        $sampleIntervalMs = 16
+        if ($FrameTimeDiagnosticsSettings.ContainsKey('SampleIntervalMs')) { $sampleIntervalMs = [int]$FrameTimeDiagnosticsSettings['SampleIntervalMs'] }
+        $percentiles = @(50, 99, 999)
+        if ($FrameTimeDiagnosticsSettings.ContainsKey('LogPercentiles')) { $percentiles = @($FrameTimeDiagnosticsSettings['LogPercentiles']) }
+        $frameDiag = Initialize-FrameTimeDiagnostics -Enabled $true -MaxSamples $maxSamples -Percentiles $percentiles
+        $frameDiagSettings = @{
+            Context      = $frameDiag
+            LogInterval  = $logIntervalSec
+            SampleIntMs  = $sampleIntervalMs
+        }
+        if ($frameDiag) { $frameDiagSettings.Enabled = $true } else { $frameDiagEnabled = $false }
+    }
 
     $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 66 }
     $prefInt  = if ($null -ne $ResolutionSettings['PreferIntegerScale']) { [bool]$ResolutionSettings['PreferIntegerScale'] } else { $true }
@@ -1808,6 +1968,14 @@ function Start-GameWatcher {
                 }
             }
 
+            # ---- frame-time diagnostics (optional) ------------------------
+            if ($frameDiagEnabled -and $frameDiagSettings.Enabled -and $running.Count -gt 0) {
+                # Sample frame time on each poll while a game is running
+                Sample-FrameTime -Context $frameDiagSettings.Context -TargetIntervalMs $frameDiagSettings.SampleIntMs
+                # Log percentile stats periodically
+                Log-FrameTimeStats -Context $frameDiagSettings.Context -LogIntervalSeconds $frameDiagSettings.LogInterval
+            }
+
             # Adaptive parking: 3-tier resource usage
             #   - Gaming:     $pollMs (10-15s) - active game detection
             #   - Idle:       $idleMs (25-35s) - recently had a game, watching for next
@@ -1906,4 +2074,5 @@ function Start-GameWatcher {
 Export-ModuleMember -Function Enable-GamingPowerPlan, Disable-GameDVR, Set-MultimediaTweaks,
     Set-TimerResolution, Clear-StandbyMemory, Invoke-ProcessBoost,
     Start-GameWatcher, Get-FreeRamMB, Get-GameProfile, Test-LowSpecHardware,
-    Invoke-FrameGenerationTool, Stop-FrameGenerationTool
+    Invoke-FrameGenerationTool, Stop-FrameGenerationTool,
+    Initialize-FrameTimeDiagnostics, Sample-FrameTime, Log-FrameTimeStats, Get-PerfCounterMs
