@@ -343,7 +343,7 @@ function Get-PowerPlanState {
         $schemesText = (@(& powercfg /list 2>$null) -join "`n")
         $activeOut   = (& powercfg /getactivescheme 2>$null | Out-String)
         if ($activeOut -match $script:GuidMatch) { $activeGuid = $Matches[1].ToLowerInvariant() }
-    } catch { }
+    } catch { Write-Log "Powercfg query failed: $_" 'WARN' }
     return @{
         PowerCfgAvailable  = $true
         HighPerfPowerPlan  = ($schemesText -match '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c')
@@ -387,7 +387,7 @@ function Enable-GamingPowerPlan {
                 break
             }
         }
-    } catch { }
+    } catch { Write-Log "Failed to find existing gaming power plan: $_" 'WARN' }
 
     # --- otherwise clone a scheme that actually exists on THIS build ---
     if (-not $planGuid) {
@@ -402,7 +402,7 @@ function Enable-GamingPowerPlan {
             try {
                 $dupOut = (& powercfg /duplicatescheme $src 2>$null | Out-String)
                 if ($dupOut -match $script:GuidMatch) { $planGuid = $Matches[1]; $cloned = $src; break }
-            } catch { }
+            } catch { Write-Log "Failed to clone power scheme ${src}: $_" 'WARN' }
         }
 
         if ($planGuid) {
@@ -412,7 +412,7 @@ function Enable-GamingPowerPlan {
                            else { 'currently active' }
                 Write-Log ("Power plan cloned from {0} (stock schemes may be missing on this build - the suite adapts)." -f $srcName) 'INFO'
                 & powercfg /changename $planGuid 'Gaming Performance Suite' 'Max FPS stability profile' | Out-Null
-            } catch { }
+            } catch { Write-Log "Failed to rename power plan: $_" 'WARN' }
         }
     }
 
@@ -693,9 +693,9 @@ function Get-GameProfile {
 
     # 2. Install-path detection (most reliable signal available)
     $path = $null
-    try { $path = $Process.Path } catch { }
+    try { $path = $Process.Path } catch { Write-Log "Failed to get process path: $_" 'WARN' }
     if (-not $path) {
-        try { $path = $Process.MainModule.FileName } catch { }
+        try { $path = $Process.MainModule.FileName } catch { Write-Log "Failed to get process MainModule path: $_" 'WARN' }
     }
     if ($path) {
         $lp = $path.ToLowerInvariant()
@@ -815,9 +815,11 @@ function Test-LowSpecHardware {
     }
 
     # GPU: reuse the legacy-era detector (already cached after first call)
-    try { $signals.LegacyGpu = [bool](Test-LegacyGpuPresent) } catch { }
+    try { $signals.LegacyGpu = [bool](Test-LegacyGpuPresent) }
+    catch { Write-Log "Low-spec GPU detection (legacy) failed: $_" 'WARN' }
     # Weak modern iGPU (HD 500/600, UHD 600 series) - Modern era but low gaming performance
-    try { $signals.WeakModernGpu = [bool](Test-WeakModernGpuPresent) } catch { }
+    try { $signals.WeakModernGpu = [bool](Test-WeakModernGpuPresent) }
+    catch { Write-Log "Low-spec GPU detection (weak modern) failed: $_" 'WARN' }
 
     # RAM: lightweight probe
     try {
@@ -828,7 +830,7 @@ function Test-LowSpecHardware {
             [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms)
             $signals.RamMB = [int]($ms.ullTotalPhys / 1MB)
         }
-    } catch { }
+    } catch { Write-Log "Low-spec RAM detection failed: $_" 'WARN' }
 
     $signals.LowCores = ($signals.Threads -le 4)
 
@@ -836,7 +838,7 @@ function Test-LowSpecHardware {
     try {
         $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Measure-Object -Property MaxClockSpeed -Maximum
         if ($cpu -and $cpu.Maximum) { $signals.ClockMHz = [int]$cpu.Maximum }
-    } catch { }
+    } catch { Write-Log "Low-spec CPU clock detection failed: $_" 'WARN' }
     if ($signals.ClockMHz -gt 0 -and $signals.ClockMHz -lt 2600) { $signals.LowClock = $true }
 
     $signals.LowRam = ($signals.RamMB -gt 0 -and $signals.RamMB -lt 6144)
@@ -923,7 +925,7 @@ function Update-BackgroundSilence {
             try {
                 $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
                 if ($p -and $p.PriorityClass -eq 'BelowNormal') { $p.PriorityClass = 'Normal' }
-            } catch { }
+            } catch { Write-Log "Failed to restore background app PID ${procId}: $_" 'WARN' }
             $null = $State.Remove($procId)
             if ($Journal -and $Journal['silenced'].ContainsKey($procId)) {
                 $null = $Journal['silenced'].Remove($procId)
@@ -949,7 +951,7 @@ function Update-BackgroundSilence {
                 }
                 Write-Log ("Silenced background app '{0}' (PID {1}) while gaming" -f $t.ProcessName, $t.Id) 'INFO'
             }
-        } catch { }
+        } catch { Write-Log "Failed to silence background app '{0}': $_" -f $t.ProcessName 'WARN' }
     }
 }
 
@@ -1008,7 +1010,7 @@ function Stop-FrameGenerationTool {
             if (-not $p.HasExited) { $p.Kill() }
             Write-Log 'Frame-generation tool closed.' 'INFO'
         }
-    } catch { }
+    } catch { Write-Log "Failed to stop frame-generation tool: $_" 'WARN' }
 }
 
 # ------------------------------------------------------------
@@ -1028,8 +1030,8 @@ function Invoke-FsoCompatFlag {
         [switch]$Undo
     )
     $path = $null
-    try   { $path = $Process.Path } catch { }
-    if (-not $path) { try { $path = $Process.MainModule.FileName } catch { } }
+    try   { $path = $Process.Path } catch { Write-Log "Failed to get process path: $_" 'WARN' }
+    if (-not $path) { try { $path = $Process.MainModule.FileName } catch { Write-Log "Failed to get process MainModule path: $_" 'WARN' } }
     if (-not $path) { return }
 
     try {
@@ -1062,7 +1064,7 @@ function Undo-FsoCompatFlags {
     foreach ($path in @($State.Keys)) {
         try {
             Remove-ItemProperty -Path $script:FsoKey -Name ([string]$path) -ErrorAction SilentlyContinue
-        } catch { }
+        } catch { Write-Log "Failed to undo FSO flag for ${path}: $_" 'WARN' }
         $null = $State.Remove($path)
     }
     if ($Journal) {
@@ -1142,7 +1144,7 @@ function Get-ActiveWindowProcessId {
         $ownerPid = [uint32]0
         [void][Suite.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$ownerPid)
         return [int]$ownerPid
-    } catch { return 0 }
+    } catch { Write-Log "Get-ActiveWindowProcessId failed: $_" 'WARN'; return 0 }
 }
 
 function Test-ImmersiveForegroundWindow {
@@ -1176,7 +1178,7 @@ function Test-ImmersiveForegroundWindow {
         $mh = [double]($mi.rcMonitor.Bottom - $mi.rcMonitor.Top)
         if ($w -le 0 -or $h -le 0 -or $mw -le 0 -or $mh -le 0) { return $false }
         return ((($w * $h) / ($mw * $mh)) -ge $Threshold)
-    } catch { return $false }
+    } catch { Write-Log "Test-ImmersiveForegroundWindow failed: $_" 'WARN'; return $false }
 }
 
 function Test-ActiveGameProcess {
@@ -1207,6 +1209,7 @@ function Start-GameWatcher {
         [hashtable]$ProfileOverrides = @{},
         [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
+        [hashtable]$MicEnhanceSettings = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true },
         [hashtable]$LegacySettings     = @{},
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$UniversalSettings  = @{ Enabled = $true; ImmersiveWindowThreshold = 0.90 },
@@ -1225,10 +1228,10 @@ function Start-GameWatcher {
     Assert-AdminOrThrow
 
     # ---- recover anything a previous unclean session left behind ----
-    try { Repair-OrphanedWatcherState | Out-Null } catch { }
+    try { Repair-OrphanedWatcherState | Out-Null } catch { Write-Log "Orphaned state repair failed: $_" 'WARN' }
 
     # Never compete with the game: our own watcher yields under any load
-    try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
+    try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { Write-Log "Failed to lower watcher priority: $_" 'WARN' }
 
     # ---- resolve low-spec mode ----
     $isLowSpec = [bool]$LowSpecSettings['Enabled']
@@ -1298,7 +1301,7 @@ function Start-GameWatcher {
     $netAvailable = $false
     if ($netOn) {
         if (-not (Get-Command Enable-NetworkLatencyProfile -ErrorAction SilentlyContinue)) {
-            try { Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -ErrorAction Stop } catch { }
+            try { Import-Module (Join-Path $PSScriptRoot 'NetTune.psm1') -ErrorAction Stop } catch { Write-Log "Failed to import NetTune.psm1: $_" 'WARN' }
         }
         $netAvailable = [bool](Get-Command Enable-NetworkLatencyProfile -ErrorAction SilentlyContinue)
         if (-not $netAvailable) {
@@ -1324,7 +1327,7 @@ function Start-GameWatcher {
     if ($UniversalSettings) {
         if ($UniversalSettings.ContainsKey('Enabled'))                   { $universalOn      = [bool]$UniversalSettings['Enabled'] }
         if ($UniversalSettings.ContainsKey('ImmersiveWindowThreshold'))  {
-            try { $immersivePercent = [double]$UniversalSettings['ImmersiveWindowThreshold'] } catch { }
+            try { $immersivePercent = [double]$UniversalSettings['ImmersiveWindowThreshold'] } catch { Write-Log "Invalid ImmersiveWindowThreshold value: $_" 'WARN' }
         }
     }
     # Clamp: below ~40% every app counts; above ~99.5% even fullscreen is skipped.
@@ -1345,6 +1348,7 @@ function Start-GameWatcher {
         silenced     = @{}
         fsoFlags     = @()
         fgToolPid    = 0
+        micToolPid   = 0
     }
     function Save-Journal { Save-WatcherJournal -State $journal }
 
@@ -1387,6 +1391,8 @@ function Start-GameWatcher {
     $fsoDone       = @{}   # exe paths we flagged for FSO-off this session
     $fgByUs        = $false
     $fgPid         = 0
+    $micByUs       = $false
+    $micPid        = 0
     $hadSession    = $false   # any game was actually detected+boosted this run
     $pollMs        = $PollSeconds * 1000
     $idleMs        = [Math]::Max($pollMs, $IdlePollSeconds * 1000)
@@ -1406,7 +1412,7 @@ function Start-GameWatcher {
     $adaptiveConsecutive = 0                      # consecutive sub-floor readings (>=2 required before purging)
     $adaptiveTotalMB     = 0                      # total physical RAM, resolved once
     Add-NativeBoostType
-    try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
+    try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { Write-Log "Failed to get total RAM for adaptive purge: $_" 'WARN' }
     $reassertCounter     = 0                      # throttles per-game priority re-assertion
     # Local packet-loss sampling runs about once a minute while a game runs
     # (4 polls at the default 15s cadence), never on every poll.
@@ -1514,7 +1520,7 @@ function Start-GameWatcher {
             $matchedGames = [System.Collections.Generic.List[Diagnostics.Process]]::new()
             foreach ($p in $allProc) {
                 $n = ''
-                try { $n = $p.ProcessName } catch { }
+                try { $n = $p.ProcessName } catch { Write-Log "Failed to get process name: $_" 'WARN' }
                 if (-not $n) { continue }
                 $nl = $n.ToLowerInvariant()
                 # Anti-cheat services / store launchers are NEVER watched or
@@ -1546,7 +1552,7 @@ function Start-GameWatcher {
                         $fgProc = Get-Process -Id $fgPidNow -ErrorAction SilentlyContinue
                         if ($fgProc -and -not $fgProc.HasExited -and -not $boosted.ContainsKey($fgProc.Id)) {
                             $fgn = ''
-                            try { $fgn = $fgProc.ProcessName } catch { }
+                            try { $fgn = $fgProc.ProcessName } catch { Write-Log "Failed to get foreground process name: $_" 'WARN' }
                             if ($fgn -and -not ($neverWatch -contains $fgn.ToLowerInvariant()) -and
                                 -not ($script:UniversalBlocklist -contains $fgn.ToLowerInvariant()) -and
                                 (Test-ImmersiveForegroundWindow -Threshold $immersivePercent)) {
@@ -1645,6 +1651,12 @@ function Start-GameWatcher {
                             $extrasQueued[$game.Id] = $true
                             Add-Ramp 'extras' 1 $game.Id
                         }
+                        # ---- Microphone enhancement ramp (launch companion tool) ----
+                        if ($MicEnhanceSettings -and [bool]$MicEnhanceSettings['Enabled'] -and
+                            [bool]$MicEnhanceSettings['AutoLaunchWithGame'] -and
+                            -not (Test-RampPending 'micenhance') -and -not $micByUs) {
+                            Add-Ramp 'micenhance' 1.5 0   # 1.5s delay - after game detected, during loading
+                        }
 
                         $boosted[$game.Id] = $profName
                         $hadSession = $true
@@ -1657,7 +1669,7 @@ function Start-GameWatcher {
                     } else {
                         $prof = $script:GameProfiles[$boosted[$game.Id]]
                         $needBoost = $true
-                        try { $needBoost = ($game.PriorityClass -ne [string]$prof.Priority) } catch { }
+                        try { $needBoost = ($game.PriorityClass -ne [string]$prof.Priority) } catch { Write-Log "Priority check failed for PID $($game.Id): $_" 'WARN' }
                         if ($needBoost -and $script:PriorityCapable) {
                             # Re-assert if something knocked it back down
                             Invoke-ProcessBoost -Process $game -GameProfile $prof -MaxCores $lowSpecMaxCores
@@ -1721,6 +1733,9 @@ function Start-GameWatcher {
                     Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
                     if ($fgByUs) { $journal['fgToolPid'] = 0; Save-Journal }
                     $fgByUs = $false; $fgPid = 0
+                    Stop-MicEnhanceTool -LaunchedByUs $micByUs -ToolPid $micPid
+                    if ($micByUs) { $journal['micToolPid'] = 0; Save-Journal }
+                    $micByUs = $false; $micPid = 0
                     if ($fsoDone.Count -gt 0) {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
@@ -1771,13 +1786,15 @@ function Start-GameWatcher {
                     'purge' {
                         # Pre-launch purge: eliminates launch stutter by
                         # clearing standby memory before game loads.
-                        try   { Clear-StandbyMemory } catch { }
+                        try   { Clear-StandbyMemory }
+                        catch { Write-Log "Ramp purge failed: $_" 'WARN' }
                         $sessionPurged = $true
                         $lastPurgeUtc  = [datetime]::UtcNow
                     }
                     'purge2' {
                         # Secondary purge during loading screen
-                        try   { Clear-StandbyMemory } catch { }
+                        try   { Clear-StandbyMemory }
+                        catch { Write-Log "Ramp purge2 failed: $_" 'WARN' }
                         $lastPurgeUtc  = [datetime]::UtcNow
                     }
                     'resscale' {
@@ -1833,7 +1850,19 @@ function Start-GameWatcher {
                                     if ($xp) { $xp.Dispose() }
                                 }
                             }
-                        } catch { }
+                        } catch { Write-Log "Ramp extras failed: $_" 'WARN' }
+                    }
+                    'micenhance' {
+                        # Launch microphone enhancement companion tool
+                        # Runs independently of game process (no PID needed)
+                        if ($MicEnhanceSettings -and [bool]$MicEnhanceSettings['Enabled']) {
+                            Invoke-MicEnhanceTool -Settings $MicEnhanceSettings `
+                                -LaunchedByUs ([ref]$micByUs) -ToolPid ([ref]$micPid)
+                            if ($micByUs) {
+                                $journal['micToolPid'] = $micPid
+                                Save-Journal
+                            }
+                        }
                     }
                 }
             }
@@ -1866,7 +1895,12 @@ function Start-GameWatcher {
                 if ($adaptiveOn) {
                     if ($adaptiveTotalMB -le 0) {
                         # Resolve total RAM once if the probe failed earlier
-                        try { $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX; $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]); [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms); $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB) } catch { }
+                        try {
+                            $ms = New-Object Suite.NativeBoost+MEMORYSTATUSEX;
+                            $ms.dwLength = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][Suite.NativeBoost+MEMORYSTATUSEX]);
+                            [void][Suite.NativeBoost]::GlobalMemoryStatusEx([ref]$ms);
+                            $adaptiveTotalMB = [int]($ms.ullTotalPhys / 1MB)
+                        } catch { Write-Log "Failed to get total RAM for adaptive purge: $_" 'WARN' }
                     }
                     $adaptiveFloorMB = if ($adaptiveTotalMB -gt 0) { [int]($adaptiveTotalMB * $adaptiveFloorPct / 100.0) } else { $CriticalRamFloorMB }
                     # Under pressure the cooldown tightens (down to ~59% of
@@ -1911,6 +1945,9 @@ function Start-GameWatcher {
                         if ($freeMB -lt $adaptiveFloorMB) {
                             $adaptiveConsecutive++
                             $pressureNote = "adaptive floor ${adaptiveFloorMB}MB; sustained pressure"
+                            # Recalculate effective cooldown with the NEW consecutive count so the
+                            # first purge (on the 2nd consecutive check) uses the tightened cooldown.
+                            $effCoolMs = [Math]::Max(1000, [int]($adaptiveCoolMs * [Math]::Pow(0.85, [Math]::Min(4, [Math]::Max(0, $adaptiveConsecutive - 1)))))
                             if ($adaptiveConsecutive -ge 2 -and
                                 (([datetime]::UtcNow - $adaptiveLastUtc).TotalMilliseconds -ge $effCoolMs)) {
                                 Write-Log ("Adaptive purge: free RAM {0} MB under {1} for {2} consecutive checks ({3})." -f $freeMB, $adaptiveFloorMB, $adaptiveConsecutive, $pressureNote) 'WARN'
@@ -1946,7 +1983,7 @@ function Start-GameWatcher {
                                 }
                             }
                             if ($bproc) { $bproc.Dispose() }
-                        } catch { }
+                        } catch { Write-Log "Priority re-assert failed for PID ${bid}: $_" 'WARN' }
                     }
                 }
             }
@@ -2034,13 +2071,13 @@ function Start-GameWatcher {
             # every cycle so long sessions do not accumulate kernel handles or
             # trigger expensive full-process GC pauses.
             foreach ($procSnapshot in @($allProc)) {
-                try { $procSnapshot.Dispose() } catch { }
+                try { $procSnapshot.Dispose() } catch { Write-Log "Failed to dispose process snapshot: $_" 'WARN' }
             }
             foreach ($tp in @($transientProcs)) {
-                try { $tp.Dispose() } catch { }
+                try { $tp.Dispose() } catch { Write-Log "Failed to dispose transient process: $_" 'WARN' }
             }
             $transientProcs.Clear()
-            try { $transientProcs.Dispose() } catch { }
+            try { $transientProcs.Dispose() } catch { Write-Log "Failed to dispose transient process list: $_" 'WARN' }
             $allProc = @()
             $stopping = Wait-StopOrTimeout -Milliseconds $waitMs -StopEvent $StopEvent
             if ($stopping) {
@@ -2052,6 +2089,8 @@ function Start-GameWatcher {
         Update-BackgroundSilence -State $silenced -Journal $journal
         Stop-FrameGenerationTool -LaunchedByUs $fgByUs -ToolPid $fgPid
         $journal['fgToolPid'] = 0
+        Stop-MicEnhanceTool -LaunchedByUs $micByUs -ToolPid $micPid
+        $journal['micToolPid'] = 0
         Restore-NativeResolution           # never leave the screen scaled down
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
@@ -2075,4 +2114,5 @@ Export-ModuleMember -Function Enable-GamingPowerPlan, Disable-GameDVR, Set-Multi
     Set-TimerResolution, Clear-StandbyMemory, Invoke-ProcessBoost,
     Start-GameWatcher, Get-FreeRamMB, Get-GameProfile, Test-LowSpecHardware,
     Invoke-FrameGenerationTool, Stop-FrameGenerationTool,
+    Invoke-MicEnhanceTool, Stop-MicEnhanceTool,
     Initialize-FrameTimeDiagnostics, Sample-FrameTime, Log-FrameTimeStats, Get-PerfCounterMs

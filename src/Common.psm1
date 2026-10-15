@@ -32,6 +32,7 @@ try {
     # The script path is always available for normal execution; this fallback
     # keeps module import usable in constrained PowerShell hosts.
     $script:SuiteIdentity = 'default'
+    Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][WARN] Failed to compute suite identity: $_" -ForegroundColor Yellow
 }
 
 function Remove-SuiteLogs {
@@ -43,7 +44,10 @@ function Remove-SuiteLogs {
     try {
         Get-ChildItem -Path $script:LogDir -Filter 'suite_*.log' -File -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
-    } catch { }
+    } catch {
+        # Log cleanup failure but don't break startup
+        Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][WARN] Failed to clean old log files: $_" -ForegroundColor Yellow
+    }
 }
 
 Remove-SuiteLogs
@@ -56,7 +60,7 @@ $script:LogWriteCount = 0
 if (-not $Global:GamingPerfSuite_ExitHook) {
     $Global:GamingPerfSuite_ExitHook = $true
     Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
-        try { Close-SuiteLogWriter } catch { }
+        try { Close-SuiteLogWriter } catch { Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][WARN] Failed to close log writer on exit: $_" -ForegroundColor Yellow }
         Remove-Item -LiteralPath $logPathForExit -Force -ErrorAction SilentlyContinue
     } | Out-Null
 }
@@ -69,7 +73,7 @@ if (-not $Global:GamingPerfSuite_ExitHook) {
 function Close-SuiteLogWriter {
     $w = $Global:GamingPerfSuite_LogWriter
     if ($w) {
-        try { $w.Flush(); $w.Dispose() } catch { }
+        try { $w.Flush(); $w.Dispose() } catch { Write-Log "Failed to close log writer: $_" 'WARN' }
     }
     $Global:GamingPerfSuite_LogWriter = $null
     $Global:GamingPerfSuite_LogWriterPath = $null
@@ -119,7 +123,9 @@ function Limit-SuiteLogSize {
         [Array]::Copy($tail, 0, $combined, $hdr.Length, $tailLen)
         [System.IO.File]::WriteAllBytes($script:LogFile, $combined)
         $script:LogWriteCount = 0
-    } catch { }
+    } catch {
+        Write-Log "Failed to limit log size: $_" 'WARN'
+    }
 }
 
 function Write-Log {
@@ -144,7 +150,8 @@ function Write-Log {
         Limit-SuiteLogSize
     } catch {
         # The log file must never be able to break a session.
-        try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 } catch { }
+        try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 }
+        catch { Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][ERROR] Write-Log failed completely: $_" -ForegroundColor Red }
     }
 }
 
@@ -153,6 +160,7 @@ function Test-Administrator {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
         (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     } catch {
+        Write-Log "Test-Administrator failed: $_" 'WARN'
         return $false
     }
 }
@@ -238,7 +246,10 @@ function Get-LogPath {
 # and a named EventWaitHandle carries the stop signal (instant wake).
 # ------------------------------------------------------------
 $script:RuntimeDir = Join-Path $script:LogDir 'runtime'
-if (-not (Test-Path $script:RuntimeDir)) { New-Item -ItemType Directory -Path $script:RuntimeDir | Out-Null }
+if (-not (Test-Path $script:RuntimeDir)) {
+    try { New-Item -ItemType Directory -Path $script:RuntimeDir | Out-Null }
+    catch { Write-Log "Failed to create runtime directory: $_" 'WARN' }
+}
 
 function Get-WatcherStopEventName { "Global\GamingPerformanceSuite_${script:SuiteIdentity}_Stop" }
 function Get-WatcherMutexName     { "Global\GamingPerformanceSuite_${script:SuiteIdentity}_Instance" }
@@ -254,7 +265,7 @@ function New-WatcherStopEvent {
 function Open-OrCreateStopEvent {
     <# Opens the existing stop event. Never fabricates an event just to exist. #>
     try   { return [System.Threading.EventWaitHandle]::OpenExisting((Get-WatcherStopEventName)) }
-    catch { return $null }
+    catch { Write-Log "Open-OrCreateStopEvent failed: $_" 'WARN'; return $null }
 }
 
 function Wait-StopOrTimeout {
@@ -283,18 +294,16 @@ function New-WatcherInstanceGuard {
     try {
         $mutex = [System.Threading.Mutex]::new($true, (Get-WatcherMutexName), [ref]$createdNew)
         if (-not $createdNew) {
-            try { $mutex.Dispose() } catch { }
+            try { $mutex.Dispose() } catch { Write-Log "Failed to dispose mutex (not created new): $_" 'WARN' }
             $mutex = $null
         }
-    } catch {
-        $mutex = $null
-    }
+    } catch { Write-Log "New-WatcherInstanceGuard mutex creation failed: $_" 'WARN'; $mutex = $null }
 
     if ($null -eq $mutex) { return $null }
 
     $release = {
-        if ($mutex) { try { [void]$mutex.ReleaseMutex() } catch { } }
-        if ($mutex) { try { $mutex.Dispose() } catch { } }
+        if ($mutex) { try { [void]$mutex.ReleaseMutex() } catch { Write-Log "Failed to release mutex: $_" 'WARN' } }
+        if ($mutex) { try { $mutex.Dispose() } catch { Write-Log "Failed to dispose mutex: $_" 'WARN' } }
     }.GetNewClosure()
 
     $guard = [pscustomobject]@{ IsHeld = $true }
@@ -325,18 +334,18 @@ function Test-WatcherRunning {
     #>
     $m = $null
     try { $m = [System.Threading.Mutex]::OpenExisting((Get-WatcherMutexName)) }
-    catch { $m = $null }
+    catch { Write-Log "Test-WatcherRunning OpenExisting failed: $_" 'WARN'; $m = $null }
     if ($m) {
         try {
             if ($m.WaitOne(0)) {
-                try { [void]$m.ReleaseMutex() } catch { }
+                try { [void]$m.ReleaseMutex() } catch { Write-Log "Test-WatcherRunning ReleaseMutex failed: $_" 'WARN' }
                 $m.Dispose()
                 return $false
             }
             $m.Dispose()
             return $true
         } catch {
-            try { $m.Dispose() } catch { }
+            try { $m.Dispose() } catch { Write-Log "Test-WatcherRunning inner Dispose failed: $_" 'WARN' }
             $m = $null
         }
     }
@@ -380,7 +389,7 @@ function Get-WatcherJournal {
     $path = Get-WatcherJournalPath
     if (-not (Test-Path $path)) { return $null }
     try   { return ConvertFrom-Json (Get-Content $path -Raw) }
-    catch { return $null }
+    catch { Write-Log "Get-WatcherJournal failed to parse JSON: $_" 'WARN'; return $null }
 }
 
 function Clear-WatcherJournal {
@@ -455,10 +464,12 @@ function Repair-OrphanedWatcherState {
                 try {
                     $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
                     if ($p -and $p.PriorityClass -eq 'BelowNormal') { $p.PriorityClass = 'Normal' }
-                } catch { }
+                } catch {
+                    Write-Log "Recovery: failed to restore priority for PID ${procId}: $_" 'WARN'
+                }
             }
         }
-    } catch { }
+    } catch { Write-Log "Recovery: silenced apps restore failed: $_" 'ERROR' }
 
     # ---- 3. Fullscreen-optimization compat flags ------------------------
     try {
@@ -468,7 +479,7 @@ function Repair-OrphanedWatcherState {
                 -Name ([string]$path) -ErrorAction SilentlyContinue
         }
         if (@($flags).Count -gt 0) { Write-Log 'Fullscreen-optimization overrides cleared.' 'RECOVER' }
-    } catch { }
+    } catch { Write-Log "Recovery: FSO flags restore failed: $_" 'ERROR' }
 
     # ---- 4. Orphaned frame-generation tool ------------------------------
     try {
@@ -483,7 +494,22 @@ function Repair-OrphanedWatcherState {
                 Write-Log 'Orphaned frame-generation tool closed.' 'RECOVER'
             }
         }
-    } catch { }
+    } catch { Write-Log "Recovery: frame-gen tool cleanup failed: $_" 'ERROR' }
+
+    # ---- 4b. Orphaned microphone enhancement tool -------------------------
+    try {
+        $micPid = 0
+        [void][int]::TryParse("$([string](Get-StateField $j 'micToolPid'))", [ref]$micPid)
+        if ($micPid -gt 0) {
+            $mic = Get-Process -Id $micPid -ErrorAction SilentlyContinue
+            if ($mic) {
+                [void]$mic.CloseMainWindow()
+                Start-Sleep -Milliseconds 500
+                if (-not $mic.HasExited) { $mic.Kill() }
+                Write-Log 'Orphaned microphone enhancement tool closed.' 'RECOVER'
+            }
+        }
+    } catch { Write-Log "Recovery: mic-enhance tool cleanup failed: $_" 'ERROR' }
 
     # ---- 5. Network latency profile -------------------------------
     # The journal's `netLatency` node holds the original value of every
@@ -539,7 +565,7 @@ function Stop-BackgroundWatcher {
         $still = Get-Process -Id $watcherPid -ErrorAction SilentlyContinue
         if ($still) {
             Write-Log "Watcher did not exit in time; terminating PID $watcherPid..." 'WARN'
-            try { $still.Kill() } catch { }
+            try { $still.Kill() } catch { Write-Log "Failed to kill watcher process: $_" 'ERROR' }
             Start-Sleep -Milliseconds 400
         }
     }

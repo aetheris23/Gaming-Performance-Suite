@@ -1,0 +1,666 @@
+# ============================================================
+#  Main.ps1 - Gaming Performance Suite entry point
+#
+#  Interactive menu:      Start-GamingSuite.bat
+#  Hidden background run: Start-Watcher-Hidden.bat
+#                         (equivalent: powershell -File src\Main.ps1 -BackgroundWatch)
+#  Stop the background watcher at any time: Stop-GamingSuite.bat
+#
+#  The watcher journals every change it makes and auto-repairs
+#  any unclean shutdown (kill / crash / closed console) on the
+#  next start or stop - see Common.psm1 Repair-OrphanedWatcherState.
+# ============================================================
+
+param([switch]$BackgroundWatch)
+
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSCommandPath
+
+Import-Module (Join-Path $root 'Common.psm1')    -Force
+Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
+Import-Module (Join-Path $root 'GameBoost.psm1') -Force
+Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
+Import-Module (Join-Path $root 'NetTune.psm1')    -Force
+Import-Module (Join-Path $root 'MicEnhance.psm1') -Force
+
+# Load user config with safe fallbacks
+$cfgPath = Join-Path $root 'Config.ps1'
+$cfg = if (Test-Path $cfgPath) { & $cfgPath } else { @{} }
+
+# ---- Apply usage profile (if not 'Custom') ----
+function Apply-Profile {
+    param([hashtable]$Cfg)
+    $active = if ($Cfg.ContainsKey('ActiveProfile')) { [string]$Cfg['ActiveProfile'] } else { 'Custom' }
+    if ($active -eq 'Custom' -or -not $Cfg.ContainsKey('Profiles')) { return $Cfg }
+    $profiles = $Cfg['Profiles']
+    if (-not $profiles.ContainsKey($active)) {
+        Write-Log ("Profile '$active' not found in Config.ps1 Profiles; falling back to Custom.") 'WARN'
+        return $Cfg
+    }
+    $profile = $profiles[$active]
+    Write-Log ("Applying usage profile: $active") 'ACTION'
+    # Merge profile values INTO the config (profile wins over individual settings)
+    foreach ($key in $profile.Keys) {
+        if ($key -ne 'Custom') {
+            $Cfg[$key] = $profile[$key]
+        }
+    }
+    return $Cfg
+}
+
+$cfg = Apply-Profile $cfg
+
+$gameNames  = if ($cfg['GameProcesses'])      { $cfg['GameProcesses'] }      else { @('VALORANT-Win64','pcsx2','cs2') }
+$activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGameOnly'] } else { $true }
+$pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 15 }
+$profOv     = if ($cfg['ProfileOverrides'])   { $cfg['ProfileOverrides'] }   else { @{} }
+$neverWatch = if ($cfg['NeverWatchProcesses']) { @($cfg['NeverWatchProcesses']) } else { @() }
+
+# Stutter-safe standby-purge policy (see Config.ps1 for details)
+$idleSecs     = if ($cfg['IdlePollSeconds'])             { [int]$cfg['IdlePollSeconds']             }             else { 35 }
+$extIdleSecs  = if ($cfg['ExtendedIdlePollSeconds'])      { [int]$cfg['ExtendedIdlePollSeconds']      }      else { 90 }
+$heartbeatMin = if ($cfg['IdleHeartbeatMinutes'])         { [int]$cfg['IdleHeartbeatMinutes'] }         else { 5 }
+$critFloorMB  = if ($cfg['CriticalRamFloorMB'])          { [int]$cfg['CriticalRamFloorMB'] }          else { 768 }
+$purgeCoolSec = if ($cfg['StandbyPurgeCooldownSeconds']) { [int]$cfg['StandbyPurgeCooldownSeconds'] } else { 900 }
+$purgeLaunch  = if ($null -ne $cfg['PurgeOnGameLaunch']) { [bool]$cfg['PurgeOnGameLaunch'] }          else { $true }
+$midGamePurge = if ($null -ne $cfg['AllowMidGamePurge'])  { [bool]$cfg['AllowMidGamePurge'] }          else { $false }
+
+# Pre-game optimization (applies tweaks before game process appears)
+$preGameOpt   = if ($null -ne $cfg['PreGameOptimization'])   { [bool]$cfg['PreGameOptimization'] }   else { $true }
+$prePurge     = if ($null -ne $cfg['PrePurgeBeforeLaunch'])  { [bool]$cfg['PrePurgeBeforeLaunch'] }  else { $true }
+
+$resSettings = @{
+    ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
+    PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
+    Stretched         = if ($null -ne $cfg['StretchedResolution']) { [bool]$cfg['StretchedResolution'] } else { $false }
+    Tiers             = if ($cfg['ResolutionTiers'])      { $cfg['ResolutionTiers'] }      else { @{ Low = 55; Medium = 75; High = 88; Native = 0 } }
+    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Native'; Android = 'Medium'; Default = 'Medium' } }
+    GameTierOverrides = if ($cfg['GameTierOverrides'])    { $cfg['GameTierOverrides'] }    else { @{} }
+}
+# Session lifecycle: after the last monitored game closes, the watcher
+# undoes every change and exits completely instead of staying resident
+# and polling for a "next game" in the background.
+$exitWhenGameEnds = if ($null -ne $cfg['ExitWhenGameSessionEnds']) { [bool]$cfg['ExitWhenGameSessionEnds'] } else { $true }
+$fgSettings = if ($cfg['FrameGeneration']) { $cfg['FrameGeneration'] } else { @{ Enabled = $false; ToolPath = '' } }
+$lgsCfg     = if ($cfg['LegacyGpuSupport']) { $cfg['LegacyGpuSupport'] } else { @{ Mode = 'Auto' } }
+$universalCfg = @{}
+if ($cfg.ContainsKey('UniversalWatch')) { $universalCfg['Enabled'] = [bool]$cfg['UniversalWatch'] }
+if ($cfg.ContainsKey('ImmersiveWindowThreshold')) { $universalCfg['ImmersiveWindowThreshold'] = [double]$cfg['ImmersiveWindowThreshold'] }
+$lowSpecCfg = if ($cfg['LowSpecMode'])         { $cfg['LowSpecMode'] }         else { @{ Mode = 'Auto' } }
+$adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      else { @{ Enabled = $false } }
+# Network latency / packet-loss profile. Absent (or disabled) means the
+# suite never touches the network stack - see Config.ps1 for what each
+# switch does and what it deliberately cannot do.
+$netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
+$frameDiagCfg = if ($cfg['FrameTimeDiagnostics']) { $cfg['FrameTimeDiagnostics'] } else { @{ Enabled = $false } }
+$micCfg = if ($cfg['MicrophoneEnhancement']) { $cfg['MicrophoneEnhancement'] } else { @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true } }
+
+# ---------------- low-spec auto-detection + resolution ----------------
+function Resolve-LowSpecSettings {
+    <#
+        Returns the EFFECTIVE low-spec configuration, honoring the user's
+        explicit choice first, else auto-detecting weak hardware. The trusted
+        'Enabled' key in the returned hashtable is the final resolved value so
+        every downstream reader (watcher, status, legacy resolution) behaves
+        consistently. Never throws.
+    #>
+    $mode = 'Auto'
+    if ($null -ne $lowSpecCfg['Mode'] -and "$($lowSpecCfg['Mode'])" -ne '') {
+        $mode = [string]$lowSpecCfg['Mode']
+    }
+
+    # Explicit manual override (legacy 'Enabled' key) wins over auto-detect.
+    $enabled = $null
+    if ($lowSpecCfg.ContainsKey('Enabled') -and $null -ne $lowSpecCfg['Enabled']) {
+        $enabled = [bool]$lowSpecCfg['Enabled']
+    }
+
+    $isLowSpec = $false
+    if ($null -ne $enabled) {
+        $isLowSpec = [bool]$enabled
+        Write-Log ("LowSpecMode: manual override Enabled={0} (Mode '{1}')." -f $isLowSpec, $mode) 'INFO'
+    } else {
+        switch ($mode.ToLowerInvariant()) {
+            'on'  { $isLowSpec = $true;  Write-Log 'LowSpecMode forced ON by config (Mode=On).' 'INFO' }
+            'off' { $isLowSpec = $false; Write-Log 'LowSpecMode forced OFF by config (Mode=Off).' 'INFO' }
+            default {
+                try {
+                    $sig = Test-LowSpecHardware
+                    $isLowSpec = [bool]$sig.IsLowSpec
+                    if ($isLowSpec) {
+                        $gpuReason = @()
+                        if ($sig.LegacyGpu) { $gpuReason += 'legacy GPU' }
+                        if ($sig.WeakModernGpu) { $gpuReason += 'weak modern iGPU (HD 500/600/UHD 600 series)' }
+                        Write-Log ("LowSpecMode AUTO-DETECTED: {0} logical CPUs @ ~{1} MHz, RAM {2} MB, {3} -> enabling low-spec mode automatically." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB, ($gpuReason -join ' + ')) 'WARN'
+                    } else {
+                        Write-Log ("Hardware check: not low-spec ({0} logical CPUs, {1} MHz, RAM {2} MB) - LowSpecMode stays off." -f $sig.Threads, $sig.ClockMHz, $sig.RamMB) 'INFO'
+                    }
+                } catch {
+                    Write-Log ("Low-spec auto-detection failed ({0}); LowSpecMode off." -f $_.Exception.Message) 'WARN'
+                    $isLowSpec = $false
+                }
+            }
+        }
+    }
+
+    # Build the effective table: resolved Enabled + user's sub-settings.
+    $eff = @{
+        Enabled                = $isLowSpec
+        SkipResolutionSwitch   = $false
+        SkipStandbyPurge       = $false
+        SkipBackgroundSilence  = $false
+        SkipFrameGenBridge     = $true
+        ReducedPolling         = $true
+        SkipHags               = $true
+        MaxCpuCores            = 0
+        AggressiveTimer        = $false
+    }
+    foreach ($k in @('SkipResolutionSwitch','SkipStandbyPurge','SkipBackgroundSilence',
+                     'SkipFrameGenBridge','ReducedPolling',
+                     'SkipHags','AggressiveTimer')) {
+        if ($null -ne $lowSpecCfg[$k]) { $eff[$k] = [bool]$lowSpecCfg[$k] }
+    }
+    if ($null -ne $lowSpecCfg['MaxCpuCores']) { $eff['MaxCpuCores'] = [int]$lowSpecCfg['MaxCpuCores'] }
+    return $eff
+}
+
+$lowSpecEff = Resolve-LowSpecSettings
+
+# Apply LowSpec polling overrides early
+if ($lowSpecEff['Enabled']) {
+    if ($lowSpecEff['ReducedPolling']) {
+        $pollSecs = [Math]::Max($pollSecs, 15)
+        $idleSecs = [Math]::Max($idleSecs, 35)
+    }
+}
+
+# ---------------- legacy GPU profile resolution ----------------
+function Resolve-LegacySettings {
+    <#
+        Combines Config.ps1 LegacyGpuSupport with runtime GPU detection
+        (src/GpuDetect.psm1). Mode 'auto' -> Test-LegacyGpuPresent decides;
+        'on' / 'off' force the outcome. Explicit per-key values in the
+        config always win over what Auto would pick.
+    #>
+    $mode = 'auto'
+    if ($lgsCfg['Mode']) { $mode = ([string]$lgsCfg['Mode']).ToLowerInvariant() }
+
+    $isLegacy = $false
+    try {
+        if     ($mode -eq 'on')  { $isLegacy = $true }
+        elseif ($mode -ne 'off') { $isLegacy = Test-LegacyGpuPresent }
+    } catch { Write-Log "Legacy GPU detection failed: $_" 'WARN' }
+
+    # Also treat LowSpecMode's SkipHags as legacy signal
+    $lowSpecHags = $false
+    if ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipHags']) {
+        $lowSpecHags = $true
+    }
+
+    $eff = @{
+        IsLegacy                       = $isLegacy
+        SkipResolutionSwitch           = $isLegacy          # old drivers can hang on mode changes
+        DisableFullscreenOptimizations = $isLegacy          # FSO stutters on pre-WDDM2.x stacks
+        EnableHags                     = (-not $isLegacy -and -not $lowSpecHags)
+        ScalePercentOverride           = 0
+    }
+    foreach ($k in @('SkipResolutionSwitch','DisableFullscreenOptimizations','EnableHags')) {
+        if ($null -ne $lgsCfg[$k]) { $eff[$k] = [bool]$lgsCfg[$k] }
+    }
+    if ($lgsCfg['ScalePercentOverride'] -and [int]$lgsCfg['ScalePercentOverride'] -gt 0) {
+        $eff.ScalePercentOverride = [int]$lgsCfg['ScalePercentOverride']
+    }
+    return $eff
+}
+
+# ---------------- Power-plan tuning (menu option 1) ------------------
+# Battery-aware by default: the aggressive CPU/PCIe settings only apply on
+# AC. Flip the two switches if you want them on battery too.
+$powerCfg   = if ($cfg['PowerOptimization'])        { $cfg['PowerOptimization'] }        else { @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false } }
+
+# ---------------- shared watcher invocation ----------------
+function Invoke-Watcher {
+    param(
+        [AllowNull()][System.Threading.EventWaitHandle]$StopEvent = $null,
+        [switch]$TrackPidFile
+    )
+    # Single-instance guard: a second watcher would fight itself.
+    # Named mutex on Windows/modern .NET, exclusive file lock elsewhere.
+    $guard = New-WatcherInstanceGuard
+    if (-not $guard) {
+        Write-Log 'A game watcher is already running. Use Stop-GamingSuite.bat first.' 'WARN'
+        return
+    }
+    try {
+        # PID file only AFTER we own the instance mutex - writing it any
+        # earlier let a rejected second launcher overwrite the live PID.
+        if ($TrackPidFile) {
+            Set-Content -Path (Get-WatcherPidFile) -Value $PID -Encoding ASCII
+        }
+        $leg = Resolve-LegacySettings
+        if ($leg.IsLegacy) {
+            Write-Log 'Legacy GPU profile ACTIVE (older integrated/discrete hardware detected or forced).' 'WARN'
+            if ($leg.ScalePercentOverride -gt 0) {
+                Write-Log ("Legacy scale override: render target width {0}% of native." -f $leg.ScalePercentOverride) 'INFO'
+                $resSettings.ScalePercent = [int]$leg.ScalePercentOverride
+            }
+        } else {
+            Write-Log 'GPU profile: standard (no legacy adjustments).' 'INFO'
+        }
+
+        Start-GameWatcher -GameNames $gameNames -PollSeconds $pollSecs `
+            -ActiveGameOnly:([bool]$activeGameOnly) `
+            -IdlePollSeconds $idleSecs -ExtendedIdlePollSeconds $extIdleSecs `
+            -IdleHeartbeatMinutes $heartbeatMin `
+            -CriticalRamFloorMB $critFloorMB -PurgeCooldownSeconds $purgeCoolSec `
+            -PurgeOnGameLaunch:([bool]$purgeLaunch) -AllowMidGamePurge:([bool]$midGamePurge) `
+            -ProfileOverrides $profOv `
+            -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
+            -MicEnhanceSettings $micCfg `
+            -LegacySettings $leg -LowSpecSettings $lowSpecEff `
+            -UniversalSettings $universalCfg `
+            -AdaptiveTuningSettings $adaptiveCfg `
+            -NetworkSettings $netCfg `
+            -FrameTimeDiagnosticsSettings $frameDiagCfg `
+            -NeverWatchProcesses $neverWatch `
+            -PreGameOptimization:([bool]$preGameOpt) `
+            -PrePurgeBeforeLaunch:([bool]$prePurge) `
+            -ExitWhenGameSessionEnds:([bool]$exitWhenGameEnds) `
+            -StopEvent $StopEvent
+    } finally {
+        if ($TrackPidFile) {
+            Remove-Item (Get-WatcherPidFile) -Force -ErrorAction SilentlyContinue
+        }
+        try { $guard.Release() } catch { Write-Log "Failed to release watcher instance guard: $_" 'WARN' }
+    }
+}
+
+# ---------------- background (hidden) session ----------------
+if ($BackgroundWatch) {
+    try {
+        $stopEvt = New-WatcherStopEvent
+        Write-Log ("Background watcher starting (PID {0})." -f $PID) 'ACTION'
+        Invoke-Watcher -StopEvent $stopEvt -TrackPidFile
+    } catch {
+        Write-Log $_.Exception.Message 'ERROR'
+    } finally {
+        if ($stopEvt) { $stopEvt.Dispose() }
+        Remove-SuiteLogs
+    }
+    exit 0
+}
+
+# ---------------- interactive mode ----------------
+function Get-OsStatusLine {
+    <#
+        Lightweight one-line OS label from a SINGLE registry read - the old
+        WinDetect module (flavor heuristics + powercfg/netsh probes) has been
+        removed because the background watcher was importing it on every start.
+    #>
+    try {
+        $nv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $k  = Get-ItemProperty -Path $nv -ErrorAction SilentlyContinue
+        if (-not $k) { return 'Windows' }
+        $product = if ($k.PSObject.Properties['ProductName']) { [string]$k.ProductName } else { 'Windows' }
+        $build   = if ($k.PSObject.Properties['CurrentBuildNumber']) { [string]$k.CurrentBuildNumber } else { '' }
+        if ($k.PSObject.Properties['UBR'] -and "$($k.UBR)" -match '^\d+$') { $build = "$build.$([int]$k.UBR)" }
+        $feat    = if ($k.PSObject.Properties['DisplayVersion']) { [string]$k.DisplayVersion } else { '' }
+        if (-not $feat) { $feat = '' }
+        $line = $product.Trim()
+        if ($feat)  { $line += " $feat" }
+        if ($build) { $line += " (build $build)" }
+        return $line
+    } catch { return 'Windows' }
+}
+
+function Show-Banner {
+    Clear-Host
+    Write-Host '=====================================================' -ForegroundColor DarkCyan
+    Write-Host '        GAMING PERFORMANCE SUITE  v3.2'                -ForegroundColor Cyan
+    Write-Host '  FPS stability | Dynamic res | Universal windowed mode' -ForegroundColor Cyan
+    Write-Host '  Windows 10/11 + custom builds | Low-spec optimized'   -ForegroundColor Cyan
+    Write-Host '=====================================================' -ForegroundColor DarkCyan
+    $admin = Test-Administrator
+    $tag = if ($admin) { 'Administrator' } else { 'STANDARD USER (some actions will fail)' }
+    Write-Host (" Session: {0} | Log: {1}" -f $tag, (Get-LogPath)) -ForegroundColor DarkGray
+    try {
+        Write-Host (" OS: {0}" -f (Get-OsStatusLine)) -ForegroundColor DarkGray
+    } catch { Write-Host " OS: (status unavailable)" -ForegroundColor DarkGray }
+    try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { Write-Host " GPU: (status unavailable)" -ForegroundColor DarkGray }
+
+    # Show low-spec mode
+    if ($lowSpecEff['Enabled']) {
+        Write-Host (' Low-spec mode: ACTIVE - minimal resource usage (auto-detected)') -ForegroundColor Yellow
+    }
+
+    # ---- WATCHER STATUS: prominent warning when not running ----
+    $watcherAlive = $false
+    try { $watcherAlive = Test-WatcherAlive } catch { Write-Log "Test-WatcherAlive failed: $_" 'WARN' }
+    if ($watcherAlive) {
+        Write-Host (' Game watcher running.') -ForegroundColor Green
+    } else {
+        Write-Host ''
+        Write-Host ' !!! WARNING: Game watcher is not running !!' -ForegroundColor Red -BackgroundColor Black
+        Write-Host ' Games will NOT be auto-optimized. Start the watcher' -ForegroundColor Red
+        Write-Host ' with option 3 below, or run Start-Watcher-Hidden.bat' -ForegroundColor Red
+        Write-Host ''
+    }
+
+    Write-Host ''
+}
+
+function Show-Menu {
+    Write-Host ' --- FPS STABILITY ------------------------------------' -ForegroundColor Yellow
+    Write-Host '  1) Apply FULL one-click game optimization'
+    Write-Host '  2) Purge standby memory NOW (fixes hour-2 stutters)'
+    Write-Host ' --- GAME WATCHER (detect -> scale down -> boost) ------' -ForegroundColor Yellow
+    Write-Host '  3) Start watcher HIDDEN in background (recommended)'
+    Write-Host '  4) Start watcher in THIS window (Ctrl+C to stop)'
+    Write-Host '  5) STOP background watcher'
+    Write-Host ' --- STATUS --------------------------------------------' -ForegroundColor Yellow
+    Write-Host '  6) Show watcher / display / GPU / network status'
+    Write-Host ' --- NETWORK ---------------------------------------------' -ForegroundColor Yellow
+    Write-Host '  7) Revert network tuning (option 1 / watcher settings)'
+    Write-Host ' -------------------------------------------------------' -ForegroundColor Yellow
+    Write-Host '  Q) Quit'
+    Write-Host ''
+}
+
+function Get-JournaledNetworkState {
+    <#
+        The `netLatency` node of the recovery journal as a hashtable, or
+        $null when the network profile is not currently applied. The journal
+        is shared with the watcher, so it is only ever read here - writing
+        is left to whoever owns the session.
+    #>
+    $raw = Get-WatcherJournal
+    if (-not $raw) { return $null }
+    $j = ConvertTo-HashtableDeep $raw
+    return (Get-StateField $j 'netLatency')
+}
+
+function Invoke-NetworkProfileApply {
+    <#
+        Applies the network latency profile from the menu and records the
+        original values in the SAME recovery journal the watcher uses, so an
+        unclean exit (closed console, killed process, power loss) is repaired
+        by the next watcher start or by Stop-GamingSuite.bat.
+
+        When a watcher is alive it owns that journal and the network profile
+        for the whole session, so nothing is written over its back.
+    #>
+    if (Test-WatcherAlive) {
+        Write-Log 'Watcher is running and owns the network profile for the session - no separate profile applied.' 'INFO'
+        return $true
+    }
+    if (Get-WatcherJournal) {
+        Write-Log 'Repairing the previous session before applying network settings.' 'RECOVER'
+        Repair-OrphanedWatcherState | Out-Null
+    }
+
+    $state = @{}
+    Enable-NetworkLatencyProfile -Settings $netCfg -JournalState $state
+    $rec = $state['netLatency']
+    if (-not $rec) {
+        Write-Log 'Network profile not applied (disabled in Config.ps1, or no connected adapter).' 'INFO'
+        return $false
+    }
+    Save-WatcherJournal -State $state
+    Write-Log 'Network profile applied and journalled. Option 7 reverts it; a watcher start/stop also repairs it automatically.' 'OK'
+    return $true
+}
+
+function Invoke-NetworkProfileRevert {
+    <# Reverts the menu-applied network profile, exactly, from its journal. #>
+    $raw = Get-WatcherJournal
+    $net = $null
+    $j = $null
+    if ($raw) {
+        $j = ConvertTo-HashtableDeep $raw
+        $net = Get-StateField $j 'netLatency'
+    }
+    if ($net) {
+        Undo-NetworkLatencyProfile -JournalState $j
+        if ($j -is [hashtable]) { $null = $j.Remove('netLatency') }
+        # A live watcher still owns the rest of the journal - keep it.
+        if (Test-WatcherAlive) { Save-WatcherJournal -State $j }
+        else { Clear-WatcherJournal }
+        return
+    }
+    # No journal: either nothing was applied, or it was applied by an older
+    # build. Fall back to removing exactly the values this profile manages.
+    Undo-NetworkLatencyProfile -JournalState $null -Settings $netCfg -RemoveKnownDefaults
+    if (-not (Test-WatcherAlive)) { Clear-WatcherJournal }
+}
+
+function Invoke-FullOptimization {
+    $leg = Resolve-LegacySettings
+    Write-Log '=== FULL OPTIMIZATION: starting ===' 'ACTION'
+
+    # Battery-aware power profile: aggressive CPU/PCIe values only on AC by
+    # default (see Config.ps1 > PowerOptimization to force on battery too).
+    $p = if ($powerCfg -and $powerCfg['Enabled']) { $powerCfg } else { @{} }
+    Enable-GamingPowerPlan -ForceMaxCpuOnBattery:([bool]$p['ForceMaxCpuOnBattery']) -ForcePcieOffOnBattery:([bool]$p['ForcePcieOffOnBattery'])
+
+    Disable-GameDVR
+    Set-MultimediaTweaks -EnableHags:([bool]$leg.EnableHags)
+    Set-TimerResolution
+    if (-not ($lowSpecEff['Enabled'] -and $lowSpecEff['SkipStandbyPurge'])) {
+        Clear-StandbyMemory
+    }
+    # Network latency/packet-loss profile: applied here for a machine that
+    # does NOT run the watcher. With the watcher running, option 3 already
+    # handles this per session, so this only fills in the rest of the tweaks.
+    try { Invoke-NetworkProfileApply | Out-Null }
+    catch { Write-Log "Network profile skipped: $($_.Exception.Message)" 'WARN' }
+    if ($leg.EnableHags) {
+        Write-Log '=== FULL OPTIMIZATION complete. Reboot once for HAGS. ===' 'OK'
+    } else {
+        Write-Log '=== FULL OPTIMIZATION complete (legacy-safe: HAGS untouched). ===' 'OK'
+    }
+}
+
+function Test-WatcherAlive {
+    # Robust liveness: probes the named instance mutex (falling back to the
+    # pid file) - not just the pid file, which a recovery could have removed.
+    return [bool](Test-WatcherRunning)
+}
+
+function Show-Status {
+    $alive = Test-WatcherAlive
+    $state = if ($alive) { 'RUNNING (background)' } else { 'stopped' }
+    Write-Log "Watcher state: $state" 'INFO'
+    if (-not $alive) {
+        Write-Log '!!! Watcher is NOT running - games will NOT be auto-optimized !!!' 'ERROR'
+        Write-Log 'Start it with option 3 or run Start-Watcher-Hidden.bat' 'WARN'
+    }
+    if (Get-WatcherJournal) {
+        Write-Log 'Recovery journal present: last session ended uncleanly; it will be repaired on next watcher start.' 'WARN'
+    }
+    try {
+        $mode = Get-CurrentDisplayMode
+        if ($mode) {
+            $bppStr = if ($mode.ContainsKey('Bits')) { " ({0} bpp)" -f $mode.Bits } else { '' }
+            Write-Log ("Display: {0}x{1} @ {2} Hz{3}" -f $mode.Width, $mode.Height, $mode.Frequency, $bppStr) 'INFO'
+        } else {
+            Write-Log 'Display: current mode could not be read (user32 reports none).' 'INFO'
+        }
+    } catch { Write-Log "Failed to get display mode: $_" 'WARN' }
+    try {
+        $gpus = @(Get-GpuInfo)
+        if ($gpus.Count -eq 0) {
+            Write-Log 'GPU: none detected' 'WARN'
+        }
+        foreach ($gpu in $gpus) {
+            $vram = if ($null -ne $gpu.DedicatedMB) { ", $($gpu.DedicatedMB) MB VRAM" } else { '' }
+            $drv  = if ($gpu.DriverVersion)         { ", driver $($gpu.DriverVersion)" } else { '' }
+            Write-Log ("GPU [{0}] {1}: {2} ({3}{4}{5})" -f `
+                $gpu.Index, $gpu.Type, $gpu.Name, $gpu.Vendor, $vram, $drv) 'INFO'
+        }
+    } catch { Write-Log "Failed to get GPU info: $_" 'WARN' }
+    $fg = if ($fgSettings['Enabled']) { "enabled -> $($fgSettings['ToolPath'])" } else { 'disabled (enable in Config.ps1)' }
+    Write-Log "Frame generation: $fg" 'INFO'
+
+    # ---- resolution tiers summary --------------------------------------
+    $tierStr = ''
+    if ($resSettings['Tiers'] -is [hashtable]) {
+        $tierStr = (@($resSettings['Tiers'].GetEnumerator() | Sort-Object { $_.Value } |
+            ForEach-Object { "$($_.Key)=$($_.Value)%" }) -join ', ')
+    }
+    $profTierStr = ''
+    if ($resSettings['ProfileTiers'] -is [hashtable]) {
+        $profTierStr = (@($resSettings['ProfileTiers'].GetEnumerator() |
+            ForEach-Object { "$($_.Key)->$($_.Value)" }) -join ', ')
+    }
+    Write-Log ("Resolution tiers: {0}  [default {1}%; per-profile: {2}]" -f `
+        $(if ($tierStr) { $tierStr } else { "$($resSettings.ScalePercent)% (single mode)" }), `
+        $resSettings.ScalePercent, $(if ($profTierStr) { $profTierStr } else { 'default' })) 'INFO'
+    Write-Log ("Integer scaling preferred: {0}" -f $resSettings.PreferIntegerScale) 'INFO'
+    Write-Log ("Stretched resolution: {0}" -f $(if ($resSettings.Stretched) { 'ON - fullscreen fill (FPS stretch) even across aspect ratios' } else { 'OFF - same-aspect only' })) 'INFO'
+
+    # ---- universal watch summary ---------------------------------------
+    $univOn = $false
+    if ($universalCfg -and $universalCfg.ContainsKey('Enabled')) { $univOn = [bool]$universalCfg['Enabled'] }
+    if ($univOn) {
+        $immT = 0.90
+        if ($universalCfg.ContainsKey('ImmersiveWindowThreshold')) { $immT = [double]$universalCfg['ImmersiveWindowThreshold'] }
+        Write-Log ("Universal watch: ON - any immersive foreground game/video window is optimized (threshold {0:P0} of its monitor)" -f $immT) 'INFO'
+    } else {
+        Write-Log 'Universal watch: off (watcher targets the configured game list only)' 'INFO'
+    }
+
+    try {
+        $leg = Resolve-LegacySettings
+        $lgState = if ($leg.IsLegacy) { 'ACTIVE (legacy-safe tweaks)' } else { 'off (standard profile)' }
+        Write-Log "Legacy GPU support: $lgState" 'INFO'
+    } catch { Write-Log "Failed to resolve legacy settings: $_" 'WARN' }
+
+    # ---- low-spec mode summary ------------------------------------------
+    if ($lowSpecEff['Enabled']) {
+        $sig = Test-LowSpecHardware
+        $gpuReason = @()
+        if ($sig.LegacyGpu) { $gpuReason += 'legacy GPU' }
+        if ($sig.WeakModernGpu) { $gpuReason += 'weak modern iGPU (HD 500/600/UHD 600 series)' }
+        $reason = if ($gpuReason) { $gpuReason -join ' + ' } else { 'config forced' }
+        Write-Log ("Low-spec mode: ACTIVE ({0})" -f $reason) 'WARN'
+        Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
+        Write-Log ("  Pre-game optimization: {0}" -f $(if ($preGameOpt) { 'enabled' } else { 'disabled' })) 'INFO'
+        Write-Log ("  Pre-launch purge: {0}" -f $(if ($prePurge) { 'enabled' } else { 'disabled' })) 'INFO'
+    } else {
+        Write-Log 'Low-spec mode: off (hardware not detected as low-spec)' 'INFO'
+        Write-Log ("  Polling: {0}s gaming / {1}s idle / {2}s extended idle" -f $pollSecs, $idleSecs, $extIdleSecs) 'INFO'
+    }
+    Write-Log ("  Idle heartbeat: every {0} min" -f $heartbeatMin) 'INFO'
+
+    # ---- adaptive mid-game tuning status ---------------------------
+    $adaptiveOn = if ($adaptiveCfg -and $adaptiveCfg['Enabled']) { [bool]$adaptiveCfg['Enabled'] } else { $false }
+    if ($adaptiveOn) {
+        $aFloor = if ($adaptiveCfg['AdaptivePurgeFloor']) { [int]$adaptiveCfg['AdaptivePurgeFloor'] } else { 10 }
+        $aCool  = if ($adaptiveCfg['PressureCooldownSec']) { [int]$adaptiveCfg['PressureCooldownSec'] } else { 60 }
+        $aRe    = if ($adaptiveCfg['ReassertPriorities']) { [bool]$adaptiveCfg['ReassertPriorities'] } else { $true }
+        Write-Log ("Adaptive mid-game tuning: ACTIVE (purge floor {0}% RAM, cooldown {1}s, priority re-assert {2})" -f $aFloor, $aCool, $(if ($aRe) { 'on' } else { 'off' })) 'INFO'
+    } else {
+        Write-Log 'Adaptive mid-game tuning: disabled in Config.ps1' 'INFO'
+    }
+
+    # ---- frame-time diagnostics status ------------------------------
+    $ftdOn = $false
+    if ($frameDiagCfg -and $frameDiagCfg.ContainsKey('Enabled')) { $ftdOn = [bool]$frameDiagCfg['Enabled'] }
+    if ($ftdOn) {
+        $logInt = if ($frameDiagCfg.ContainsKey('LogIntervalSeconds')) { [int]$frameDiagCfg['LogIntervalSeconds'] } else { 30 }
+        $maxSamp = if ($frameDiagCfg.ContainsKey('MaxSamples')) { [int]$frameDiagCfg['MaxSamples'] } else { 10000 }
+        Write-Log ("Frame-time diagnostics: ENABLED (log every {0}s, buffer {1} samples)" -f $logInt, $maxSamp) 'INFO'
+    } else {
+        Write-Log 'Frame-time diagnostics: disabled in Config.ps1' 'INFO'
+    }
+
+    # ---- network link + latency profile status -------------------
+    $netOn = $false
+    if ($netCfg -and $netCfg.ContainsKey('Enabled')) { $netOn = [bool]$netCfg['Enabled'] }
+    try {
+        $link = Get-NetworkLinkStatus -Refresh
+        $kind = [string](Get-StateField $link 'ConnectionType')
+        Write-Log ("Network: {0} link" -f $kind) 'INFO'
+        foreach ($a in @(Get-StateField $link 'Adapters')) {
+            $name = [string](Get-StateField $a 'Name')
+            $speed = [string](Get-StateField $a 'LinkSpeed')
+            $marks = @()
+            if (Get-StateField $a 'IsWireless') { $marks += 'wireless' }
+            if (Get-StateField $a 'IsDefault')   { $marks += 'default route' }
+            $err = [long](Get-StateField $a 'RxErrors')
+            $dis = [long](Get-StateField $a 'RxDiscards')
+            $tdis = [long](Get-StateField $a 'TxDiscards')
+            $bad = ''
+            if ($err -gt 0 -or $dis -gt 0 -or $tdis -gt 0) {
+                $bad = (' - LOCAL loss: {0} RX errors / {1} RX discards / {2} TX discards since boot' -f $err, $dis, $tdis)
+            }
+            Write-Log ("  [{0}] {1} ({2}){3}" -f $(if ($marks) { $marks -join ', ' } else { 'up' }), $name, $(if ($speed) { $speed } else { 'link speed unknown' }), $bad) 'INFO'
+        }
+        $netRec = Get-JournaledNetworkState
+        if ($netRec) {
+            Write-Log ("Network latency profile: ACTIVE{0} - reverted when the session ends or option 7 runs." -f $(if (Get-StateField $netRec 'ConnectionType') { " ($([string](Get-StateField $netRec 'ConnectionType')))" } else { '' })) 'OK'
+        } elseif ($netOn) {
+            Write-Log 'Network latency profile: not applied (applied per session by the watcher, or with option 1).' 'INFO'
+        } else {
+            Write-Log 'Network latency profile: DISABLED in Config.ps1.' 'INFO'
+        }
+    } catch {
+        Write-Log "Network status unavailable: $($_.Exception.Message)" 'WARN'
+    }
+
+    # ---- platform info ------------------------------------------
+    Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
+    try {
+        Write-Log ("OS: {0}" -f (Get-OsStatusLine)) 'INFO'
+    } catch { Write-Log "Failed to get OS status: $_" 'WARN' }
+}
+
+function Wait-MenuKey {
+    Write-Host 'Press Enter to return to the menu...' -ForegroundColor DarkGray
+    Read-Host | Out-Null
+}
+
+# ---------------- main loop ----------------
+try {
+    :menu while ($true) {
+        Show-Banner
+        Show-Menu
+        switch (Read-Host 'Select an option') {
+        '1' { try { Invoke-FullOptimization } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '2' { try { Clear-StandbyMemory } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '3' {
+            try {
+                if (Test-WatcherAlive) {
+                    Write-Log 'Watcher already running in background.' 'WARN'
+                } else {
+                    Write-Log 'Launching hidden background watcher...' 'ACTION'
+                    Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @(
+                        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                        '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
+                    )
+                    # Wait for the watcher to announce itself (instance mutex /
+                    # pid file) instead of a fixed 1s guess - module import and
+                    # GPU detection can take a moment on slower machines.
+                    $deadline = [datetime]::UtcNow.AddSeconds(8)
+                    $launched = $false
+                    while ([datetime]::UtcNow -lt $deadline -and -not $launched) {
+                        Start-Sleep -Milliseconds 400
+                        $launched = Test-WatcherAlive
+                    }
+                    if ($launched) { Write-Log 'Background watcher started. No window needed - play your game.' 'OK' }
+                    else          { Write-Log 'Watcher did not come up within 8s; check logs/ for errors.' 'WARN' }
+                }
+            } catch { Write-Log $_.Exception.Message 'ERROR' }
+            Wait-MenuKey
+        }
+        '4' { try { Invoke-Watcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '5' { try { Stop-BackgroundWatcher } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '6' { try { Show-Status } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        '7' { try { Invoke-NetworkProfileRevert } catch { Write-Log $_.Exception.Message 'ERROR' }; Wait-MenuKey }
+        { $_ -in 'Q','q' } { break menu }
+        default { }
+    }
+}
+} finally {
+    Remove-SuiteLogs
+}

@@ -21,10 +21,35 @@ Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
 Import-Module (Join-Path $root 'GameBoost.psm1') -Force
 Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
 Import-Module (Join-Path $root 'NetTune.psm1')    -Force
+Import-Module (Join-Path $root 'MicEnhance.psm1') -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
 $cfg = if (Test-Path $cfgPath) { & $cfgPath } else { @{} }
+
+# ---- Apply usage profile (if not 'Custom') ----
+function Apply-Profile {
+    param([hashtable]$Cfg)
+    $active = if ($Cfg.ContainsKey('ActiveProfile')) { [string]$Cfg['ActiveProfile'] } else { 'Custom' }
+    if ($active -eq 'Custom' -or -not $Cfg.ContainsKey('Profiles')) { return $Cfg }
+    $profiles = $Cfg['Profiles']
+    if (-not $profiles.ContainsKey($active)) {
+        Write-Log ("Profile '$active' not found in Config.ps1 Profiles; falling back to Custom.") 'WARN'
+        return $Cfg
+    }
+    $profile = $profiles[$active]
+    Write-Log ("Applying usage profile: $active") 'ACTION'
+    # Merge profile values INTO the config (profile wins over individual settings)
+    foreach ($key in $profile.Keys) {
+        if ($key -ne 'Custom') {
+            $Cfg[$key] = $profile[$key]
+        }
+    }
+    return $Cfg
+}
+
+$cfg = Apply-Profile $cfg
+
 $gameNames  = if ($cfg['GameProcesses'])      { $cfg['GameProcesses'] }      else { @('VALORANT-Win64','pcsx2','cs2') }
 $activeGameOnly = if ($null -ne $cfg['ActiveGameOnly']) { [bool]$cfg['ActiveGameOnly'] } else { $true }
 $pollSecs   = if ($cfg['WatcherPollSeconds']) { [int]$cfg['WatcherPollSeconds'] } else { 15 }
@@ -68,6 +93,7 @@ $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      e
 # switch does and what it deliberately cannot do.
 $netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
 $frameDiagCfg = if ($cfg['FrameTimeDiagnostics']) { $cfg['FrameTimeDiagnostics'] } else { @{ Enabled = $false } }
+$micCfg = if ($cfg['MicrophoneEnhancement']) { $cfg['MicrophoneEnhancement'] } else { @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true } }
 
 # ---------------- low-spec auto-detection + resolution ----------------
 function Resolve-LowSpecSettings {
@@ -163,7 +189,7 @@ function Resolve-LegacySettings {
     try {
         if     ($mode -eq 'on')  { $isLegacy = $true }
         elseif ($mode -ne 'off') { $isLegacy = Test-LegacyGpuPresent }
-    } catch { }
+    } catch { Write-Log "Legacy GPU detection failed: $_" 'WARN' }
 
     # Also treat LowSpecMode's SkipHags as legacy signal
     $lowSpecHags = $false
@@ -230,6 +256,7 @@ function Invoke-Watcher {
             -PurgeOnGameLaunch:([bool]$purgeLaunch) -AllowMidGamePurge:([bool]$midGamePurge) `
             -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
+            -MicEnhanceSettings $micCfg `
             -LegacySettings $leg -LowSpecSettings $lowSpecEff `
             -UniversalSettings $universalCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
@@ -244,7 +271,7 @@ function Invoke-Watcher {
         if ($TrackPidFile) {
             Remove-Item (Get-WatcherPidFile) -Force -ErrorAction SilentlyContinue
         }
-        try { $guard.Release() } catch { }
+        try { $guard.Release() } catch { Write-Log "Failed to release watcher instance guard: $_" 'WARN' }
     }
 }
 
@@ -298,8 +325,8 @@ function Show-Banner {
     Write-Host (" Session: {0} | Log: {1}" -f $tag, (Get-LogPath)) -ForegroundColor DarkGray
     try {
         Write-Host (" OS: {0}" -f (Get-OsStatusLine)) -ForegroundColor DarkGray
-    } catch { }
-    try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { }
+    } catch { Write-Host " OS: (status unavailable)" -ForegroundColor DarkGray }
+    try { Write-Host (" GPU: " + (Get-GpuStatusLine)) -ForegroundColor DarkGray } catch { Write-Host " GPU: (status unavailable)" -ForegroundColor DarkGray }
 
     # Show low-spec mode
     if ($lowSpecEff['Enabled']) {
@@ -308,7 +335,7 @@ function Show-Banner {
 
     # ---- WATCHER STATUS: prominent warning when not running ----
     $watcherAlive = $false
-    try { $watcherAlive = Test-WatcherAlive } catch { }
+    try { $watcherAlive = Test-WatcherAlive } catch { Write-Log "Test-WatcherAlive failed: $_" 'WARN' }
     if ($watcherAlive) {
         Write-Host (' Game watcher running.') -ForegroundColor Green
     } else {
@@ -458,7 +485,7 @@ function Show-Status {
         } else {
             Write-Log 'Display: current mode could not be read (user32 reports none).' 'INFO'
         }
-    } catch { }
+    } catch { Write-Log "Failed to get display mode: $_" 'WARN' }
     try {
         $gpus = @(Get-GpuInfo)
         if ($gpus.Count -eq 0) {
@@ -470,7 +497,7 @@ function Show-Status {
             Write-Log ("GPU [{0}] {1}: {2} ({3}{4}{5})" -f `
                 $gpu.Index, $gpu.Type, $gpu.Name, $gpu.Vendor, $vram, $drv) 'INFO'
         }
-    } catch { }
+    } catch { Write-Log "Failed to get GPU info: $_" 'WARN' }
     $fg = if ($fgSettings['Enabled']) { "enabled -> $($fgSettings['ToolPath'])" } else { 'disabled (enable in Config.ps1)' }
     Write-Log "Frame generation: $fg" 'INFO'
 
@@ -506,7 +533,7 @@ function Show-Status {
         $leg = Resolve-LegacySettings
         $lgState = if ($leg.IsLegacy) { 'ACTIVE (legacy-safe tweaks)' } else { 'off (standard profile)' }
         Write-Log "Legacy GPU support: $lgState" 'INFO'
-    } catch { }
+    } catch { Write-Log "Failed to resolve legacy settings: $_" 'WARN' }
 
     # ---- low-spec mode summary ------------------------------------------
     if ($lowSpecEff['Enabled']) {
@@ -585,7 +612,7 @@ function Show-Status {
     Write-Log ("PowerShell {0}" -f $PSVersionTable.PSVersion) 'INFO'
     try {
         Write-Log ("OS: {0}" -f (Get-OsStatusLine)) 'INFO'
-    } catch { }
+    } catch { Write-Log "Failed to get OS status: $_" 'WARN' }
 }
 
 function Wait-MenuKey {

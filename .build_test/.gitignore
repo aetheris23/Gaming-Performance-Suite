@@ -1,0 +1,54 @@
+# ============================================================
+#  .gitignore - Gaming Performance Suite
+#  Everything listed here is a generated/runtime artifact that
+#  can be rebuilt or recreated at any time; sources stay in git.
+#
+#  Build layout:
+#    - build.bat / src\Build-Suite.ps1 are the BUILD TOOLING. They
+#      are tracked in git but deliberately NOT shipped inside the
+#      ZIP (the distributable is runtime-only), so extracting the
+#      ZIP can never overwrite or duplicate them.
+#    - The ZIP, the generated .bat launchers and the temp build
+#      folder are produced each build and must not be committed.
+# ============================================================
+
+# Build artifacts - rebuild any time with build.bat (or src\Build-Suite.ps1)
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+GamingPerformanceSuite.zip
+
+# Generated launchers (created by Build-Suite.ps1 during build)
+# These are NOT tracked in git; they are generated and included in the ZIP
+Start-GamingSuite.bat
+Start-Watcher-Hidden.bat
+Stop-GamingSuite.bat
+
+# Build temp directory
+.build_generated/
+
+# Runtime output created while the suite runs (watcher.pid, instance.lock,
+# stop.requested, watcher_state.json, suite_*.log)
+logs/
+*.log
+*.pid
+*.lock
+stop.requested
+watcher_state.json
+
+# OS / editor / temp cruft
+Thumbs.db
+desktop.ini
+~$*
+*.tmp
+*.tmp~
+*.bak
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+*.code-workspace

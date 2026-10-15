@@ -150,7 +150,7 @@ function Get-CurrentDisplayMode {
                 Frequency = 60
             }
         }
-    } catch { }
+    } catch { Write-Log "Get-CurrentDisplayMode WMI fallback failed: $_" 'WARN' }
     Write-Log 'Get-CurrentDisplayMode: EnumDisplaySettingsExW and WMI fallback both failed' 'WARN'
     return $null
 }

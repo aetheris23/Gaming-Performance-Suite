@@ -127,6 +127,123 @@
     ExtendedIdlePollSeconds= 90      # ultra-low polling after 5+ min idle (saves CPU on old PCs)
     IdleHeartbeatMinutes   = 5       # log "watcher alive" every N minutes while idle (0 = off)
 
+    # ---- Usage Profiles (conservative presets) ------------------
+    # Select ONE profile at startup to apply a coherent set of defaults.
+    # These are REVERSIBLE - all session-scoped changes are undone on exit.
+    # Profile values OVERRIDE the individual settings below when applied.
+    # Usage: set ActiveProfile = 'Gaming' | 'Development' | 'DailyUse' | 'Custom'
+    #   'Custom' means use the individual settings below without profile override.
+    ActiveProfile = 'Custom'   # 'Gaming' | 'Development' | 'DailyUse' | 'Custom'
+    Profiles = @{
+        # GAMING: Maximum FPS stability, willing to trade visuals for consistency
+        # - Aggressive resolution scaling (75% target)
+        # - Priority boost + timer + purge on launch
+        # - Adaptive tuning ON for effect bursts / large maps
+        # - Background apps silenced
+        # - Frame-gen bridge enabled if tool configured
+        # - Network optimizations ON
+        Gaming = @{
+            ActiveGameOnly         = $true
+            WatcherPollSeconds     = 10
+            IdlePollSeconds        = 35
+            ExtendedIdlePollSeconds= 90
+            ExitWhenGameSessionEnds= $true
+            PurgeOnGameLaunch      = $true
+            AllowMidGamePurge      = $false
+            CriticalRamFloorMB     = 768
+            PreGameOptimization    = $true
+            PrePurgeBeforeLaunch   = $true
+            LowSpecMode            = @{ Mode = 'Auto'; SkipFrameGenBridge = $false; SkipResolutionSwitch = $false; SkipStandbyPurge = $false; SkipBackgroundSilence = $false }
+            AdaptiveTuning         = @{ Enabled = $true; AdaptivePurgeFloor = 10; PressureCooldownSec = 60; ReassertPriorities = $true; ReassertEveryCycles = 3 }
+            ResolutionScalePercent = 75
+            PreferIntegerScale     = $true
+            StretchedResolution    = $false
+            ProfileTiers           = @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Native'; Android = 'Medium'; Default = 'Medium' }
+            GameTierOverrides      = @{ 'VALORANT-Win64' = 'Native' }
+            UniversalWatch         = $true
+            ImmersiveWindowThreshold = 0.90
+            FrameGeneration        = @{ Enabled = $false; ToolPath = '' }  # set Enabled=$true + ToolPath if you own Lossless Scaling
+            NetworkOptimization    = @{ Enabled = $true; WatchLocalPacketLoss = $true; DisableInterruptModeration = $true; DisableReceiveSegmentCoalescing = $false; DisableLargeSendOffload = $false }
+            PowerOptimization      = @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false }
+            MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'VoiceFocus'; AutoLaunchWithGame = $true; RestoreOnExit = $true }
+            LegacyGpuSupport       = @{ Mode = 'Auto'; SkipResolutionSwitch = $null; EnableHags = $null; DisableFullscreenOptimizations = $null; ScalePercentOverride = 0 }
+            FrameTimeDiagnostics   = @{ Enabled = $false; SampleIntervalMs = 16; LogIntervalSeconds = 30; MaxSamples = 10000; LogPercentiles = @(50, 99, 99.9) }
+        }
+
+        # DEVELOPMENT: No visual changes, no aggressive tweaks, minimal overhead
+        # - Native resolution (no scaling)
+        # - No priority boosting, no timer changes
+        # - No standby purges
+        # - No background silencing
+        # - No frame-gen, no network tweaks, no power plan changes
+        # - Watcher still runs but only logs; useful for monitoring
+        Development = @{
+            ActiveGameOnly         = $true
+            WatcherPollSeconds     = 30
+            IdlePollSeconds        = 60
+            ExtendedIdlePollSeconds= 120
+            ExitWhenGameSessionEnds= $true
+            PurgeOnGameLaunch      = $false
+            AllowMidGamePurge      = $false
+            CriticalRamFloorMB     = 1024
+            PreGameOptimization    = $false
+            PrePurgeBeforeLaunch   = $false
+            LowSpecMode            = @{ Mode = 'Off'; SkipFrameGenBridge = $true; SkipResolutionSwitch = $true; SkipStandbyPurge = $true; SkipBackgroundSilence = $true }
+            AdaptiveTuning         = @{ Enabled = $false }
+            ResolutionScalePercent = 0
+            PreferIntegerScale     = $true
+            StretchedResolution    = $false
+            ProfileTiers           = @{ Emulator = 'Native'; Steam = 'Native'; Competitive = 'Native'; Android = 'Native'; Default = 'Native' }
+            GameTierOverrides      = @{}
+            UniversalWatch         = $false
+            ImmersiveWindowThreshold = 0.95
+            FrameGeneration        = @{ Enabled = $false; ToolPath = '' }
+            NetworkOptimization    = @{ Enabled = $false }
+            PowerOptimization      = @{ Enabled = $false }
+            MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $false; RestoreOnExit = $true }
+            LegacyGpuSupport       = @{ Mode = 'Off'; SkipResolutionSwitch = $true; EnableHags = $false; DisableFullscreenOptimizations = $false; ScalePercentOverride = 0 }
+            FrameTimeDiagnostics   = @{ Enabled = $true; SampleIntervalMs = 16; LogIntervalSeconds = 60; MaxSamples = 5000; LogPercentiles = @(50, 99) }
+        }
+
+        # DAILY USE: Light background optimization, no gaming-specific tweaks
+        # - No resolution scaling, no game-specific boosting
+        # - Pre-game optimizations (Game DVR off, MMCSS) applied once
+        # - Standby purge only on explicit launch (not automatic)
+        # - Universal watch OFF - only configured games
+        # - Network: monitoring only, no driver tweaks
+        # - Power: only on AC, not forced on battery
+        DailyUse = @{
+            ActiveGameOnly         = $true
+            WatcherPollSeconds     = 20
+            IdlePollSeconds        = 45
+            ExtendedIdlePollSeconds= 90
+            ExitWhenGameSessionEnds= $true
+            PurgeOnGameLaunch      = $false
+            AllowMidGamePurge      = $false
+            CriticalRamFloorMB     = 1024
+            PreGameOptimization    = $true
+            PrePurgeBeforeLaunch   = $false
+            LowSpecMode            = @{ Mode = 'Auto'; SkipFrameGenBridge = $true; SkipResolutionSwitch = $true; SkipStandbyPurge = $true; SkipBackgroundSilence = $true }
+            AdaptiveTuning         = @{ Enabled = $true; AdaptivePurgeFloor = 15; PressureCooldownSec = 120; ReassertPriorities = $false; ReassertEveryCycles = 5 }
+            ResolutionScalePercent = 0
+            PreferIntegerScale     = $true
+            StretchedResolution    = $false
+            ProfileTiers           = @{ Emulator = 'Native'; Steam = 'Native'; Competitive = 'Native'; Android = 'Native'; Default = 'Native' }
+            GameTierOverrides      = @{}
+            UniversalWatch         = $false
+            ImmersiveWindowThreshold = 0.95
+            FrameGeneration        = @{ Enabled = $false; ToolPath = '' }
+            NetworkOptimization    = @{ Enabled = $true; WatchLocalPacketLoss = $true; DisableInterruptModeration = $false; DisableReceiveSegmentCoalescing = $false; DisableLargeSendOffload = $false }
+            PowerOptimization      = @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false }
+            MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $false; RestoreOnExit = $true }
+            LegacyGpuSupport       = @{ Mode = 'Auto'; SkipResolutionSwitch = $null; EnableHags = $null; DisableFullscreenOptimizations = $null; ScalePercentOverride = 0 }
+            FrameTimeDiagnostics   = @{ Enabled = $false; SampleIntervalMs = 16; LogIntervalSeconds = 60; MaxSamples = 5000; LogPercentiles = @(50, 99) }
+        }
+
+        # CUSTOM: Use individual settings below (no profile override)
+        Custom = @{}
+    }
+
     # ---- Session lifecycle ----------------------------------
     # When the last monitored game exits, the watcher undoes every
     # SESSION-scoped change (process priorities, display mode, pacing
@@ -344,6 +461,31 @@
     FrameGeneration = @{
         Enabled = $false
         ToolPath = ''                  # e.g. 'C:\Program Files\Lossless Scaling\LosslessScaling.exe'
+    }
+
+    # ---- Microphone enhancement ---------------------------------
+    # Real-time audio processing requires native code with deterministic
+    # latency (sub-10ms). PowerShell cannot provide this. This module
+    # launches a configured companion tool (like the frame-gen bridge)
+    # that handles the DSP pipeline and exposes a virtual microphone.
+    #
+    # COMPANION TOOL REQUIREMENTS:
+    #   - Must accept microphone input and produce enhanced output
+    #   - Must expose a virtual microphone endpoint (VB-Cable, Voicemeeter,
+    #     or custom WDM/KS driver) so apps/games can select it as input
+    #   - Must run headless/minimized
+    #   - Recommended: RNNoise-based tool (native, ~2MB, <5% CPU)
+    #
+    # VIRTUAL MICROPHONE NOTE:
+    #   Windows has no built-in virtual microphone that a user-mode app
+    #   can create without a kernel driver. The companion tool MUST install
+    #   its own virtual audio driver. This is a hard requirement.
+    MicrophoneEnhancement = @{
+        Enabled              = $false    # master switch
+        ToolPath             = ''        # e.g. 'C:\Tools\MicEnhance\MicEnhance.exe'
+        Profile              = 'Default' # 'VoiceFocus' | 'NoiseSuppression' | 'Custom'
+        AutoLaunchWithGame   = $true     # launch when game detected
+        RestoreOnExit        = $true     # stop tool when watcher stops
     }
 
     # ---- Network latency & packet loss (menu option 1 / watcher) ----
