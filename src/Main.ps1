@@ -501,6 +501,24 @@ function Show-Status {
     $fg = if ($fgSettings['Enabled']) { "enabled -> $($fgSettings['ToolPath'])" } else { 'disabled (enable in Config.ps1)' }
     Write-Log "Frame generation: $fg" 'INFO'
 
+    # ---- mic enhancement state --------------------------------------------
+    $micOn = if ($micCfg -and $micCfg.ContainsKey('Enabled')) { [bool]$micCfg['Enabled'] } else { $false }
+    $micJournal = Get-WatcherJournal
+    if ($micJournal) {
+        $micJ = ConvertTo-HashtableDeep $micJournal
+        $micDsp = Get-StateField $micJ 'micDspStarted'
+        $micPid = Get-StateField $micJ 'micToolPid'
+        if ($micPid -gt 0) {
+            Write-Log ("Microphone enhancement: companion tool running (PID $micPid, config Enabled=$micOn)" -f $micPid) 'INFO'
+        } elseif ($micDsp -eq $true) {
+            Write-Log "Microphone enhancement: built-in DSP pipeline active (config Enabled=$micOn)" 'INFO'
+        } else {
+            Write-Log ("Microphone enhancement: not active (config Enabled=$micOn)" -f $micOn) 'INFO'
+        }
+    } else {
+        Write-Log ("Microphone enhancement: not active (config Enabled=$micOn)" -f $micOn) 'INFO'
+    }
+
     # ---- resolution tiers summary --------------------------------------
     $tierStr = ''
     if ($resSettings['Tiers'] -is [hashtable]) {

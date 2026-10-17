@@ -336,7 +336,7 @@
     # intervals. Logs percentile stats (avg, 1% low, 0.1% low) periodically.
     # Enable for troubleshooting; adds minimal overhead (~0.1% CPU).
     FrameTimeDiagnostics = @{
-        Enabled            = $false   # master switch
+        Enabled            = $true    # master switch - enabled for measurable FPS/frame-time evidence
         SampleIntervalMs   = 16       # target frame interval to sample (~60 FPS = 16.67ms)
         LogIntervalSeconds = 30       # how often to log percentile stats
         MaxSamples         = 10000    # max samples per log interval (ring buffer)
@@ -480,12 +480,45 @@
     #   Windows has no built-in virtual microphone that a user-mode app
     #   can create without a kernel driver. The companion tool MUST install
     #   its own virtual audio driver. This is a hard requirement.
+    #   Without a virtual cable, the module can still capture + process +
+    #   monitor (playback to default render device) for testing.
+    #
+    #   Built-in DSP pipeline parameters (used when ToolPath is empty):
+    #     GainDb             : pre-amp gain in dB (default 0)
+    #     NoiseGateEnabled   : attenuate below threshold (default $true)
+    #     NoiseGateThresholdDb: gate opening threshold (default -40)
+    #     NoiseGateFloorDb   : gain applied when gated (default -60)
+    #     NoiseSuppressionEnabled : spectral subtraction (default $true)
+    #     NoiseSuppressionStrength: 0-1, how aggressively to suppress (default 0.5)
+    #     CompressorEnabled  : reduce dynamic range (default $true)
+    #     CompressorThresholdDb: compression threshold (default -20)
+    #     CompressorRatio    : compression ratio (default 4)
+    #     LimiterEnabled     : clipping protection (default $true)
+    #     LimiterCeilingDb   : max output level (default -3)
+    #     AgcEnabled         : automatic gain control (default $false)
+    #     AgcTargetDb        : AGC target level (default -18)
+    #     AgcRate            : AGC adaptation speed 0-1 (default 0.01)
     MicrophoneEnhancement = @{
-        Enabled              = $false    # master switch
-        ToolPath             = ''        # e.g. 'C:\Tools\MicEnhance\MicEnhance.exe'
-        Profile              = 'Default' # 'VoiceFocus' | 'NoiseSuppression' | 'Custom'
-        AutoLaunchWithGame   = $true     # launch when game detected
-        RestoreOnExit        = $true     # stop tool when watcher stops
+        Enabled                 = $false    # master switch
+        ToolPath                = ''        # e.g. 'C:\Tools\MicEnhance\MicEnhance.exe'
+        Profile                 = 'Default' # 'VoiceFocus' | 'NoiseSuppression' | 'Custom'
+        AutoLaunchWithGame      = $true     # launch when game detected
+        RestoreOnExit           = $true     # stop tool when watcher stops
+        # Built-in DSP parameters
+        GainDb                  = 0         # pre-amp gain in dB
+        NoiseGateEnabled        = $true     # attenuate silent frames
+        NoiseGateThresholdDb    = -40       # gate opening threshold (dB)
+        NoiseGateFloorDb        = -60       # gain when gated (dB)
+        NoiseSuppressionEnabled = $true     # spectral noise suppression
+        NoiseSuppressionStrength= 0.5       # 0-1 suppression aggressiveness
+        CompressorEnabled       = $true     # dynamic range compression
+        CompressorThresholdDb   = -20       # compressor threshold (dB)
+        CompressorRatio         = 4         # compressor ratio
+        LimiterEnabled          = $true     # clipping protection
+        LimiterCeilingDb        = -3        # max output level (dB)
+        AgcEnabled              = $false    # automatic gain control
+        AgcTargetDb             = -18       # AGC target level (dB)
+        AgcRate                 = 0.01      # AGC adaptation speed (0-1)
     }
 
     # ---- Network latency & packet loss (menu option 1 / watcher) ----

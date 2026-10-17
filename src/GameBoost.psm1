@@ -243,6 +243,91 @@ function Log-FrameTimeStats {
 }
 
 # ------------------------------------------------------------
+# Frame-time benchmark: bounded, reproducible measurement
+#
+# Samples frame intervals via QueryPerformanceCounter for a fixed
+# duration and returns a summary report (avg FPS, 1% low, 0.1% low,
+# min/avg/max frame time). Read-only diagnostics - no system state
+# is modified. Call before/after changes to compare results.
+# ------------------------------------------------------------
+function Get-FrameTimeBenchmark {
+    param(
+        [int]$DurationSeconds = 30,
+        [int]$SampleIntervalMs = 16,
+        [int[]]$Percentiles = @(50, 99, 999)
+    )
+
+    $ctx = Initialize-FrameTimeDiagnostics -Enabled $true -MaxSamples 10000 -Percentiles $Percentiles
+    if (-not $ctx) {
+        Write-Log 'Frame-time benchmark: QueryPerformanceCounter unavailable.' 'WARN'
+        return $null
+    }
+
+    $startMs = Get-PerfCounterMs
+    $endMs = $startMs + ($DurationSeconds * 1000)
+
+    while ((Get-PerfCounterMs) -lt $endMs) {
+        Sample-FrameTime -Context $ctx -TargetIntervalMs $SampleIntervalMs
+        Start-Sleep -Milliseconds $SampleIntervalMs
+    }
+
+    $samples = @()
+    if ($ctx.Count -eq $ctx.MaxSamples) {
+        $samples += $ctx.Buffer[$ctx.Index..($ctx.MaxSamples - 1)]
+        if ($ctx.Index -gt 0) { $samples += $ctx.Buffer[0..($ctx.Index - 1)] }
+    } else {
+        $samples += $ctx.Buffer[0..($ctx.Count - 1)]
+    }
+
+    if ($samples.Count -lt 10) {
+        Write-Log ("Frame-time benchmark: only {0} samples, need at least 10." -f $samples.Count) 'WARN'
+        return $null
+    }
+
+    [Array]::Sort($samples)
+
+    $avgMs = ($samples | Measure-Object -Average).Average
+    $minMs = $samples[0]
+    $maxMs = $samples[-1]
+
+    $getPct = {
+        param($p)
+        $pct = $p / 10.0
+        $idx = [Math]::Floor(($samples.Count - 1) * $pct / 100.0)
+        $idx = [Math]::Max(0, [Math]::Min($samples.Count - 1, $idx))
+        [Math]::Round($samples[$idx], 2)
+    }
+
+    $p50 = &$getPct 5.0
+    $p99 = &$getPct 9.9
+    $p999 = &$getPct 99.9
+
+    $fpsAvg = if ($avgMs -gt 0) { [Math]::Round(1000.0 / $avgMs, 1) } else { 0 }
+    $fps1Low = if ($p99 -gt 0) { [Math]::Round(1000.0 / $p99, 1) } else { 0 }
+    $fps01Low = if ($p999 -gt 0) { [Math]::Round(1000.0 / $p999, 1) } else { 0 }
+
+    $result = [pscustomobject]@{
+        DurationSeconds = $DurationSeconds
+        SampleCount     = $samples.Count
+        AvgFrameTimeMs  = [Math]::Round($avgMs, 2)
+        MinFrameTimeMs  = [Math]::Round($minMs, 2)
+        MaxFrameTimeMs  = [Math]::Round($maxMs, 2)
+        P50FrameTimeMs  = $p50
+        P99FrameTimeMs  = $p99
+        P999FrameTimeMs = $p999
+        AvgFPS          = $fpsAvg
+        FPS1Low         = $fps1Low
+        FPS01Low        = $fps01Low
+    }
+
+    Write-Log ("Frame-time benchmark: {0} samples over {1}s | avg {2}ms ({3} FPS) | 1% low {4}ms ({5} FPS) | 0.1% low {6}ms ({7} FPS) | min {8}ms / max {9}ms" -f `
+        $samples.Count, $DurationSeconds, $result.AvgFrameTimeMs, $fpsAvg, `
+        $p99, $fps1Low, $p999, $fps01Low, $minMs, $maxMs) 'INFO'
+
+    return $result
+}
+
+# ------------------------------------------------------------
 # Power-plan GUIDs the suite works with. Debloated custom builds
 # (ReviOS / AtlasOS / Ghost Spectre / Tiny11) REMOVE the stock
 # "High performance" scheme (and often "Balanced"/"Power saver"
@@ -617,8 +702,8 @@ $script:GameProfiles = @{
         AvoidCores       = @(0)
         # Silencing only covers the profile's Deprioritize list, so comms apps
         # you actively use are never touched unless you add them here.
-        Deprioritize     = @('steamwebhelper','chrome','msedge','firefox','spotify')
-        Description      = 'Latency-critical online play: AboveNormal priority + browsers/Steam silenced'
+        Deprioritize     = @('steamwebhelper','chrome','msedge','firefox','spotify','code','code-insiders')
+        Description      = 'Latency-critical online play: AboveNormal priority + browsers/Steam/dev tools silenced'
     }
     'Android' = @{
         Priority         = 'High'
@@ -1349,6 +1434,7 @@ function Start-GameWatcher {
         fsoFlags     = @()
         fgToolPid    = 0
         micToolPid   = 0
+        micDspStarted = $false
     }
     function Save-Journal { Save-WatcherJournal -State $journal }
 
@@ -1393,6 +1479,7 @@ function Start-GameWatcher {
     $fgPid         = 0
     $micByUs       = $false
     $micPid        = 0
+    $micDspStarted = $false
     $hadSession    = $false   # any game was actually detected+boosted this run
     $pollMs        = $PollSeconds * 1000
     $idleMs        = [Math]::Max($pollMs, $IdlePollSeconds * 1000)
@@ -1654,7 +1741,7 @@ function Start-GameWatcher {
                         # ---- Microphone enhancement ramp (launch companion tool) ----
                         if ($MicEnhanceSettings -and [bool]$MicEnhanceSettings['Enabled'] -and
                             [bool]$MicEnhanceSettings['AutoLaunchWithGame'] -and
-                            -not (Test-RampPending 'micenhance') -and -not $micByUs) {
+                            -not (Test-RampPending 'micenhance') -and -not $micByUs -and -not $micDspStarted) {
                             Add-Ramp 'micenhance' 1.5 0   # 1.5s delay - after game detected, during loading
                         }
 
@@ -1736,6 +1823,12 @@ function Start-GameWatcher {
                     Stop-MicEnhanceTool -LaunchedByUs $micByUs -ToolPid $micPid
                     if ($micByUs) { $journal['micToolPid'] = 0; Save-Journal }
                     $micByUs = $false; $micPid = 0
+                    if ($micDspStarted) {
+                        Stop-MicEnhancement
+                        $micDspStarted = $false
+                        $journal['micDspStarted'] = $false
+                        Save-Journal
+                    }
                     if ($fsoDone.Count -gt 0) {
                         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
                         Write-Log 'Fullscreen-optimization overrides cleared.' 'OK'
@@ -1853,14 +1946,42 @@ function Start-GameWatcher {
                         } catch { Write-Log "Ramp extras failed: $_" 'WARN' }
                     }
                     'micenhance' {
-                        # Launch microphone enhancement companion tool
-                        # Runs independently of game process (no PID needed)
+                        # Launch microphone enhancement: companion tool or
+                        # built-in DSP pipeline (when no ToolPath configured).
+                        # Runs independently of game process (no PID needed).
                         if ($MicEnhanceSettings -and [bool]$MicEnhanceSettings['Enabled']) {
-                            Invoke-MicEnhanceTool -Settings $MicEnhanceSettings `
-                                -LaunchedByUs ([ref]$micByUs) -ToolPid ([ref]$micPid)
-                            if ($micByUs) {
-                                $journal['micToolPid'] = $micPid
-                                Save-Journal
+                            $toolPath = [string]$MicEnhanceSettings['ToolPath']
+                            if ($toolPath -and (Test-Path $toolPath)) {
+                                Invoke-MicEnhanceTool -Settings $MicEnhanceSettings `
+                                    -LaunchedByUs ([ref]$micByUs) -ToolPid ([ref]$micPid)
+                                if ($micByUs) {
+                                    $journal['micToolPid'] = $micPid
+                                    Save-Journal
+                                }
+                            } else {
+                                # Built-in DSP pipeline via WASAPI capture + process + render
+                                $dspSettings = @{
+                                    GainDb                 = if ($MicEnhanceSettings['GainDb']                 -ne $null) { [float]$MicEnhanceSettings['GainDb'] }                 else { 0 }
+                                    NoiseGate              = if ($MicEnhanceSettings['NoiseGateEnabled']         -ne $null) { [bool]$MicEnhanceSettings['NoiseGateEnabled'] }         else { $true }
+                                    NoiseGateThresholdDb   = if ($MicEnhanceSettings['NoiseGateThresholdDb']     -ne $null) { [float]$MicEnhanceSettings['NoiseGateThresholdDb'] }     else { -40 }
+                                    NoiseGateFloorDb       = if ($MicEnhanceSettings['NoiseGateFloorDb']         -ne $null) { [float]$MicEnhanceSettings['NoiseGateFloorDb'] }         else { -60 }
+                                    NoiseSuppression       = if ($MicEnhanceSettings['NoiseSuppressionEnabled']  -ne $null) { [bool]$MicEnhanceSettings['NoiseSuppressionEnabled'] }  else { $true }
+                                    NoiseSuppressionStrength= if ($MicEnhanceSettings['NoiseSuppressionStrength'] -ne $null) { [float]$MicEnhanceSettings['NoiseSuppressionStrength'] } else { 0.5 }
+                                    Compressor             = if ($MicEnhanceSettings['CompressorEnabled']        -ne $null) { [bool]$MicEnhanceSettings['CompressorEnabled'] }        else { $true }
+                                    CompressorThresholdDb  = if ($MicEnhanceSettings['CompressorThresholdDb']    -ne $null) { [float]$MicEnhanceSettings['CompressorThresholdDb'] }    else { -20 }
+                                    CompressorRatio        = if ($MicEnhanceSettings['CompressorRatio']          -ne $null) { [float]$MicEnhanceSettings['CompressorRatio'] }          else { 4 }
+                                    Limiter                = if ($MicEnhanceSettings['LimiterEnabled']           -ne $null) { [bool]$MicEnhanceSettings['LimiterEnabled'] }           else { $true }
+                                    LimiterCeilingDb       = if ($MicEnhanceSettings['LimiterCeilingDb']         -ne $null) { [float]$MicEnhanceSettings['LimiterCeilingDb'] }         else { -3 }
+                                    Agc                    = if ($MicEnhanceSettings['AgcEnabled']               -ne $null) { [bool]$MicEnhanceSettings['AgcEnabled'] }               else { $false }
+                                    AgcTargetDb            = if ($MicEnhanceSettings['AgcTargetDb']              -ne $null) { [float]$MicEnhanceSettings['AgcTargetDb'] }              else { -18 }
+                                    AgcRate                = if ($MicEnhanceSettings['AgcRate']                  -ne $null) { [float]$MicEnhanceSettings['AgcRate'] }                  else { 0.01 }
+                                }
+                                $started = Start-MicEnhancement @dspSettings
+                                if ($started) {
+                                    $micDspStarted = $true
+                                    $journal['micDspStarted'] = $true
+                                    Save-Journal
+                                }
                             }
                         }
                     }
@@ -2091,6 +2212,12 @@ function Start-GameWatcher {
         $journal['fgToolPid'] = 0
         Stop-MicEnhanceTool -LaunchedByUs $micByUs -ToolPid $micPid
         $journal['micToolPid'] = 0
+        if ($micDspStarted) {
+            Stop-MicEnhancement
+            $micDspStarted = $false
+            $journal['micDspStarted'] = $false
+            Save-Journal
+        }
         Restore-NativeResolution           # never leave the screen scaled down
         Undo-FsoCompatFlags -State $fsoDone -Journal $journal
         Set-TimerResolution -Restore
@@ -2115,4 +2242,5 @@ Export-ModuleMember -Function Enable-GamingPowerPlan, Disable-GameDVR, Set-Multi
     Start-GameWatcher, Get-FreeRamMB, Get-GameProfile, Test-LowSpecHardware,
     Invoke-FrameGenerationTool, Stop-FrameGenerationTool,
     Invoke-MicEnhanceTool, Stop-MicEnhanceTool,
-    Initialize-FrameTimeDiagnostics, Sample-FrameTime, Log-FrameTimeStats, Get-PerfCounterMs
+    Initialize-FrameTimeDiagnostics, Sample-FrameTime, Log-FrameTimeStats, Get-PerfCounterMs,
+    Get-FrameTimeBenchmark

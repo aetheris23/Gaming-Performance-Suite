@@ -511,6 +511,18 @@ function Repair-OrphanedWatcherState {
         }
     } catch { Write-Log "Recovery: mic-enhance tool cleanup failed: $_" 'ERROR' }
 
+    # ---- 4c. Orphaned built-in microphone DSP pipeline ----------------------
+    # The capture/render threads run in-process and die when the watcher
+    # process exits; WASAPI shared-mode endpoints release on process death.
+    # We cannot stop them cross-process (the $script:MicEnhanceContext lives
+    # in the dead process), so we log the state and clear the flag.
+    try {
+        $micDsp = Get-StateField $j 'micDspStarted'
+        if ($micDsp -eq $true) {
+            Write-Log 'Recovery: built-in mic DSP was active in the previous session; audio device handles were released by the OS on process exit.' 'RECOVER'
+        }
+    } catch { Write-Log "Recovery: mic DSP state check failed: $_" 'ERROR' }
+
     # ---- 5. Network latency profile -------------------------------
     # The journal's `netLatency` node holds the original value of every
     # registry/driver/service change NetTune.psm1 made. Reverting it here
