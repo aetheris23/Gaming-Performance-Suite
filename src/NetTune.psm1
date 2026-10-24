@@ -1247,3 +1247,89 @@ function Undo-NetworkLatencyProfile {
 
 Export-ModuleMember -Function Enable-NetworkLatencyProfile, Undo-NetworkLatencyProfile,
     Get-ActiveNetworkType, Get-NetworkLinkStatus, Update-PacketLossWatch
+
+# ------------------------------------------------------------
+# Network diagnostics - lightweight, read-only
+# ------------------------------------------------------------
+function Test-NetworkDiagnostics {
+    [CmdletBinding()]
+    param(
+        [int]$PingCount = 10,
+        [string]$Gateway = '',
+        [string]$Target = '8.8.8.8'
+    )
+    $result = [ordered]@{
+        Timestamp = (Get-Date).ToString('o')
+        ActiveNetwork = $null
+        LinkStatus = $null
+        GatewayPing = $null
+        DNSTargetPing = $null
+        PacketLossLocal = $null
+        Notes = @()
+    }
+    try {
+        $result.ActiveNetwork = Get-ActiveNetworkType
+    } catch { $result.Notes += "ActiveNetwork detection failed: $_" }
+    try {
+        $result.LinkStatus = Get-NetworkLinkStatus
+    } catch { $result.Notes += "LinkStatus detection failed: $_" }
+    try {
+        if (-not $Gateway) {
+            try {
+                $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+                if ($route -and $route.NextHop) { $Gateway = $route.NextHop }
+            } catch {}
+        }
+        if ($Gateway) {
+            $gw = Test-Connection -ComputerName $Gateway -Count $PingCount -Quiet:$false -ErrorAction SilentlyContinue
+            if ($gw) {
+                $times = $gw | ForEach-Object { $_.ResponseTime }
+                $result.GatewayPing = [ordered]@{
+                    Target = $Gateway
+                    Sent = $PingCount
+                    Received = ($gw | Measure-Object).Count
+                    AvgMs = [math]::Round(($times | Measure-Object -Average).Average, 2)
+                    MinMs = ($times | Measure-Object -Minimum).Minimum
+                    MaxMs = ($times | Measure-Object -Maximum).Maximum
+                    LossPct = [math]::Round((($PingCount - ($gw | Measure-Object).Count) / $PingCount) * 100, 1)
+                }
+            } else {
+                $result.GatewayPing = @{ Target = $Gateway; Error = 'No response'; Note = 'ICMP blocked or unreachable - not proof of in-game loss' }
+            }
+        }
+    } catch { $result.Notes += "Gateway ping failed: $_" }
+    try {
+        $dns = Test-Connection -ComputerName $Target -Count $PingCount -Quiet:$false -ErrorAction SilentlyContinue
+        if ($dns) {
+            $times = $dns | ForEach-Object { $_.ResponseTime }
+            $result.DNSTargetPing = [ordered]@{
+                Target = $Target
+                Sent = $PingCount
+                Received = ($dns | Measure-Object).Count
+                AvgMs = [math]::Round(($times | Measure-Object -Average).Average, 2)
+                MinMs = ($times | Measure-Object -Minimum).Minimum
+                MaxMs = ($times | Measure-Object -Maximum).Maximum
+                LossPct = [math]::Round((($PingCount - ($dns | Measure-Object).Count) / $PingCount) * 100, 1)
+            }
+        } else {
+            $result.DNSTargetPing = @{ Target = $Target; Error = 'No response'; Note = 'ICMP blocked or unreachable - not proof of in-game loss' }
+        }
+    } catch { $result.Notes += "External ping failed: $_" }
+    try {
+        $pl = Update-PacketLossWatch
+        if ($pl) { $result.PacketLossLocal = $pl }
+    } catch { $result.Notes += "Local packet loss check failed: $_" }
+    if ($result.GatewayPing -and $result.GatewayPing.AvgMs -and $result.GatewayPing.AvgMs -gt 50) {
+        $result.Notes += "High gateway latency - possible Wi-Fi congestion or local network issue"
+    }
+    if ($result.DNSTargetPing -and $result.DNSTargetPing.AvgMs -and $result.GatewayPing -and $result.GatewayPing.AvgMs) {
+        $diff = $result.DNSTargetPing.AvgMs - $result.GatewayPing.AvgMs
+        if ($diff -gt 80) {
+            $result.Notes += "Large jump beyond gateway suggests ISP routing/bufferbloat - investigate with route tracing if needed"
+        }
+    }
+    return [PSCustomObject]$result
+}
+
+Export-ModuleMember -Function Enable-NetworkLatencyProfile, Undo-NetworkLatencyProfile,
+    Get-ActiveNetworkType, Get-NetworkLinkStatus, Update-PacketLossWatch, Test-NetworkDiagnostics

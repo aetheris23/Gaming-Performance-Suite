@@ -2195,10 +2195,9 @@ function Start-GameWatcher {
                 try { $procSnapshot.Dispose() } catch { Write-Log "Failed to dispose process snapshot: $_" 'WARN' }
             }
             foreach ($tp in @($transientProcs)) {
-                try { $tp.Dispose() } catch { Write-Log "Failed to dispose transient process: $_" 'WARN' }
+                try { if ($tp -is [System.IDisposable]) { $tp.Dispose() } } catch { Write-Log "Failed to dispose transient process: $_" 'WARN' }
             }
             $transientProcs.Clear()
-            try { $transientProcs.Dispose() } catch { Write-Log "Failed to dispose transient process list: $_" 'WARN' }
             $allProc = @()
             $stopping = Wait-StopOrTimeout -Milliseconds $waitMs -StopEvent $StopEvent
             if ($stopping) {

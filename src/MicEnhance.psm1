@@ -172,11 +172,11 @@ internal static class WasapiConsts
 // ============================================================
 public static class Mathf
 {
-    public static float Pow(float x, float y) => (float)Math.Pow(x, y);
-    public static float Sqrt(float x) => (float)Math.Sqrt(x);
-    public static float Lerp(float a, float b, float t) => a + (b - a) * t;
-    public static float Clamp(float v, float min, float max) => v < min ? min : (v > max ? max : v);
-    public static float Abs(float v) => v < 0 ? -v : v;
+    public static float Pow(float x, float y) { return (float)Math.Pow(x, y); }
+    public static float Sqrt(float x) { return (float)Math.Sqrt(x); }
+    public static float Lerp(float a, float b, float t) { return a + (b - a) * t; }
+    public static float Clamp(float v, float min, float max) { if (v < min) return min; if (v > max) return max; return v; }
+    public static float Abs(float v) { return v < 0 ? -v : v; }
 }
 
 // ============================================================
@@ -203,13 +203,16 @@ public static class NativeAudioDevice
             int dataFlow = capture ? 1 : 0; // eCapture=1, eRender=0
             IMMDeviceCollection collection;
             enumerator.EnumAudioEndpoints(dataFlow, 1, out collection); // stateMask=1 = active
-            collection.GetCount(out int count);
+            int count;
+            collection.GetCount(out count);
             for (int i = 0; i < count; i++)
             {
                 IMMDevice device;
                 collection.Item(i, out device);
-                device.GetId(out string id);
-                device.GetState(out int state);
+                string id;
+                device.GetId(out id);
+                int state;
+                device.GetState(out state);
                 results.Add(new DeviceInfo
                 {
                     Id = id,
@@ -230,20 +233,20 @@ public static class NativeAudioDevice
 // ============================================================
 public class NativeMicDsp
 {
-    public float GainDb { get; set; } = 0f;
-    public bool NoiseGateEnabled { get; set; } = true;
-    public float NoiseGateThresholdDb { get; set; } = -40f;
-    public float NoiseGateFloorDb { get; set; } = -60f;
-    public bool NoiseSuppressionEnabled { get; set; } = true;
-    public float NoiseSuppressionStrength { get; set; } = 0.5f;
-    public bool CompressorEnabled { get; set; } = true;
-    public float CompressorThresholdDb { get; set; } = -20f;
-    public float CompressorRatio { get; set; } = 4f;
-    public bool LimiterEnabled { get; set; } = true;
-    public float LimiterCeilingDb { get; set; } = -3f;
-    public bool AgcEnabled { get; set; } = false;
-    public float AgcTargetDb { get; set; } = -18f;
-    public float AgcRate { get; set; } = 0.01f;
+    public float GainDb { get; set; }
+    public bool NoiseGateEnabled { get; set; }
+    public float NoiseGateThresholdDb { get; set; }
+    public float NoiseGateFloorDb { get; set; }
+    public bool NoiseSuppressionEnabled { get; set; }
+    public float NoiseSuppressionStrength { get; set; }
+    public bool CompressorEnabled { get; set; }
+    public float CompressorThresholdDb { get; set; }
+    public float CompressorRatio { get; set; }
+    public bool LimiterEnabled { get; set; }
+    public float LimiterCeilingDb { get; set; }
+    public bool AgcEnabled { get; set; }
+    public float AgcTargetDb { get; set; }
+    public float AgcRate { get; set; }
 
     private int sampleRate = 48000;
     private int frameSize;
@@ -267,14 +270,29 @@ public class NativeMicDsp
 
     public NativeMicDsp(int sampleRate, int frameSize)
     {
+        this.GainDb = 0f;
+        this.NoiseGateEnabled = true;
+        this.NoiseGateThresholdDb = -40f;
+        this.NoiseGateFloorDb = -60f;
+        this.NoiseSuppressionEnabled = true;
+        this.NoiseSuppressionStrength = 0.5f;
+        this.CompressorEnabled = true;
+        this.CompressorThresholdDb = -20f;
+        this.CompressorRatio = 4f;
+        this.LimiterEnabled = true;
+        this.LimiterCeilingDb = -3f;
+        this.AgcEnabled = false;
+        this.AgcTargetDb = -18f;
+        this.AgcRate = 0.01f;
+
         this.sampleRate = sampleRate;
         this.frameSize = frameSize;
-        int fftSize = 1;
-        while (fftSize < frameSize * 2) fftSize <<= 1;
-        this.fftSize = fftSize;
-        this.fftReal = new float[fftSize];
-        this.fftImag = new float[fftSize];
-        this.noiseSpectrum = new float[fftSize / 2 + 1];
+        int fftSizeVal = 1;
+        while (fftSizeVal < frameSize * 2) fftSizeVal <<= 1;
+        this.fftSize = fftSizeVal;
+        this.fftReal = new float[fftSizeVal];
+        this.fftImag = new float[fftSizeVal];
+        this.noiseSpectrum = new float[fftSizeVal / 2 + 1];
     }
 
     public void ProcessBlock(float[] samples, int count)
@@ -494,7 +512,7 @@ public class NativeAudioCapture : IDisposable
     private int frameSize;
     private Action<float[], int> callback;
 
-    public bool IsRunning => running;
+    public bool IsRunning { get { return running; } }
 
     public bool Start(string deviceId, Action<float[], int> callback, int desiredSampleRate = 48000, int desiredFrameSize = 480)
     {
@@ -525,7 +543,7 @@ public class NativeAudioCapture : IDisposable
             Guid iidAudioClient = new Guid("1CB9AD4C-DBFA-4c34-B147-1E1E9B00B71A");
             IntPtr clientPtr;
             int hr = device.Activate(ref iidAudioClient, WasapiConsts.CLSCTX_ALL, IntPtr.Zero, out clientPtr);
-            if (hr != WasapiConsts.S_OK) throw new Exception($"IAudioClient Activate failed: 0x{hr:X8}");
+            if (hr != WasapiConsts.S_OK) throw new Exception(string.Format("IAudioClient Activate failed: 0x{0:X8}", hr));
             audioClient = (IAudioClient)Marshal.GetTypedObjectForIUnknown(clientPtr, typeof(IAudioClient));
 
             IntPtr mixFormatPtr;
@@ -541,19 +559,21 @@ public class NativeAudioCapture : IDisposable
 
             long hnsDuration = (long)(desiredFrameSize * 10000000.0 / sampleRate);
             hr = audioClient.Initialize(WasapiConsts.AUDCLNT_SHAREMODE_SHARED, 0, hnsDuration, hnsDuration, ref waveFormat, IntPtr.Zero);
-            if (hr != WasapiConsts.S_OK) throw new Exception($"IAudioClient Initialize failed: 0x{hr:X8}");
+            if (hr != WasapiConsts.S_OK) throw new Exception(string.Format("IAudioClient Initialize failed: 0x{0:X8}", hr));
 
-            audioClient.GetBufferSize(out int bufferSize);
-            frameSize = bufferSize;
+            int bufferSizeVal1;
+            audioClient.GetBufferSize(out bufferSizeVal1);
+            frameSize = bufferSizeVal1;
 
             Guid iidCapture = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD917");
-            IntPtr capturePtr;
-            audioClient.GetService(ref iidCapture, out capturePtr);
-            captureClient = (IAudioCaptureClient)Marshal.GetTypedObjectForIUnknown(capturePtr, typeof(IAudioCaptureClient));
+            IntPtr capturePtr2;
+            audioClient.GetService(ref iidCapture, out capturePtr2);
+            captureClient = (IAudioCaptureClient)Marshal.GetTypedObjectForIUnknown(capturePtr2, typeof(IAudioCaptureClient));
 
             audioClient.Start();
 
-            captureThread = new Thread(CaptureLoop) { IsBackground = true };
+            captureThread = new Thread(new ThreadStart(CaptureLoop));
+            captureThread.IsBackground = true;
             captureThread.Start();
 
             return true;
@@ -571,10 +591,11 @@ public class NativeAudioCapture : IDisposable
         {
             try
             {
-                audioClient.GetCurrentPadding(out int padding);
-                int bufferSize;
-                audioClient.GetBufferSize(out bufferSize);
-                int available = bufferSize - padding;
+                int paddingCur;
+                audioClient.GetCurrentPadding(out paddingCur);
+                int bufferSizeCur1;
+                audioClient.GetBufferSize(out bufferSizeCur1);
+                int available = bufferSizeCur1 - paddingCur;
                 if (available <= 0) { Thread.Sleep(1); continue; }
 
                 int toRead = Math.Min(available, frameSize);
@@ -588,9 +609,10 @@ public class NativeAudioCapture : IDisposable
                 if (frames > 0 && dataPtr != IntPtr.Zero)
                 {
                     int ch = waveFormat.nChannels;
-                    float[] samples = new float[frames * ch];
-                    Marshal.Copy(dataPtr, samples, 0, samples.Length);
-                    callback(samples, samples.Length);
+                    int sampleCountArr = frames * ch;
+                    float[] samplesArr = new float[sampleCountArr];
+                    Marshal.Copy(dataPtr, samplesArr, 0, sampleCountArr);
+                    callback(samplesArr, sampleCountArr);
                 }
 
                 captureClient.ReleaseBuffer(frames);
@@ -607,15 +629,15 @@ public class NativeAudioCapture : IDisposable
         if (!running) return;
         running = false;
         stopEvent.Set();
-        try { captureThread?.Join(1000); } catch { }
-        try { audioClient?.Stop(); } catch { }
+        try { if (captureThread != null) captureThread.Join(1000); } catch { }
+        try { if (audioClient != null) audioClient.Stop(); } catch { }
         Dispose();
     }
 
     public void Dispose()
     {
         running = false;
-        stopEvent?.Dispose();
+        if (stopEvent != null) stopEvent.Dispose();
         captureClient = null;
         audioClient = null;
         device = null;
@@ -640,7 +662,7 @@ public class NativeAudioRender : IDisposable
     private int frameSize;
     private ConcurrentQueue<float[]> sampleQueue = new ConcurrentQueue<float[]>();
 
-    public bool IsRunning => running;
+    public bool IsRunning { get { return running; } }
 
     public bool Start(string deviceId, int desiredSampleRate = 48000, int desiredFrameSize = 480)
     {
@@ -670,7 +692,7 @@ public class NativeAudioRender : IDisposable
             Guid iidAudioClient = new Guid("1CB9AD4C-DBFA-4c34-B147-1E1E9B00B71A");
             IntPtr clientPtr;
             int hr = device.Activate(ref iidAudioClient, WasapiConsts.CLSCTX_ALL, IntPtr.Zero, out clientPtr);
-            if (hr != WasapiConsts.S_OK) throw new Exception($"IAudioClient Activate failed: 0x{hr:X8}");
+            if (hr != WasapiConsts.S_OK) throw new Exception(string.Format("IAudioClient Activate failed: 0x{0:X8}", hr));
             audioClient = (IAudioClient)Marshal.GetTypedObjectForIUnknown(clientPtr, typeof(IAudioClient));
 
             IntPtr mixFormatPtr;
@@ -686,19 +708,21 @@ public class NativeAudioRender : IDisposable
 
             long hnsDuration = (long)(desiredFrameSize * 10000000.0 / sampleRate);
             hr = audioClient.Initialize(WasapiConsts.AUDCLNT_SHAREMODE_SHARED, 0, hnsDuration, hnsDuration, ref waveFormat, IntPtr.Zero);
-            if (hr != WasapiConsts.S_OK) throw new Exception($"IAudioClient Initialize failed: 0x{hr:X8}");
+            if (hr != WasapiConsts.S_OK) throw new Exception(string.Format("IAudioClient Initialize failed: 0x{0:X8}", hr));
 
-            audioClient.GetBufferSize(out int bufferSize);
-            frameSize = bufferSize;
+            int bufferSizeVal1;
+            audioClient.GetBufferSize(out bufferSizeVal1);
+            frameSize = bufferSizeVal1;
 
             Guid iidRender = new Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");
-            IntPtr renderPtr;
-            audioClient.GetService(ref iidRender, out renderPtr);
-            renderClient = (IAudioRenderClient)Marshal.GetTypedObjectForIUnknown(renderPtr, typeof(IAudioRenderClient));
+            IntPtr renderPtr2;
+            audioClient.GetService(ref iidRender, out renderPtr2);
+            renderClient = (IAudioRenderClient)Marshal.GetTypedObjectForIUnknown(renderPtr2, typeof(IAudioRenderClient));
 
             audioClient.Start();
 
-            renderThread = new Thread(RenderLoop) { IsBackground = true };
+            renderThread = new Thread(new ThreadStart(RenderLoop));
+            renderThread.IsBackground = true;
             renderThread.Start();
 
             return true;
@@ -724,10 +748,11 @@ public class NativeAudioRender : IDisposable
                 float[] block = null;
                 if (!sampleQueue.TryDequeue(out block)) { Thread.Sleep(1); continue; }
 
-                audioClient.GetCurrentPadding(out int padding);
-                int bufferSize;
-                audioClient.GetBufferSize(out bufferSize);
-                int available = bufferSize - padding;
+                int paddingCur;
+                audioClient.GetCurrentPadding(out paddingCur);
+                int bufferSizeCur1;
+                audioClient.GetBufferSize(out bufferSizeCur1);
+                int available = bufferSizeCur1 - paddingCur;
                 if (available <= 0) { Thread.Sleep(1); continue; }
 
                 int ch = waveFormat.nChannels;
@@ -753,15 +778,15 @@ public class NativeAudioRender : IDisposable
         if (!running) return;
         running = false;
         stopEvent.Set();
-        try { renderThread?.Join(1000); } catch { }
-        try { audioClient?.Stop(); } catch { }
+        try { if (renderThread != null) renderThread.Join(1000); } catch { }
+        try { if (audioClient != null) audioClient.Stop(); } catch { }
         Dispose();
     }
 
     public void Dispose()
     {
         running = false;
-        stopEvent?.Dispose();
+        if (stopEvent != null) stopEvent.Dispose();
         renderClient = null;
         audioClient = null;
         device = null;
