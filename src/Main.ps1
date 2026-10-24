@@ -11,7 +11,10 @@
 #  next start or stop - see Common.psm1 Repair-OrphanedWatcherState.
 # ============================================================
 
-param([switch]$BackgroundWatch)
+param(
+    [switch]$BackgroundWatch,
+    [switch]$AutoStart
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSCommandPath
@@ -94,6 +97,34 @@ $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      e
 $netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
 $frameDiagCfg = if ($cfg['FrameTimeDiagnostics']) { $cfg['FrameTimeDiagnostics'] } else { @{ Enabled = $false } }
 $micCfg = if ($cfg['MicrophoneEnhancement']) { $cfg['MicrophoneEnhancement'] } else { @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true } }
+
+# Auto-start configuration
+$autoStartCfg = if ($cfg['AutoStart']) { $cfg['AutoStart'] } else { @{ Enabled = $true; RunFullOptimization = $true; RunWatcher = $true; RunOnInstall = $true; RunOnLogin = $true; DelaySeconds = 0; PreventDuplicate = $true; RestoreSavedConfig = $true } }
+
+# Prevent duplicate auto-start execution
+$autoStartLockPath = Join-Path $script:LogDir 'runtime\autostart.lock'
+function Test-AutoStartAlreadyRun {
+    if (-not $autoStartCfg['PreventDuplicate']) { return $false }
+    if (-not (Test-Path $autoStartLockPath)) { return $false }
+    try {
+        $lockContent = Get-Content $autoStartLockPath -Raw
+        $lockTime = [datetime]::Parse($lockContent.Trim())
+        # Consider duplicate if ran within last 5 minutes
+        if (([datetime]::Now - $lockTime).TotalMinutes -lt 5) {
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
+function Set-AutoStartLock {
+    if (-not $autoStartCfg['PreventDuplicate']) { return }
+    try {
+        $lockDir = Split-Path $autoStartLockPath -Parent
+        if (-not (Test-Path $lockDir)) { New-Item -ItemType Directory -Path $lockDir -Force | Out-Null }
+        [datetime]::Now.ToString('o') | Out-File -FilePath $autoStartLockPath -Encoding ASCII -Force
+    } catch { }
+}
 
 # ---------------- low-spec auto-detection + resolution ----------------
 function Resolve-LowSpecSettings {
@@ -285,6 +316,68 @@ if ($BackgroundWatch) {
         Write-Log $_.Exception.Message 'ERROR'
     } finally {
         if ($stopEvt) { $stopEvt.Dispose() }
+        Remove-SuiteLogs
+    }
+    exit 0
+}
+
+# ---------------- auto-start session (options 1 and 3) ----------------
+if ($AutoStart) {
+    try {
+        if (-not $autoStartCfg['Enabled']) {
+            Write-Log 'Auto-start disabled in configuration.' 'INFO'
+            exit 0
+        }
+        if (Test-AutoStartAlreadyRun) {
+            Write-Log 'Auto-start already executed recently; skipping to prevent duplicates.' 'INFO'
+            exit 0
+        }
+        if ($autoStartCfg['DelaySeconds'] -gt 0) {
+            Start-Sleep -Seconds ([int]$autoStartCfg['DelaySeconds'])
+        }
+        Write-Log '=== AUTO-START: Initializing automatic optimization ===' 'ACTION'
+        Set-AutoStartLock
+
+        # Execute option 1: Apply FULL one-click game optimization
+        if ($autoStartCfg['RunFullOptimization'] -ne $false) {
+            try {
+                Write-Log 'Auto-start: Executing option 1 (Full optimization)...' 'ACTION'
+                Invoke-FullOptimization
+                Write-Log 'Auto-start: Option 1 completed.' 'OK'
+            } catch {
+                Write-Log "Auto-start: Option 1 failed - $($_.Exception.Message)" 'ERROR'
+            }
+        }
+
+        # Execute option 3: Start watcher HIDDEN in background
+        if ($autoStartCfg['RunWatcher'] -ne $false) {
+            try {
+                Write-Log 'Auto-start: Executing option 3 (Start watcher in background)...' 'ACTION'
+                if (Test-WatcherAlive) {
+                    Write-Log 'Watcher already running in background.' 'WARN'
+                } else {
+                    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+                        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+                        '-File', "`"$PSCommandPath`"", '-BackgroundWatch'
+                    )
+                    $deadline = [datetime]::UtcNow.AddSeconds(8)
+                    $launched = $false
+                    while ([datetime]::UtcNow -lt $deadline -and -not $launched) {
+                        Start-Sleep -Milliseconds 400
+                        $launched = Test-WatcherAlive
+                    }
+                    if ($launched) { Write-Log 'Auto-start: Background watcher started.' 'OK' }
+                    else { Write-Log 'Auto-start: Watcher did not start within timeout.' 'WARN' }
+                }
+            } catch {
+                Write-Log "Auto-start: Option 3 failed - $($_.Exception.Message)" 'ERROR'
+            }
+        }
+
+        Write-Log '=== AUTO-START: Completed ===' 'OK'
+    } catch {
+        Write-Log "Auto-start error: $($_.Exception.Message)" 'ERROR'
+    } finally {
         Remove-SuiteLogs
     }
     exit 0

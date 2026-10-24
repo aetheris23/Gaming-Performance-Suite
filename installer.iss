@@ -47,13 +47,13 @@ Name: "{group}\Stop Gaming Performance Suite"; Filename: "{app}\Stop-GamingSuite
 Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\Start-GamingSuite.bat"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Start-GamingSuite.bat"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Start-GamingSuite.bat"; Parameters: "-AutoStart"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c """"{app}\Stop-GamingSuite.bat"""" & timeout /t 2 >nul"; Flags: runhidden
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamingPerformanceSuiteWatcher"; ValueData: """{app}\Start-Watcher-Hidden.bat"""; Flags: uninsdeletevalue; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamingPerformanceSuiteAutoStart"; ValueData: """{app}\Start-GamingSuite.bat"" -AutoStart"; Flags: uninsdeletevalue; Tasks: startup
 
 [Code]
 function InitializeSetup(): Boolean;

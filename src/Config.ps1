@@ -567,4 +567,19 @@
         ForceMaxCpuOnBattery   = $false
         ForcePcieOffOnBattery  = $false
     }
+
+    # ---- Automatic startup behavior --------------------------
+    # Run options 1 (full optimization) and 3 (hidden watcher) on
+    # installation, Windows startup, and user sign-in. Disable via
+    # this setting to prevent automatic execution.
+    AutoStart = @{
+        Enabled                = $true      # master switch for auto-start behavior
+        RunFullOptimization    = $true      # execute menu option 1 on auto-start
+        RunWatcher             = $true      # execute menu option 3 on auto-start
+        RunOnInstall           = $true      # run after installation
+        RunOnLogin             = $true      # run on user sign-in/startup
+        DelaySeconds           = 0          # optional delay before auto-start
+        PreventDuplicate       = $true      # prevent duplicate executions
+        RestoreSavedConfig     = $true      # restore saved configurations on auto-start
+    }
 }
