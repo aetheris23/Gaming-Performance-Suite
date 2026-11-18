@@ -19,12 +19,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSCommandPath
 
-Import-Module (Join-Path $root 'Common.psm1')    -Force
-Import-Module (Join-Path $root 'GpuDetect.psm1') -Force
-Import-Module (Join-Path $root 'GameBoost.psm1') -Force
-Import-Module (Join-Path $root 'DisplayScale.psm1') -Force
-Import-Module (Join-Path $root 'NetTune.psm1')    -Force
-Import-Module (Join-Path $root 'MicEnhance.psm1') -Force
+Import-Module (Join-Path $root 'Common.psm1')         -Force
+Import-Module (Join-Path $root 'GpuDetect.psm1')      -Force
+Import-Module (Join-Path $root 'GameBoost.psm1')      -Force
+Import-Module (Join-Path $root 'DisplayScale.psm1')   -Force
+Import-Module (Join-Path $root 'NetTune.psm1')        -Force
+Import-Module (Join-Path $root 'MicEnhance.psm1')     -Force
+Import-Module (Join-Path $root 'RawInputBuffer.psm1') -Force
 
 # Load user config with safe fallbacks
 $cfgPath = Join-Path $root 'Config.ps1'
@@ -97,6 +98,9 @@ $adaptiveCfg = if ($cfg['AdaptiveTuning'])     { $cfg['AdaptiveTuning'] }      e
 $netCfg = if ($cfg['NetworkOptimization']) { $cfg['NetworkOptimization'] } else { @{ Enabled = $false } }
 $frameDiagCfg = if ($cfg['FrameTimeDiagnostics']) { $cfg['FrameTimeDiagnostics'] } else { @{ Enabled = $false } }
 $micCfg = if ($cfg['MicrophoneEnhancement']) { $cfg['MicrophoneEnhancement'] } else { @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true } }
+# Raw input buffer (always on by default): auto-adjusts to the detected mouse,
+# including generic/non-gaming mice without vendor driver settings.
+$rawInputCfg = if ($cfg['RawInputBuffer']) { $cfg['RawInputBuffer'] } else { @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false } }
 
 # Auto-start configuration
 $autoStartCfg = if ($cfg['AutoStart']) { $cfg['AutoStart'] } else { @{ Enabled = $true; RunFullOptimization = $true; RunWatcher = $true; RunOnInstall = $true; RunOnLogin = $true; DelaySeconds = 0; PreventDuplicate = $true; RestoreSavedConfig = $true } }
@@ -288,6 +292,7 @@ function Invoke-Watcher {
             -ProfileOverrides $profOv `
             -ResolutionSettings $resSettings -FrameGenSettings $fgSettings `
             -MicEnhanceSettings $micCfg `
+            -RawInputBufferSettings $rawInputCfg `
             -LegacySettings $leg -LowSpecSettings $lowSpecEff `
             -UniversalSettings $universalCfg `
             -AdaptiveTuningSettings $adaptiveCfg `
@@ -546,6 +551,21 @@ function Invoke-FullOptimization {
     # handles this per session, so this only fills in the rest of the tweaks.
     try { Invoke-NetworkProfileApply | Out-Null }
     catch { Write-Log "Network profile skipped: $($_.Exception.Message)" 'WARN' }
+    # Raw input buffer (always on, auto-adjusted to the connected mouse): apply
+    # as a journaled, reversible optimization for non-watcher sessions too.
+    try {
+        $ribState = @{}
+        Enable-RawInputBuffer -Settings $rawInputCfg -JournalState $ribState
+        if ($ribState.ContainsKey('rawInputBuffer')) {
+            # Persist in the shared recovery journal unless a watcher owns it.
+            if (-not (Test-WatcherAlive)) {
+                $rawPrev = Get-WatcherJournal
+                $merged = if ($rawPrev) { ConvertTo-HashtableDeep $rawPrev } else { @{} }
+                $merged['rawInputBuffer'] = $ribState['rawInputBuffer']
+                Save-WatcherJournal -State $merged
+            }
+        }
+    } catch { Write-Log "Raw input buffer skipped: $($_.Exception.Message)" 'WARN' }
     if ($leg.EnableHags) {
         Write-Log '=== FULL OPTIMIZATION complete. Reboot once for HAGS. ===' 'OK'
     } else {
@@ -593,6 +613,16 @@ function Show-Status {
     } catch { Write-Log "Failed to get GPU info: $_" 'WARN' }
     $fg = if ($fgSettings['Enabled']) { "enabled -> $($fgSettings['ToolPath'])" } else { 'disabled (enable in Config.ps1)' }
     Write-Log "Frame generation: $fg" 'INFO'
+
+    # ---- raw input buffer state ------------------------------------------
+    try {
+        $rib = Get-RawInputBufferStatus -Settings $rawInputCfg
+        $devStr = if ($rib.DeviceNames -and @($rib.DeviceNames).Count -gt 0) { @($rib.DeviceNames) -join ', ' } else { 'generic/no-driver path' }
+        Write-Log ("Raw input buffer: {0} (always on: {1}, auto-adjust: {2}) | profile {3} | queue {4} (target {5}) | mouse(s): {6}" -f `
+            $(if ($rib.Enabled) { 'ENABLED' } else { 'disabled' }), $rib.AlwaysOn, `
+            $(if ($rawInputCfg -is [System.Collections.IDictionary] -and $rawInputCfg.ContainsKey('AutoAdjust')) { [bool]$rawInputCfg['AutoAdjust'] } else { $true }), `
+            $rib.Profile, $rib.CurrentQueue, $rib.RecommendedQueue, $devStr) 'INFO'
+    } catch { Write-Log "Raw input buffer status unavailable: $($_.Exception.Message)" 'WARN' }
 
     # ---- mic enhancement state --------------------------------------------
     $micOn = if ($micCfg -and $micCfg.ContainsKey('Enabled')) { [bool]$micCfg['Enabled'] } else { $false }

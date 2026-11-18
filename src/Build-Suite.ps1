@@ -141,7 +141,8 @@ $srcFiles = @(
     'src\GameBoost.psm1',
     'src\GpuDetect.psm1',
     'src\NetTune.psm1',
-    'src\MicEnhance.psm1'
+    'src\MicEnhance.psm1',
+    'src\RawInputBuffer.psm1'
 )
 
 $missing = @($srcFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_)) })

@@ -1295,6 +1295,7 @@ function Start-GameWatcher {
         [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
         [hashtable]$MicEnhanceSettings = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true },
+        [hashtable]$RawInputBufferSettings = @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false },
         [hashtable]$LegacySettings     = @{},
         [hashtable]$LowSpecSettings    = @{ Enabled = $false },
         [hashtable]$UniversalSettings  = @{ Enabled = $true; ImmersiveWindowThreshold = 0.90 },
@@ -1436,6 +1437,9 @@ function Start-GameWatcher {
         micToolPid   = 0
         micDspStarted = $false
     }
+    # Seed rawInputBuffer node so recovery can always detect/clean it if needed.
+    $journal['rawInputBuffer'] = $null
+    $rawInputApplied = $false
     function Save-Journal { Save-WatcherJournal -State $journal }
 
     # ---- PRE-GAME OPTIMIZATION: apply the cheap, system-wide FPS tweaks
@@ -1463,6 +1467,21 @@ function Start-GameWatcher {
             Write-Log "Network profile skipped: $($_.Exception.Message)" 'WARN'
             $netApplied = $false
         }
+    }
+
+    # ---- RAW INPUT BUFFER (always on, auto-adjust to mouse) ------------
+    # Applied for the session (gaming or generic mouse, no vendor driver
+    # required) and journalled so crash recovery can revert it.
+    try {
+        if (-not (Get-Command Enable-RawInputBuffer -ErrorAction SilentlyContinue)) {
+            Import-Module (Join-Path $PSScriptRoot 'RawInputBuffer.psm1') -Force -ErrorAction Stop
+        }
+        Enable-RawInputBuffer -Settings $RawInputBufferSettings -JournalState $journal | Out-Null
+        $rawInputApplied = [bool](Get-StateField $journal 'rawInputBuffer')
+        Save-Journal
+    } catch {
+        Write-Log "Raw input buffer skipped: $($_.Exception.Message)" 'WARN'
+        $rawInputApplied = $false
     }
 
     Write-Log ("Game watcher started (poll {0}s while gaming, {1}s idle). Watching active games only: {2}" -f `
@@ -2230,9 +2249,20 @@ function Start-GameWatcher {
             } catch { Write-Log "Network profile revert failed: $($_.Exception.Message)" 'WARN' }
             $netApplied = $false
         }
+        # Revert raw input buffer (always-on session tuning) on exit.
+        try {
+            $rib = Get-StateField $journal 'rawInputBuffer'
+            if ($rawInputApplied -or $rib) {
+                if (-not (Get-Command Disable-RawInputBuffer -ErrorAction SilentlyContinue)) {
+                    Import-Module (Join-Path $PSScriptRoot 'RawInputBuffer.psm1') -Force -ErrorAction Stop
+                }
+                Disable-RawInputBuffer -JournalState $journal
+            }
+        } catch { Write-Log "Raw input buffer revert failed: $($_.Exception.Message)" 'WARN' }
+        $rawInputApplied = $false
         Save-Journal                       # persist the all-clear state briefly
         Clear-WatcherJournal               # clean exit => nothing left to repair
-        Write-Log 'Game watcher stopped, priorities/timer/resolution/network restored.' 'INFO'
+        Write-Log 'Game watcher stopped, priorities/timer/resolution/network/raw-input restored.' 'INFO'
     }
 }
 
@@ -2240,6 +2270,5 @@ Export-ModuleMember -Function Enable-GamingPowerPlan, Disable-GameDVR, Set-Multi
     Set-TimerResolution, Clear-StandbyMemory, Invoke-ProcessBoost,
     Start-GameWatcher, Get-FreeRamMB, Get-GameProfile, Test-LowSpecHardware,
     Invoke-FrameGenerationTool, Stop-FrameGenerationTool,
-    Invoke-MicEnhanceTool, Stop-MicEnhanceTool,
     Initialize-FrameTimeDiagnostics, Sample-FrameTime, Log-FrameTimeStats, Get-PerfCounterMs,
     Get-FrameTimeBenchmark

@@ -1245,9 +1245,6 @@ function Undo-NetworkLatencyProfile {
     }
 }
 
-Export-ModuleMember -Function Enable-NetworkLatencyProfile, Undo-NetworkLatencyProfile,
-    Get-ActiveNetworkType, Get-NetworkLinkStatus, Update-PacketLossWatch
-
 # ------------------------------------------------------------
 # Network diagnostics - lightweight, read-only
 # ------------------------------------------------------------

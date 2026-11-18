@@ -536,6 +536,16 @@ function Repair-OrphanedWatcherState {
         }
     } catch { Write-Log "Recovery: network profile revert failed: $_" 'ERROR' }
 
+    # ---- 6. Raw input buffer (mouse tuning) ----------------------
+    # Always-on, auto-adjusted mouse input buffering is reversible and
+    # journalled; restore originals if a session died uncleanly.
+    try {
+        if (Get-StateField $j 'rawInputBuffer') {
+            Import-Module (Join-Path $PSScriptRoot 'RawInputBuffer.psm1') -Force
+            Disable-RawInputBuffer -JournalState $j
+        }
+    } catch { Write-Log "Recovery: raw input buffer revert failed: $_" 'ERROR' }
+
     Clear-WatcherJournal
 
     # Remove the pid file ONLY if it does not describe a live watcher.

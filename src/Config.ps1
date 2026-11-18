@@ -166,6 +166,9 @@
             NetworkOptimization    = @{ Enabled = $true; WatchLocalPacketLoss = $true; DisableInterruptModeration = $true; DisableReceiveSegmentCoalescing = $false; DisableLargeSendOffload = $false }
             PowerOptimization      = @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false }
             MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'VoiceFocus'; AutoLaunchWithGame = $true; RestoreOnExit = $true }
+            # Raw input buffer (always on): auto-tunes OS mouse buffering for the
+            # detected mouse (gaming or generic, with or without vendor driver).
+            RawInputBuffer         = @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false }
             LegacyGpuSupport       = @{ Mode = 'Auto'; SkipResolutionSwitch = $null; EnableHags = $null; DisableFullscreenOptimizations = $null; ScalePercentOverride = 0 }
             FrameTimeDiagnostics   = @{ Enabled = $false; SampleIntervalMs = 16; LogIntervalSeconds = 30; MaxSamples = 10000; LogPercentiles = @(50, 99, 99.9) }
         }
@@ -201,6 +204,8 @@
             NetworkOptimization    = @{ Enabled = $false }
             PowerOptimization      = @{ Enabled = $false }
             MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $false; RestoreOnExit = $true }
+            # Always-on raw input buffer, auto-adjusted to the connected mouse (no vendor driver required).
+            RawInputBuffer         = @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false }
             LegacyGpuSupport       = @{ Mode = 'Off'; SkipResolutionSwitch = $true; EnableHags = $false; DisableFullscreenOptimizations = $false; ScalePercentOverride = 0 }
             FrameTimeDiagnostics   = @{ Enabled = $true; SampleIntervalMs = 16; LogIntervalSeconds = 60; MaxSamples = 5000; LogPercentiles = @(50, 99) }
         }
@@ -236,6 +241,8 @@
             NetworkOptimization    = @{ Enabled = $true; WatchLocalPacketLoss = $true; DisableInterruptModeration = $false; DisableReceiveSegmentCoalescing = $false; DisableLargeSendOffload = $false }
             PowerOptimization      = @{ Enabled = $true; ForceMaxCpuOnBattery = $false; ForcePcieOffOnBattery = $false }
             MicrophoneEnhancement  = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $false; RestoreOnExit = $true }
+            # Always-on raw input buffer, auto-adjusted to the connected mouse (no vendor driver required).
+            RawInputBuffer         = @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false }
             LegacyGpuSupport       = @{ Mode = 'Auto'; SkipResolutionSwitch = $null; EnableHags = $null; DisableFullscreenOptimizations = $null; ScalePercentOverride = 0 }
             FrameTimeDiagnostics   = @{ Enabled = $false; SampleIntervalMs = 16; LogIntervalSeconds = 60; MaxSamples = 5000; LogPercentiles = @(50, 99) }
         }
@@ -461,6 +468,28 @@
     FrameGeneration = @{
         Enabled = $false
         ToolPath = ''                  # e.g. 'C:\Program Files\Lossless Scaling\LosslessScaling.exe'
+    }
+
+    # ---- Raw input buffer (mouse, always on) -------------------
+    # Always-on, reversible OS-level mouse input buffering/tuning for gaming.
+    # Auto-adjusts to the detected mouse (gaming or generic/office), including
+    # mice without vendor drivers or bundled configuration software.
+    #
+    #   Enabled                 : master switch (default $true)
+    #   AlwaysOn                : keep active for every suite session (default $true)
+    #   AutoAdjust              : detect mouse type and pick buffer profile (default $true)
+    #   MouseDataQueueSize      : 0 = auto; >0 = manual mouclass queue size (16-256)
+    #   DisablePointerPrecision : $true to disable Windows "Enhance pointer precision"
+    #                             (acceleration) for 1:1 feel; default $false to respect user choice.
+    #
+    # Notes: polling/report rate is a hardware/driver property and cannot be
+    # forced without a vendor driver; this module tunes the safe OS-side path.
+    RawInputBuffer = @{
+        Enabled                 = $true
+        AlwaysOn                = $true
+        AutoAdjust              = $true
+        MouseDataQueueSize      = 0
+        DisablePointerPrecision = $false
     }
 
     # ---- Microphone enhancement ---------------------------------

@@ -34,6 +34,7 @@ The launchers request Administrator approval when needed. The ZIP is a runtime p
 
 - Detects configured game processes and immersive foreground windows (borderless-fullscreen games, maximized video players).
 - Applies per-game process profiles: priority, CPU affinity, timer resolution (1-2 ms), standby-memory purge.
+- **Raw input buffer (always on, auto-adjusting):** tunes OS mouse input buffering for the detected mouse so gaming and non-gaming mice (including devices without vendor driver/software settings) get a consistent low-latency path; settings auto-adjust to the connected mouse and are reverted on session end or crash recovery.
 - Optional dynamic display resolution scaling: drops to a lower same-aspect mode during play, restores native on exit. Stretch mode (e.g., 4:3 on 16:9) available.
 - Low-spec auto-detection (legacy GPU + weak CPU) with automatic reduced-mode profile.
 - Adaptive mid-game tuning: reacts to memory pressure from effect bursts / large-map loads with cooldown-gated purges and priority re-assertion.
@@ -71,6 +72,7 @@ Edit `src/Config.ps1` to adjust:
 - `ResolutionTiers` / `ProfileTiers` / `GameTierOverrides` — per-game resolution scaling
 - `LowSpecMode` — auto/on/off, skip flags, CPU core limiting
 - `AdaptiveTuning` — memory-pressure reaction
+- `RawInputBuffer` — always-on mouse input buffer/tuning, auto-adjusted to the detected mouse (works for gaming and generic mice, including those without vendor driver settings): `Enabled`, `AlwaysOn`, `AutoAdjust`, `MouseDataQueueSize` (0 = auto), `DisablePointerPrecision`
 - `FrameGeneration` — companion tool path (e.g., Lossless Scaling)
 - `MicrophoneEnhancement` — companion tool path and/or built-in DSP settings:
   - Companion mode: `ToolPath`, `Profile`, `AutoLaunchWithGame`, `RestoreOnExit`
@@ -152,6 +154,7 @@ src/
   GpuDetect.psm1         GPU inventory, classification, era detection
   NetTune.psm1           Network diagnostics and opt-in latency settings
   MicEnhance.psm1        Microphone enhancement companion-tool bridge + built-in DSP pipeline
+  RawInputBuffer.psm1    Always-on, auto-adjusting raw mouse input buffer/tuning (journaled, reversible)
 ```
 
 ## Quick Start (Gaming)
@@ -217,6 +220,6 @@ No services, scheduled tasks, or startup entries are created by this suite.
 
 ## Version History
 
-- **v3.2** — Phase 1 hardening: eliminated empty catch blocks, fixed adaptive purge cooldown bug, fixed parser errors, verified module loads. Added built-in microphone DSP pipeline (`Start-MicEnhancement` / `Stop-MicEnhancement` / `Test-MicEnhancement` / `Get-MicDevices`), crash-recovery journal tracking for `micDspStarted`, orphaned DSP recovery logging in `Repair-OrphanedWatcherState`, and mic enhancement state in `Show-Status`.
+- **v3.2** — Phase 1 hardening: eliminated empty catch blocks, fixed adaptive purge cooldown bug, fixed parser errors, verified module loads. Added built-in microphone DSP pipeline (`Start-MicEnhancement` / `Stop-MicEnhancement` / `Test-MicEnhancement` / `Get-MicDevices`), crash-recovery journal tracking for `micDspStarted`, orphaned DSP recovery logging in `Repair-OrphanedWatcherState`, and mic enhancement state in `Show-Status`. Added always-on, auto-adjusting raw input buffer (`RawInputBuffer.psm1`) for gaming and generic mice (including devices without vendor driver settings), with journaled/reversible session application and crash recovery; fixed module export/build integration issues (duplicate NetTune exports, GameBoost mic-bridge export cleanup, build packaging).
 - **v3.1** — Added usage profiles (Gaming/Development/DailyUse), microphone enhancement companion bridge, low-spec auto-detection, universal watch, frame-time diagnostics, staged ramp system, crash-safe recovery journal.
 - **v3.0** — Windows-only rewrite; removed cross-platform code; session-scoped watcher with auto-exit.
