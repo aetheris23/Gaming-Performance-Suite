@@ -30,7 +30,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "startup"; Description: "Start watcher at user sign-in"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checked
+Name: "startup"; Description: "Start watcher at user sign-in"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "GamingPerformanceSuite.zip"; DestDir: "{tmp}"; Flags: deleteafterinstall
