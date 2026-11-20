@@ -158,8 +158,8 @@
             ResolutionScalePercent = 75
             PreferIntegerScale     = $true
             StretchedResolution    = $false
-            ProfileTiers           = @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Native'; Android = 'Medium'; Default = 'Medium' }
-            GameTierOverrides      = @{ 'VALORANT-Win64' = 'Native' }
+            ProfileTiers           = @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Medium'; Android = 'Medium'; Default = 'Medium' }
+            GameTierOverrides      = @{}
             UniversalWatch         = $true
             ImmersiveWindowThreshold = 0.90
             FrameGeneration        = @{ Enabled = $false; ToolPath = '' }  # set Enabled=$true + ToolPath if you own Lossless Scaling
@@ -411,18 +411,14 @@
     ProfileTiers = @{
         Emulator    = 'Medium'   # emulators upscale crisp at half/quarter steps
         Steam       = 'Medium'   # balanced for most AAA titles
-        Competitive = 'Native'   # NO display/fullscreen-mode switch (keeps aim + range visibility)
+        Competitive = 'Medium'   # render at 75% for all games by default
         Android     = 'Medium'   # Android emulators are very GPU-heavy
         Default     = 'Medium'   # any unclassified game
     }
 
     # Per-game tier override (process name WITHOUT .exe -> tier).
-    # Beats the profile default above. VALORANT is pinned to Native so a
-    # re-edit of the competitive default above can never silently re-enable
-    # the 540p/60Hz drop for it. Delete this line to let other esports titles
-    # follow the Competitive default instead:
+    # Empty by default so all games follow the 75% default.
     GameTierOverrides = @{
-        'VALORANT-Win64' = 'Native'   # keep aim + long-range visibility intact
         # 'pcsx2'          = 'Low'
         # 'cs2'            = 'High'
         # 'dolphin'        = 'Native'

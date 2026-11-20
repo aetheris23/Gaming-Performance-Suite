@@ -829,7 +829,7 @@ function Get-GameScalePercent {
     if ($Settings.ContainsKey('ProfileTiers'))      { $pTiers = $Settings['ProfileTiers'] }
     if ($Settings.ContainsKey('GameTierOverrides')) { $o      = $Settings['GameTierOverrides'] }
 
-    $fallback = 66
+    $fallback = 75
     if ($Settings.ContainsKey('ScalePercent')) { $fallback = [int]$Settings['ScalePercent'] }
 
     # 1) per-game override (exact, case-insensitive process name)
@@ -1292,7 +1292,7 @@ function Start-GameWatcher {
         [switch]$PurgeOnGameLaunch,          # one purge shortly after a game is detected
         [bool]$AllowMidGamePurge = $false,   # opt-in: standby purges can hitch active gameplay
         [hashtable]$ProfileOverrides = @{},
-        [hashtable]$ResolutionSettings = @{ ScalePercent = 66; PreferIntegerScale = $true; Stretched = $false },
+        [hashtable]$ResolutionSettings = @{ ScalePercent = 75; PreferIntegerScale = $true; Stretched = $false },
         [hashtable]$FrameGenSettings   = @{ Enabled = $false; ToolPath = '' },
         [hashtable]$MicEnhanceSettings = @{ Enabled = $false; ToolPath = ''; Profile = 'Default'; AutoLaunchWithGame = $true; RestoreOnExit = $true },
         [hashtable]$RawInputBufferSettings = @{ Enabled = $true; AlwaysOn = $true; AutoAdjust = $true; MouseDataQueueSize = 0; DisablePointerPrecision = $false },
@@ -1558,7 +1558,7 @@ function Start-GameWatcher {
         if ($frameDiag) { $frameDiagSettings.Enabled = $true } else { $frameDiagEnabled = $false }
     }
 
-    $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 66 }
+    $scalePct = if ($ResolutionSettings['ScalePercent'])      { [int]$ResolutionSettings['ScalePercent'] }      else { 75 }
     $prefInt  = if ($null -ne $ResolutionSettings['PreferIntegerScale']) { [bool]$ResolutionSettings['PreferIntegerScale'] } else { $true }
     $stretch  = if ($null -ne $ResolutionSettings['Stretched']) { [bool]$ResolutionSettings['Stretched'] } else { $false }
 

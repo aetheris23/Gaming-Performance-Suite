@@ -30,7 +30,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "startup"; Description: "Start watcher at user sign-in"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "startup"; Description: "Start watcher at user sign-in"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checked
 
 [Files]
 Source: "GamingPerformanceSuite.zip"; DestDir: "{tmp}"; Flags: deleteafterinstall
@@ -47,13 +47,13 @@ Name: "{group}\Stop Gaming Performance Suite"; Filename: "{app}\Stop-GamingSuite
 Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\Start-GamingSuite.bat"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Start-GamingSuite.bat"; Parameters: "-AutoStart"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Start-Watcher-Hidden.bat"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c """"{app}\Stop-GamingSuite.bat"""" & timeout /t 2 >nul"; Flags: runhidden
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamingPerformanceSuiteAutoStart"; ValueData: """{app}\Start-GamingSuite.bat"" -AutoStart"; Flags: uninsdeletevalue; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "GamingPerformanceSuiteAutoStart"; ValueData: "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\src\Main.ps1"" -AutoStart"; Flags: uninsdeletevalue; Tasks: startup
 
 [Code]
 function InitializeSetup(): Boolean;

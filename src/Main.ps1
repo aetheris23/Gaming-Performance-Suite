@@ -74,11 +74,11 @@ $preGameOpt   = if ($null -ne $cfg['PreGameOptimization'])   { [bool]$cfg['PreGa
 $prePurge     = if ($null -ne $cfg['PrePurgeBeforeLaunch'])  { [bool]$cfg['PrePurgeBeforeLaunch'] }  else { $true }
 
 $resSettings = @{
-    ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 66 }
+    ScalePercent      = if ($cfg['ResolutionScalePercent']) { [int]$cfg['ResolutionScalePercent'] } else { 75 }
     PreferIntegerScale= if ($null -ne $cfg['PreferIntegerScale']) { [bool]$cfg['PreferIntegerScale'] } else { $true }
     Stretched         = if ($null -ne $cfg['StretchedResolution']) { [bool]$cfg['StretchedResolution'] } else { $false }
     Tiers             = if ($cfg['ResolutionTiers'])      { $cfg['ResolutionTiers'] }      else { @{ Low = 55; Medium = 75; High = 88; Native = 0 } }
-    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Native'; Android = 'Medium'; Default = 'Medium' } }
+    ProfileTiers      = if ($cfg['ProfileTiers'])         { $cfg['ProfileTiers'] }         else { @{ Emulator = 'Medium'; Steam = 'Medium'; Competitive = 'Medium'; Android = 'Medium'; Default = 'Medium' } }
     GameTierOverrides = if ($cfg['GameTierOverrides'])    { $cfg['GameTierOverrides'] }    else { @{} }
 }
 # Session lifecycle: after the last monitored game closes, the watcher
